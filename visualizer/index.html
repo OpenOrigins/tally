@@ -1,0 +1,755 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>OpenOrigins Log Visualizer</title>
+<style>
+* { box-sizing: border-box; margin: 0; padding: 0; }
+:root {
+  --bg: #0d1117; --surface: #161b22; --surface2: #21262d;
+  --border: #30363d; --text: #e6edf3; --muted: #7d8590;
+  --a: #2f81f7; --b: #a371f7; --oo: #f0883e;
+  --green: #3fb950; --yellow: #e3b341; --red: #f85149; --cyan: #22d3ee;
+  --hb: #3d444d;
+}
+body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif; font-size:14px; height:100vh; display:flex; flex-direction:column; overflow:hidden; }
+
+/* Header */
+.hdr { padding:13px 24px; border-bottom:1px solid var(--border); background:var(--surface); display:flex; align-items:center; gap:16px; flex-shrink:0; }
+.hdr-logo { font-size:15px; font-weight:700; display:flex; align-items:center; gap:8px; }
+.hdr-logo span { color:var(--oo); }
+.hdr-reset { margin-left:auto; }
+
+/* ── Drop screen ── */
+#dropScreen { flex:1; display:flex; flex-direction:column; align-items:center; justify-content:center; gap:32px; padding:40px; overflow:hidden; }
+.drop-intro { text-align:center; }
+.drop-intro h2 { font-size:18px; font-weight:600; margin-bottom:8px; }
+.drop-intro p { color:var(--muted); font-size:13px; line-height:1.6; }
+.drop-zones { display:flex; align-items:center; gap:20px; width:100%; max-width:680px; }
+.drop-zone {
+  flex:1; border:2px dashed var(--border); border-radius:12px; padding:32px 20px;
+  text-align:center; cursor:pointer; transition:border-color .2s, background .2s;
+  background:var(--surface); min-height:160px; display:flex; flex-direction:column;
+  align-items:center; justify-content:center; gap:8px; position:relative;
+}
+.drop-zone:hover, .drop-zone.over { border-color:var(--oo); background:rgba(240,136,62,.05); }
+.drop-zone.loaded { border-style:solid; border-color:var(--green); background:rgba(63,185,80,.05); }
+.drop-zone.loaded-a { border-color:var(--a); background:rgba(47,129,247,.05); }
+.drop-zone.loaded-b { border-color:var(--b); background:rgba(163,113,247,.05); }
+.dz-icon { font-size:28px; }
+.dz-label { font-size:13px; font-weight:600; color:var(--muted); }
+.dz-sublabel { font-size:11px; color:var(--muted); }
+.dz-name { font-size:13px; font-weight:600; color:var(--text); }
+.dz-org { font-size:11px; color:var(--muted); margin-top:2px; }
+.dz-check { font-size:20px; color:var(--green); }
+.dz-change { font-size:11px; color:var(--muted); margin-top:6px; text-decoration:underline; cursor:pointer; }
+.dz-arrow { font-size:22px; color:var(--border); flex-shrink:0; }
+.drop-hint { font-size:12px; color:var(--muted); text-align:center; }
+.hidden-input { display:none; }
+
+/* ── Visualizer ── */
+#viz { flex:1; display:none; flex-direction:column; overflow:hidden; }
+#viz.active { display:flex; }
+
+.scene-bar { padding:9px 24px; background:var(--surface); border-bottom:1px solid var(--border); font-size:13px; color:var(--muted); flex-shrink:0; line-height:1.4; }
+.scene-bar strong { color:var(--text); }
+
+.main { flex:1; overflow-y:auto; padding:20px 24px; }
+.swimlane { display:grid; grid-template-columns:1fr 56px 1fr; max-width:900px; margin:0 auto; }
+
+.lane-head { padding:10px 14px; border-radius:8px 8px 0 0; margin-bottom:6px; font-weight:600; font-size:13px; border:1px solid transparent; border-bottom:none; }
+.lane-head.a { background:rgba(47,129,247,.08); border-color:rgba(47,129,247,.25); color:var(--a); }
+.lane-head.b { background:rgba(163,113,247,.08); border-color:rgba(163,113,247,.25); color:var(--b); }
+.lane-head .org { font-weight:400; color:var(--muted); font-size:11px; margin-top:2px; }
+.col-a { grid-column:1; } .col-c { grid-column:2; } .col-b { grid-column:3; }
+
+/* Event cards */
+.ev { border:1px solid var(--border); border-radius:6px; padding:9px 12px; margin-bottom:5px; background:var(--surface); opacity:0; transition:opacity .22s, transform .22s; transform:translateY(3px); }
+.ev.show { opacity:1; transform:none; }
+.ev.hb { padding:4px 10px; background:transparent; border-color:var(--hb); }
+.ev.border-warn { border-color:rgba(227,179,65,.5); }
+.ev.border-bad  { border-color:rgba(248,81,73,.5); }
+
+.ev-head { display:flex; align-items:center; gap:7px; margin-bottom:3px; }
+.badge { font-size:10px; font-weight:700; padding:2px 6px; border-radius:4px; text-transform:uppercase; letter-spacing:.4px; white-space:nowrap; }
+.b-start  { background:rgba(63,185,80,.15);  color:var(--green); }
+.b-end    { background:rgba(248,81,73,.15);  color:var(--red); }
+.b-hb     { background:var(--hb);            color:var(--muted); }
+.b-instr  { background:rgba(47,129,247,.15); color:var(--a); }
+.b-action { background:rgba(227,179,65,.15); color:var(--yellow); }
+.b-result { background:rgba(34,211,238,.15); color:var(--cyan); }
+.b-hoff   { background:rgba(240,136,62,.18); color:var(--oo); }
+
+.ev-time { font-size:11px; color:var(--muted); font-family:'SF Mono','Fira Code',monospace; }
+.restart-tag { font-size:10px; color:var(--red); }
+.ev-label { font-size:13px; line-height:1.4; }
+.ev-detail { font-size:11px; color:var(--muted); margin-top:3px; }
+
+.hash-pill { display:inline-block; background:var(--surface2); border:1px solid var(--border); border-radius:4px; padding:1px 6px; font-family:'SF Mono','Fira Code',monospace; font-size:11px; color:var(--muted); margin-top:4px; }
+.hash-pill.bad { border-color:var(--red);   color:var(--red);   background:rgba(248,81,73,.08); }
+.hash-pill.ok  { border-color:rgba(63,185,80,.4); color:var(--green); }
+
+.banner { border-radius:4px; padding:6px 8px; margin-top:6px; font-size:12px; line-height:1.4; }
+.banner.warn { background:rgba(227,179,65,.08); border:1px solid rgba(227,179,65,.3); color:var(--yellow); }
+.banner.bad  { background:rgba(248,81,73,.08);  border:1px solid rgba(248,81,73,.3);  color:var(--red); }
+.banner.ok   { background:rgba(63,185,80,.08);  border:1px solid rgba(63,185,80,.3);  color:var(--green); }
+
+/* Gap + ghost */
+.gap-block { border:1px dashed var(--red); border-radius:6px; padding:10px 12px; margin-bottom:5px; background:rgba(248,81,73,.04); opacity:0; transition:opacity .22s; }
+.gap-block.show { opacity:1; }
+.gap-title { font-size:11px; font-weight:700; color:var(--red); letter-spacing:.8px; text-transform:uppercase; }
+.gap-sub { font-size:11px; color:rgba(248,81,73,.55); margin-top:3px; }
+.gap-slots { display:flex; gap:5px; margin-top:8px; }
+.gap-slot { flex:1; border:1px dashed rgba(248,81,73,.25); border-radius:4px; padding:4px 6px; text-align:center; font-size:10px; color:rgba(248,81,73,.4); font-family:'SF Mono','Fira Code',monospace; }
+
+.ghost { border:1px dashed rgba(248,81,73,.3); border-radius:6px; padding:8px 12px; margin-bottom:5px; background:rgba(248,81,73,.02); opacity:0; transition:opacity .22s; }
+.ghost.show { opacity:1; }
+.ghost-label { font-size:12px; color:rgba(248,81,73,.6); font-style:italic; }
+.ghost-sub { font-size:11px; color:rgba(248,81,73,.35); margin-top:2px; }
+
+/* Controls */
+.controls { padding:10px 24px; border-top:1px solid var(--border); background:var(--surface); display:flex; align-items:center; gap:10px; flex-shrink:0; }
+.btn { padding:5px 13px; border-radius:6px; border:1px solid var(--border); background:var(--surface2); color:var(--text); cursor:pointer; font-size:13px; transition:all .15s; }
+.btn:hover:not(:disabled) { background:var(--border); }
+.btn:disabled { opacity:.35; cursor:not-allowed; }
+.btn.primary { background:var(--oo); border-color:var(--oo); color:#000; font-weight:600; }
+.btn.primary:hover { opacity:.9; }
+.prog-wrap { flex:1; height:3px; background:var(--border); border-radius:2px; overflow:hidden; max-width:180px; }
+.prog-fill { height:100%; background:var(--oo); transition:width .2s; }
+.step-lbl { font-size:12px; color:var(--muted); }
+
+/* Dispute overlay */
+.overlay { position:fixed; inset:0; background:rgba(13,17,23,.97); z-index:100; display:flex; flex-direction:column; align-items:center; padding:36px 24px; overflow-y:auto; opacity:0; pointer-events:none; transition:opacity .22s; }
+.overlay.show { opacity:1; pointer-events:all; }
+.d-panel { max-width:740px; width:100%; }
+.d-hdr { display:flex; align-items:center; gap:12px; margin-bottom:20px; }
+.d-hdr h2 { font-size:17px; font-weight:600; }
+.oo-pill { background:rgba(240,136,62,.12); border:1px solid rgba(240,136,62,.35); color:var(--oo); padding:3px 10px; border-radius:6px; font-size:12px; font-weight:600; }
+.d-close { margin-left:auto; }
+
+.finding { border:1px solid var(--border); border-radius:8px; overflow:hidden; margin-bottom:14px; }
+.f-head { padding:10px 14px; font-size:13px; font-weight:600; display:flex; align-items:center; gap:8px; }
+.f-head.red    { background:rgba(248,81,73,.1);  color:var(--red); }
+.f-head.yellow { background:rgba(227,179,65,.1); color:var(--yellow); }
+.f-head.green  { background:rgba(63,185,80,.1);  color:var(--green); }
+.f-body { padding:14px; background:var(--surface); font-size:13px; line-height:1.6; }
+
+.evidence { display:flex; gap:10px; margin-top:12px; align-items:flex-start; }
+.ev-box { flex:1; border:1px solid var(--border); border-radius:6px; padding:9px 10px; background:var(--surface2); font-size:12px; }
+.ev-box-lbl { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.5px; margin-bottom:5px; }
+.ev-box.a .ev-box-lbl { color:var(--a); }
+.ev-box.b .ev-box-lbl { color:var(--b); }
+.ev-box.neutral .ev-box-lbl { color:var(--muted); }
+.ev-box.neq .ev-box-lbl { color:var(--red); }
+.ev-vs { color:var(--muted); font-size:14px; font-weight:700; padding-top:22px; flex-shrink:0; }
+
+.verdict { background:rgba(240,136,62,.05); border:1px solid rgba(240,136,62,.25); border-radius:8px; padding:14px 16px; margin-top:4px; }
+.verdict-lbl { font-size:10px; font-weight:700; text-transform:uppercase; letter-spacing:.8px; color:var(--oo); margin-bottom:8px; }
+.verdict p { font-size:13px; line-height:1.6; }
+
+.no-findings { text-align:center; padding:40px; color:var(--muted); font-size:14px; }
+.no-findings .big { font-size:32px; margin-bottom:12px; }
+</style>
+</head>
+<body>
+
+<div class="hdr">
+  <div class="hdr-logo"><span>◈</span> OpenOrigins Log Visualizer</div>
+  <button class="btn hdr-reset" id="btnReset" style="display:none" onclick="resetToDropScreen()">← Load different files</button>
+</div>
+
+<!-- Drop screen -->
+<div id="dropScreen">
+  <div class="drop-intro">
+    <h2>Drop two agent log files</h2>
+    <p>Load a sender's log and a receiver's log from any OpenOrigins-compatible session.<br>The visualizer will replay the session and surface any anomalies.</p>
+  </div>
+  <div class="drop-zones">
+    <div class="drop-zone" id="zoneA" onclick="browseFile('a')" ondragover="onDragOver(event,'a')" ondragleave="onDragLeave('a')" ondrop="onDrop(event,'a')">
+      <div class="dz-icon" id="dzIconA">📤</div>
+      <div class="dz-label" id="dzLabelA">Sender's log</div>
+      <div class="dz-sublabel" id="dzSubA">Drag & drop or click to browse</div>
+    </div>
+    <div class="dz-arrow">→</div>
+    <div class="drop-zone" id="zoneB" onclick="browseFile('b')" ondragover="onDragOver(event,'b')" ondragleave="onDragLeave('b')" ondrop="onDrop(event,'b')">
+      <div class="dz-icon" id="dzIconB">📥</div>
+      <div class="dz-label" id="dzLabelB">Receiver's log</div>
+      <div class="dz-sublabel" id="dzSubB">Drag & drop or click to browse</div>
+    </div>
+  </div>
+  <div class="drop-hint">Expects the JSON format defined in the OpenOrigins Agent Log Specification v0.2</div>
+  <input type="file" accept=".json" class="hidden-input" id="fileInputA" onchange="onFileInput(event,'a')">
+  <input type="file" accept=".json" class="hidden-input" id="fileInputB" onchange="onFileInput(event,'b')">
+</div>
+
+<!-- Visualizer -->
+<div id="viz">
+  <div class="scene-bar"><strong id="sceneTitle"></strong><span id="sceneDesc"></span></div>
+  <div class="main">
+    <div class="swimlane">
+      <div class="col-a" id="headA"></div><div class="col-c"></div><div class="col-b" id="headB"></div>
+      <div class="col-a" id="laneA"></div><div class="col-c"></div><div class="col-b" id="laneB"></div>
+    </div>
+  </div>
+  <div class="controls">
+    <button class="btn" id="btnPrev" onclick="prev()" disabled>← Prev</button>
+    <button class="btn" id="btnNext" onclick="next()">Next →</button>
+    <button class="btn" id="btnAuto" onclick="toggleAuto()">▶ Auto</button>
+    <button class="btn" id="btnAll"  onclick="showAll()">Show All</button>
+    <div class="prog-wrap"><div class="prog-fill" id="pFill"></div></div>
+    <span class="step-lbl" id="stepLbl">0 / 0</span>
+    <button class="btn primary" id="btnDispute" style="display:none" onclick="openDispute()">View OpenOrigins Analysis →</button>
+  </div>
+</div>
+
+<!-- Dispute overlay -->
+<div class="overlay" id="overlay">
+  <div class="d-panel" id="dPanel"></div>
+</div>
+
+<script>
+// ─── STATE ───────────────────────────────────────────────────────────────────
+let logs = { a: null, b: null };   // parsed JSON
+let step = 0;
+let stepEls = [];
+let autoTimer = null;
+let analysis = null;
+
+// ─── DROP ZONE ───────────────────────────────────────────────────────────────
+
+function onDragOver(e, side) {
+  e.preventDefault();
+  document.getElementById('zone' + side.toUpperCase()).classList.add('over');
+}
+function onDragLeave(side) {
+  document.getElementById('zone' + side.toUpperCase()).classList.remove('over');
+}
+function onDrop(e, side) {
+  e.preventDefault();
+  onDragLeave(side);
+  const file = e.dataTransfer.files[0];
+  if (file) readFile(file, side);
+}
+function browseFile(side) {
+  document.getElementById('fileInput' + side.toUpperCase()).click();
+}
+function onFileInput(e, side) {
+  const file = e.target.files[0];
+  if (file) readFile(file, side);
+  e.target.value = '';
+}
+
+function readFile(file, side) {
+  const reader = new FileReader();
+  reader.onload = e => {
+    try {
+      const json = JSON.parse(e.target.result);
+      logs[side] = json;
+      markZoneLoaded(side, json);
+      if (logs.a && logs.b) setTimeout(visualize, 200);
+    } catch (err) {
+      alert('Could not parse JSON: ' + err.message);
+    }
+  };
+  reader.readAsText(file);
+}
+
+function markZoneLoaded(side, json) {
+  const info = extractAgentInfo(json);
+  const S = side.toUpperCase();
+  const zone = document.getElementById('zone' + S);
+  zone.classList.remove('over');
+  zone.classList.add('loaded', 'loaded-' + side);
+  document.getElementById('dzIcon'  + S).textContent = '✓';
+  document.getElementById('dzLabel' + S).innerHTML   = `<div class="dz-name">${info.name}</div><div class="dz-org">${info.org}</div>`;
+  document.getElementById('dzSub'   + S).innerHTML   = `<span class="dz-change">Change</span>`;
+}
+
+// ─── PARSE ───────────────────────────────────────────────────────────────────
+
+function extractAgentInfo(json) {
+  const ss = (json.records || []).find(r => r.record_type === 'SESSION_START');
+  const rawVersion = ss?.agent_version || json._meta?.agent_id || 'Unknown Agent';
+  const name = rawVersion.split('/')[0] || rawVersion;
+  const rawOrg = ss?.principal?.id || '';
+  const org = clean(rawOrg).replace('org:', '') || 'Unknown';
+  return { name, org };
+}
+
+function clean(v) {
+  if (!v) return '';
+  return String(v).replace(/^\[(ARB|PRV|PUB)\]\s*/i, '');
+}
+
+function getTimestamp(r) {
+  return r.session_started_at || r.session_ended_at || r.instruction_received_at ||
+         r.action_timestamp || r.result_received_at || r.handoff_timestamp || r.timestamp || '';
+}
+
+function fmtTime(iso) {
+  if (!iso) return '';
+  try { return new Date(iso).toISOString().substring(11, 19); } catch { return iso; }
+}
+
+function shortHash(h) {
+  if (!h) return '';
+  return h.length > 24 ? h.substring(0, 22) + '…' : h;
+}
+
+// ─── ANALYSE ─────────────────────────────────────────────────────────────────
+
+function analyse(recA, recB) {
+  return {
+    handoffMismatches: findHandoffMismatches(recA, recB),
+    gapsA:  findGaps(recA),
+    gapsB:  findGaps(recB),
+    stateBreaksA: findStateBreaks(recA),
+    stateBreaksB: findStateBreaks(recB),
+    deviancesA: findDeviances(recA),
+    deviancesB: findDeviances(recB),
+  };
+}
+
+function findHandoffMismatches(recA, recB) {
+  const mismatches = {};
+  recA.filter(r => r.record_type === 'HANDOFF').forEach(ha => {
+    const hb = recB.find(r => r.record_type === 'HANDOFF' && r.handoff_id === ha.handoff_id);
+    if (hb && ha.payload_hash !== hb.payload_hash) {
+      mismatches[ha.handoff_id] = { hashA: ha.payload_hash, hashB: hb.payload_hash };
+    }
+  });
+  return mismatches;
+}
+
+function findGaps(records) {
+  const hbs = records
+    .filter(r => r.record_type === 'HEARTBEAT')
+    .map(r => ({ t: new Date(r.timestamp).getTime(), ts: r.timestamp }))
+    .filter(h => !isNaN(h.t))
+    .sort((a, b) => a.t - b.t);
+
+  const gaps = [];
+  for (let i = 1; i < hbs.length; i++) {
+    const diff = hbs[i].t - hbs[i - 1].t;
+    if (diff > 90_000) {  // more than 1.5 × 60s — at least one missed slot
+      const missed = Math.max(1, Math.round(diff / 60_000) - 1);
+      gaps.push({ fromTs: hbs[i - 1].ts, toTs: hbs[i].ts, diffMs: diff, missed });
+    }
+  }
+  return gaps;
+}
+
+function findStateBreaks(records) {
+  const breaks = [];
+  let lastPost = null, lastRec = null;
+  records
+    .filter(r => r.record_type === 'ACTION_TAKEN')
+    .sort((a, b) => new Date(a.action_timestamp) - new Date(b.action_timestamp))
+    .forEach(r => {
+      if (lastPost && r.pre_state_hash && r.pre_state_hash !== lastPost) {
+        breaks.push({ at: r.action_timestamp, expected: lastPost, actual: r.pre_state_hash, prevAt: lastRec?.action_timestamp });
+      }
+      if (r.post_state_hash) { lastPost = r.post_state_hash; lastRec = r; }
+    });
+  return breaks;
+}
+
+function findDeviances(records) {
+  return records
+    .filter(r => r.record_type === 'ACTION_TAKEN' && r.deviance_flag?.deviated === true)
+    .map(r => ({ at: r.action_timestamp, category: clean(r.deviance_flag.delta_category) || 'unspecified' }));
+}
+
+// ─── BUILD STEPS ─────────────────────────────────────────────────────────────
+
+function buildSteps(records, lane, an) {
+  const sorted = [...records].sort((a, b) => new Date(getTimestamp(a)) - new Date(getTimestamp(b)));
+  const steps = [];
+
+  // Find gap timestamps for this lane's heartbeats
+  const gaps = lane === 'a' ? an.gapsA : an.gapsB;
+  const gapSet = new Set(gaps.map(g => g.fromTs));  // timestamps AFTER which a gap follows
+
+  let prevHbTs = null;
+  let gapInserted = false;
+
+  sorted.forEach(r => {
+    if (r.record_type === 'HEARTBEAT') {
+      const ts = r.timestamp;
+      if (prevHbTs && gapSet.has(prevHbTs) && !gapInserted) {
+        const gap = gaps.find(g => g.fromTs === prevHbTs);
+        steps.push({ kind:'gap', lane, gap });
+        steps.push({ kind:'ghost', lane, gap });
+        gapInserted = true;
+      }
+      const afterGap = gapInserted && prevHbTs && gapSet.has(prevHbTs);
+      steps.push({ kind:'record', lane, record:r, afterGap: gapInserted && !afterGap ? false : afterGap });
+      // Mark the first heartbeat after a gap
+      if (gapInserted) { steps[steps.length-1].firstAfterGap = true; gapInserted = false; }
+      prevHbTs = ts;
+    } else {
+      steps.push({ kind:'record', lane, record:r });
+    }
+  });
+
+  return steps;
+}
+
+function mergeSteps(stepsA, stepsB) {
+  // Agent A's steps first (sender), then B's, preserving within-agent order
+  return [...stepsA, ...stepsB];
+}
+
+// ─── RENDER ──────────────────────────────────────────────────────────────────
+
+function visualize() {
+  const infoA = extractAgentInfo(logs.a);
+  const infoB = extractAgentInfo(logs.b);
+  const recA  = logs.a.records || [];
+  const recB  = logs.b.records || [];
+
+  analysis = analyse(recA, recB);
+
+  const stepsA = buildSteps(recA, 'a', analysis);
+  const stepsB = buildSteps(recB, 'b', analysis);
+  const allSteps = mergeSteps(stepsA, stepsB);
+
+  step = 0; stepEls = [];
+
+  // Scene bar
+  document.getElementById('sceneTitle').textContent = `${infoA.name}  →  ${infoB.name}   `;
+  document.getElementById('sceneDesc').textContent  = 'Step through the session to see how events unfolded.';
+
+  // Lane headers
+  document.getElementById('headA').innerHTML = laneHead('a', infoA);
+  document.getElementById('headB').innerHTML = laneHead('b', infoB);
+
+  const lA = document.getElementById('laneA'); lA.innerHTML = '';
+  const lB = document.getElementById('laneB'); lB.innerHTML = '';
+
+  allSteps.forEach(s => {
+    const el = buildEl(s, analysis);
+    stepEls.push(el);
+    (s.lane === 'a' ? lA : lB).appendChild(el);
+  });
+
+  document.getElementById('dropScreen').style.display = 'none';
+  document.getElementById('viz').classList.add('active');
+  document.getElementById('btnReset').style.display = 'block';
+  document.getElementById('overlay').classList.remove('show');
+  document.getElementById('btnDispute').style.display = 'none';
+  tick();
+}
+
+function laneHead(side, info) {
+  return `<div class="lane-head ${side}"><div>${info.name}</div><div class="org">${info.org}</div></div>`;
+}
+
+// ─── BUILD DOM ELEMENTS ───────────────────────────────────────────────────────
+
+function buildEl(s, an) {
+  if (s.kind === 'gap')   return buildGapEl(s);
+  if (s.kind === 'ghost') return buildGhostEl(s);
+  return buildCardEl(s, an);
+}
+
+function buildGapEl(s) {
+  const g = s.gap;
+  const from = fmtTime(g.fromTs), to = fmtTime(g.toTs);
+  const slots = [];
+  for (let i = 1; i <= Math.min(g.missed, 5); i++) {
+    const t = new Date(new Date(g.fromTs).getTime() + i * 60_000);
+    slots.push(`<div class="gap-slot">${fmtTime(t.toISOString())}<br>MISSING</div>`);
+  }
+  if (g.missed > 5) slots.push(`<div class="gap-slot">+${g.missed-5} more<br>MISSING</div>`);
+  const d = document.createElement('div');
+  d.className = 'gap-block';
+  d.innerHTML = `<div class="gap-title">⚠ Anchor offline — ${g.missed} heartbeat slot${g.missed>1?'s':''} missing</div>
+    <div class="gap-sub">${from} → ${to} · no records written during this interval</div>
+    <div class="gap-slots">${slots.join('')}</div>`;
+  return d;
+}
+
+function buildGhostEl(s) {
+  const d = document.createElement('div');
+  d.className = 'ghost';
+  d.innerHTML = `<div class="ghost-label">👻 Unknown activity — actions taken here are unverifiable</div>
+    <div class="ghost-sub">No Anchor records exist for this interval. State may have changed.</div>`;
+  return d;
+}
+
+function buildCardEl(s, an) {
+  const r = s.record;
+  const rt = r.record_type;
+
+  // Determine border class
+  let extraCls = '';
+  if (rt === 'HANDOFF') {
+    const m = an.handoffMismatches[r.handoff_id];
+    if (m) extraCls = 'border-bad';
+  }
+  if (rt === 'ACTION_TAKEN') {
+    const side = s.lane;
+    const breaks = side === 'a' ? an.stateBreaksA : an.stateBreaksB;
+    if (breaks.some(b => b.at === r.action_timestamp)) extraCls = 'border-warn';
+    if (r.deviance_flag?.deviated) extraCls = extraCls || 'border-warn';
+  }
+
+  const d = document.createElement('div');
+  d.className = `ev ${rt === 'HEARTBEAT' ? 'hb' : ''} ${extraCls}`.trim();
+
+  const time = fmtTime(getTimestamp(r));
+  let html = `<div class="ev-head">
+    <span class="badge ${badgeCls(rt)}">${badgeTxt(rt)}</span>
+    <span class="ev-time">${time}${s.firstAfterGap ? ' <span class="restart-tag"> ← anchor restart</span>' : ''}</span>
+  </div>`;
+
+  if (rt !== 'HEARTBEAT') {
+    const label = getLabel(r);
+    const detail = getDetail(r);
+    if (label)  html += `<div class="ev-label">${label}</div>`;
+    if (detail) html += `<div class="ev-detail">${detail}</div>`;
+
+    if (rt === 'HANDOFF') {
+      const m = an.handoffMismatches[r.handoff_id];
+      const hashCls = m ? (r.emitting_party === 'receiver' ? 'bad' : '') : (r.emitting_party === 'receiver' ? 'ok' : '');
+      html += `<div><span class="hash-pill ${hashCls}">${shortHash(r.payload_hash)}</span></div>`;
+      if (m && r.emitting_party === 'receiver') {
+        html += `<div class="banner bad">⚠ Hash differs from sender's record. OpenOrigins flags this as a material contradiction.</div>`;
+      }
+      if (!m && r.emitting_party === 'receiver') {
+        html += `<div class="banner ok">✓ Payload hash matches sender's anchored record.</div>`;
+      }
+    }
+
+    if (rt === 'ACTION_TAKEN') {
+      const side = s.lane;
+      const breaks = side === 'a' ? an.stateBreaksA : an.stateBreaksB;
+      const brk = breaks.find(b => b.at === r.action_timestamp);
+      if (brk) {
+        html += `<div class="banner warn">⚠ State hash discontinuity: pre_state_hash (${shortHash(brk.actual)}) ≠ post_state_hash of preceding action (${shortHash(brk.expected)}). Unrecorded activity occurred between these records.</div>`;
+      }
+      if (r.deviance_flag?.deviated) {
+        const cat = clean(r.deviance_flag.delta_category) || 'unspecified';
+        html += `<div class="banner warn">⚠ deviance_flag: deviated = true · category: ${cat}</div>`;
+      }
+    }
+  } else {
+    html += `<div class="ev-detail">heartbeat · ${time}</div>`;
+  }
+
+  d.innerHTML = html;
+  return d;
+}
+
+function getLabel(r) {
+  switch (r.record_type) {
+    case 'SESSION_START':        return 'Session started';
+    case 'SESSION_END':          return `Session ended — ${r.outcome || 'unknown'}`;
+    case 'INSTRUCTION_RECEIVED': return clean(r.declared_intent?.summary) || '';
+    case 'ACTION_TAKEN':
+      if (r.tool?.name) return `Called ${r.tool.name}`;
+      if (r.action_type === 'decision') return 'Decision recorded';
+      return 'Action taken';
+    case 'RESULT_RECEIVED':      return clean(r.result_interpretation?.summary) || '';
+    case 'HANDOFF':
+      return r.emitting_party === 'sender' ? 'Sent payload to receiver' : 'Received payload from sender';
+    default: return '';
+  }
+}
+
+function getDetail(r) {
+  if (r.record_type === 'ACTION_TAKEN' && r.tool?.server && r.tool?.name) {
+    return `tool: ${r.tool.server} → ${r.tool.name}`;
+  }
+  return '';
+}
+
+function badgeCls(rt) {
+  return { SESSION_START:'b-start', SESSION_END:'b-end', HEARTBEAT:'b-hb',
+           INSTRUCTION_RECEIVED:'b-instr', ACTION_TAKEN:'b-action',
+           RESULT_RECEIVED:'b-result', HANDOFF:'b-hoff' }[rt] || '';
+}
+function badgeTxt(rt) {
+  return { SESSION_START:'Session Start', SESSION_END:'Session End', HEARTBEAT:'Heartbeat',
+           INSTRUCTION_RECEIVED:'Instruction', ACTION_TAKEN:'Action',
+           RESULT_RECEIVED:'Result', HANDOFF:'Handoff' }[rt] || rt;
+}
+
+// ─── REPLAY ──────────────────────────────────────────────────────────────────
+
+function next() {
+  if (step >= stepEls.length) return;
+  const el = stepEls[step++];
+  el.classList.add('show');
+  el.scrollIntoView({ behavior:'smooth', block:'nearest' });
+  tick();
+}
+function prev() {
+  if (step <= 0) return;
+  stepEls[--step].classList.remove('show');
+  tick();
+}
+function showAll() {
+  stopAuto();
+  stepEls.forEach(e => e.classList.add('show'));
+  step = stepEls.length;
+  tick();
+}
+function toggleAuto() {
+  if (autoTimer) { stopAuto(); return; }
+  document.getElementById('btnAuto').textContent = '⏸ Pause';
+  autoTimer = setInterval(() => { if (step >= stepEls.length) { stopAuto(); return; } next(); }, 520);
+}
+function stopAuto() {
+  clearInterval(autoTimer); autoTimer = null;
+  document.getElementById('btnAuto').textContent = '▶ Auto';
+}
+function tick() {
+  const n = stepEls.length;
+  document.getElementById('btnPrev').disabled = step <= 0;
+  document.getElementById('btnNext').disabled = step >= n;
+  document.getElementById('stepLbl').textContent = `${step} / ${n}`;
+  document.getElementById('pFill').style.width = (n ? step/n*100 : 0) + '%';
+  document.getElementById('btnDispute').style.display = step >= n ? 'block' : 'none';
+}
+
+// ─── DISPUTE PANEL ───────────────────────────────────────────────────────────
+
+function openDispute() {
+  const an = analysis;
+  const infoA = extractAgentInfo(logs.a);
+  const infoB = extractAgentInfo(logs.b);
+  const findings = buildFindings(an, infoA, infoB);
+
+  let html = `<div class="d-hdr">
+    <span class="oo-pill">◈ OpenOrigins</span>
+    <h2>Session analysis</h2>
+    <button class="btn d-close" onclick="closeDispute()">✕ Close</button>
+  </div>`;
+
+  if (findings.length === 0) {
+    html += `<div class="no-findings"><div class="big">✓</div>No anomalies detected in public-tier fields.<br>Both logs are internally consistent and the handoff hashes agree.</div>`;
+  } else {
+    findings.forEach(f => {
+      if (f.kind === 'verdict') {
+        html += `<div class="verdict"><div class="verdict-lbl">◈ OpenOrigins — Next Steps</div><p>${f.text}</p></div>`;
+        return;
+      }
+      html += `<div class="finding"><div class="f-head ${f.cls}">${f.icon} ${f.title}</div><div class="f-body"><p>${f.body}</p>`;
+      if (f.evidence) {
+        html += `<div class="evidence">`;
+        f.evidence.forEach((ev, i) => {
+          if (i > 0) html += `<div class="ev-vs">≠</div>`;
+          html += `<div class="ev-box ${ev.cls}"><div class="ev-box-lbl">${ev.label}</div><span class="hash-pill ${ev.bad?'bad':''}">${ev.value}</span></div>`;
+        });
+        html += `</div>`;
+      }
+      html += `</div></div>`;
+    });
+  }
+
+  document.getElementById('dPanel').innerHTML = html;
+  document.getElementById('overlay').classList.add('show');
+}
+
+function buildFindings(an, infoA, infoB) {
+  const items = [];
+
+  // Handoff mismatches
+  Object.entries(an.handoffMismatches).forEach(([id, m]) => {
+    items.push({ kind:'finding', cls:'red', icon:'⚠',
+      title: 'Material contradiction: HANDOFF payload hashes do not match',
+      body: `Handoff <code>${id}</code> was independently anchored by both parties. OpenOrigins compared the two records and found differing payload_hash values. Neither log is authoritative on its own — the contradiction is the finding.`,
+      evidence: [
+        { cls:'a', label:`${infoA.name} (sender) recorded`, value: shortHash(m.hashA), bad:false },
+        { cls:'b', label:`${infoB.name} (receiver) recorded`, value: shortHash(m.hashB), bad:true },
+      ]
+    });
+  });
+
+  // Heartbeat gaps — Agent A
+  an.gapsA.forEach(g => {
+    items.push({ kind:'finding', cls:'red', icon:'⚠',
+      title: `Heartbeat gap in ${infoA.name}'s log — ${g.missed} slot${g.missed>1?'s':''} missing`,
+      body: `Anchor emits HEARTBEAT every 60 seconds during inactivity. A gap of ${Math.round(g.diffMs/1000)}s was detected between ${fmtTime(g.fromTs)} and ${fmtTime(g.toTs)} — ${g.missed} expected heartbeat${g.missed>1?' slots were':' slot was'} absent. This is detectable from PUBLIC-tier fields alone without reading any content. Silence is distinguishable from absence.`
+    });
+  });
+
+  // State hash breaks — Agent A
+  an.stateBreaksA.forEach(b => {
+    items.push({ kind:'finding', cls:'red', icon:'⚠',
+      title: `State hash discontinuity in ${infoA.name}'s log at ${fmtTime(b.at)}`,
+      body: `The pre_state_hash on this ACTION_TAKEN record does not chain from the post_state_hash of the preceding action. If no unrecorded actions occurred between them, these values must be identical.`,
+      evidence: [
+        { cls:'neutral', label:`Expected (post_state_hash at ${fmtTime(b.prevAt)})`, value: shortHash(b.expected), bad:false },
+        { cls:'neq',     label:`Actual pre_state_hash recorded`, value: shortHash(b.actual), bad:true },
+      ]
+    });
+  });
+
+  // State hash breaks — Agent B
+  an.stateBreaksB.forEach(b => {
+    items.push({ kind:'finding', cls:'red', icon:'⚠',
+      title: `State hash discontinuity in ${infoB.name}'s log at ${fmtTime(b.at)}`,
+      body: `The pre_state_hash on this ACTION_TAKEN record does not chain from the post_state_hash of the preceding action.`,
+      evidence: [
+        { cls:'neutral', label:`Expected (post_state_hash at ${fmtTime(b.prevAt)})`, value: shortHash(b.expected), bad:false },
+        { cls:'neq',     label:`Actual pre_state_hash recorded`, value: shortHash(b.actual), bad:true },
+      ]
+    });
+  });
+
+  // Deviances
+  an.deviancesA.forEach(d => {
+    items.push({ kind:'finding', cls:'yellow', icon:'◦',
+      title: `${infoA.name} recorded deviance at ${fmtTime(d.at)}`,
+      body: `deviance_flag.deviated = true · delta_category: ${d.category}. The agent declared it acted differently from its stated intent.`
+    });
+  });
+  an.deviancesB.forEach(d => {
+    items.push({ kind:'finding', cls:'yellow', icon:'◦',
+      title: `${infoB.name} recorded deviance at ${fmtTime(d.at)}`,
+      body: `deviance_flag.deviated = true · delta_category: ${d.category}.`
+    });
+  });
+
+  if (items.length > 0) {
+    const anyRed = items.some(i => i.cls === 'red');
+    items.push({ kind:'verdict',
+      text: anyRed
+        ? 'One or more material findings were identified from PUBLIC-tier fields alone. OpenOrigins proceeds to arbitrator-tier unsealing per the standard process, or requests voluntary production of private-field plaintext to verify content against anchored hashes.'
+        : 'No structural anomalies were found. All deviance was self-reported by the agents. If content-level verification is needed, OpenOrigins may request voluntary production of private-field plaintext.'
+    });
+  }
+
+  return items;
+}
+
+function closeDispute() { document.getElementById('overlay').classList.remove('show'); }
+
+// ─── RESET ───────────────────────────────────────────────────────────────────
+
+function resetToDropScreen() {
+  stopAuto();
+  logs = { a: null, b: null };
+  analysis = null;
+
+  // Reset drop zones
+  ['A','B'].forEach(S => {
+    const zone = document.getElementById('zone'+S);
+    zone.className = 'drop-zone';
+    document.getElementById('dzIcon'+S).textContent  = S==='A' ? '📤' : '📥';
+    document.getElementById('dzLabel'+S).textContent = S==='A' ? "Sender's log" : "Receiver's log";
+    document.getElementById('dzSub'+S).textContent   = 'Drag & drop or click to browse';
+  });
+
+  document.getElementById('viz').classList.remove('active');
+  document.getElementById('dropScreen').style.display = '';
+  document.getElementById('btnReset').style.display = 'none';
+  document.getElementById('overlay').classList.remove('show');
+}
+</script>
+</body>
+</html>
