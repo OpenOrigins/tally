@@ -1,0 +1,273 @@
+{
+  "_meta": {
+    "description": "Anchor log emitted by the intake verification agent (Agent A), running on Meridian Wire Service infrastructure. Agent A is instructed to verify a batch of images submitted by a freelance journalist before they can be cleared for publication. It calls an Anchor provenance check and a reverse image search tool, produces per-image verdicts, then hands off to Agent B (Castellan Publishing's editorial system).",
+    "anchor_instance_id": "anchor_inst_MERIDIAN_INTAKE_01",
+    "agent_id": "did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
+    "visibility_note": "Fields marked [PUB] are transmitted as plaintext to OpenOrigins. Fields marked [ARB] are transmitted encrypted and unsealed only on formal dispute. Fields marked [PRV] are hashes and URIs only — plaintext stays on Meridian infra."
+  },
+
+  "records": [
+
+    {
+      "record_type": "SESSION_START",
+      "schema_version": "0.2",
+
+      "session_id":    "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "agent_id":      "did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
+      "agent_version": "meridian-intake-agent/2.4.1 (claude-sonnet-4-6)",
+
+      "principal": {
+        "type": "organisation",
+        "id":   "[ARB] org:meridian-wire-service"
+      },
+
+      "authority_scope_hash": "sha256:a3f8d1b2c94e7f6a1d2b3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4",
+      "authority_scope_uri":  "[PRV] s3://meridian-agent-logs/authority/scope-2026-04-30.json",
+      "authority_granted_at": "2026-04-30T06:00:00Z",
+      "authority_expires_at": "[ARB] 2026-04-30T18:00:00Z",
+
+      "delegation_chain": {
+        "depth":      2,
+        "chain_hash": "sha256:b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5",
+        "chain":      ["[ARB] org:meridian-wire-service", "[ARB] did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi"],
+        "chain_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/delegation-chain.json"
+      },
+
+      "session_started_at": "2026-04-30T09:14:03Z",
+      "anchor_receipt":     "rcpt_01HZ7KQAB1XYZPQ00001"
+    },
+
+    {
+      "record_type": "HEARTBEAT",
+      "schema_version": "0.2",
+
+      "agent_id":           "did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
+      "anchor_instance_id": "anchor_inst_MERIDIAN_INTAKE_01",
+      "active_sessions":    ["sess_01HZ7KQMN2VXBP94FDJR8TWYC"],
+      "timestamp":          "2026-04-30T09:14:03Z",
+      "anchor_receipt":     "rcpt_01HZ7KQAB1XYZPQ00002"
+    },
+
+    {
+      "record_type": "INSTRUCTION_RECEIVED",
+      "schema_version": "0.2",
+
+      "session_id":     "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "instruction_id": "instr_01HZ7KQMN2VXBP94FDJR8001",
+
+      "sender": {
+        "id":        "[ARB] user:a.osei@meridian-wire.com",
+        "signature": "sig:3045022100e8f2d3a1b4c5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1022045a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2"
+      },
+
+      "instruction_hash":        "sha256:b7e3f2a1d4c8e9f0a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5",
+      "instruction_uri":         "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/instruction-001.json",
+      "instruction_received_at": "2026-04-30T09:14:05Z",
+
+      "context_snapshot_hash": "sha256:c9f4a3b2e5d8f1a0b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6",
+      "context_snapshot_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/context-snap-001.json",
+
+      "declared_intent": {
+        "summary":     "[ARB] Verify provenance of 4 images submitted under job JOB-2026-04-30-0091; produce per-image verdicts; hand off to Castellan editorial agent.",
+        "detail_hash": "sha256:d1a2b3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+        "detail_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/intent-001.json"
+      },
+
+      "anchor_receipt": "rcpt_01HZ7KQAB1XYZPQ00003"
+    },
+
+    {
+      "record_type": "ACTION_TAKEN",
+      "schema_version": "0.2",
+
+      "session_id":     "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "action_id":      "act_01HZ7KQMN2VXBP94FDJR8002",
+      "instruction_id": "instr_01HZ7KQMN2VXBP94FDJR8001",
+
+      "action_type": "tool_call",
+
+      "tool": {
+        "server":      "openorigins-anchor-mcp/v1",
+        "name":        "anchor_verify_batch",
+        "params_hash": "sha256:d1a2b3c4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2",
+        "params_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/params-act-002.json"
+      },
+
+      "pre_state_hash":  "sha256:e2b3c4d5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3",
+      "pre_state_uri":   "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-pre-act-002.json",
+      "post_state_hash": "sha256:f3c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+      "post_state_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-post-act-002.json",
+
+      "action_timestamp": "2026-04-30T09:14:09Z",
+      "anchor_receipt":   "rcpt_01HZ7KQAB1XYZPQ00004",
+
+      "deviance_flag": {
+        "deviated":       false,
+        "delta_category": null,
+        "delta_hash":     null,
+        "delta_uri":      null
+      }
+    },
+
+    {
+      "record_type": "RESULT_RECEIVED",
+      "schema_version": "0.2",
+
+      "session_id": "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "action_id":  "act_01HZ7KQMN2VXBP94FDJR8002",
+
+      "result_hash":        "sha256:a4d5e6f7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
+      "result_uri":         "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/result-act-002.json",
+      "result_received_at": "2026-04-30T09:14:22Z",
+
+      "result_interpretation": {
+        "summary":     "[ARB] 3 of 4 images carry valid Anchor receipts. IMG-0091-003 has no provenance record and no C2PA manifest.",
+        "detail_hash": "sha256:b5e6f7a8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6",
+        "detail_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/interpretation-act-002.json"
+      },
+
+      "exception": {
+        "occurred":         false,
+        "type":             null,
+        "description_hash": null,
+        "description_uri":  null
+      }
+    },
+
+    {
+      "record_type": "ACTION_TAKEN",
+      "schema_version": "0.2",
+
+      "session_id":     "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "action_id":      "act_01HZ7KQMN2VXBP94FDJR8003",
+      "instruction_id": "instr_01HZ7KQMN2VXBP94FDJR8001",
+
+      "action_type": "tool_call",
+
+      "tool": {
+        "server":      "reverse-image-search-mcp/v2",
+        "name":        "search_prior_publication",
+        "params_hash": "sha256:c6f7a8b9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7",
+        "params_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/params-act-003.json"
+      },
+
+      "pre_state_hash":  "sha256:f3c4d5e6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4",
+      "pre_state_uri":   "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-pre-act-003.json",
+      "post_state_hash": "sha256:a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+      "post_state_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-post-act-003.json",
+
+      "action_timestamp": "2026-04-30T09:14:25Z",
+      "anchor_receipt":   "rcpt_01HZ7KQAB1XYZPQ00005",
+
+      "deviance_flag": {
+        "deviated":       false,
+        "delta_category": null,
+        "delta_hash":     null,
+        "delta_uri":      null
+      }
+    },
+
+    {
+      "record_type": "RESULT_RECEIVED",
+      "schema_version": "0.2",
+
+      "session_id": "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "action_id":  "act_01HZ7KQMN2VXBP94FDJR8003",
+
+      "result_hash":        "sha256:b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9",
+      "result_uri":         "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/result-act-003.json",
+      "result_received_at": "2026-04-30T09:14:51Z",
+
+      "result_interpretation": {
+        "summary":     "[ARB] IMG-0091-003 matches a prior publication from 2024-03-14 with a different caption and location attribute. Images 001, 002, 004 return no prior matches.",
+        "detail_hash": "sha256:c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0",
+        "detail_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/interpretation-act-003.json"
+      },
+
+      "exception": {
+        "occurred":         false,
+        "type":             null,
+        "description_hash": null,
+        "description_uri":  null
+      }
+    },
+
+    {
+      "record_type": "ACTION_TAKEN",
+      "schema_version": "0.2",
+
+      "session_id":     "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "action_id":      "act_01HZ7KQMN2VXBP94FDJR8004",
+      "instruction_id": "instr_01HZ7KQMN2VXBP94FDJR8001",
+
+      "action_type": "decision",
+      "tool":        null,
+
+      "pre_state_hash":  "sha256:a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8",
+      "pre_state_uri":   "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-pre-act-004.json",
+      "post_state_hash": "sha256:d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1",
+      "post_state_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/state-post-act-004.json",
+
+      "action_timestamp": "2026-04-30T09:14:53Z",
+      "anchor_receipt":   "rcpt_01HZ7KQAB1XYZPQ00006",
+
+      "deviance_flag": {
+        "deviated":       false,
+        "delta_category": null,
+        "delta_hash":     null,
+        "delta_uri":      null
+      }
+    },
+
+    {
+      "record_type": "HANDOFF",
+      "schema_version": "0.2",
+
+      "session_id":     "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+      "handoff_id":     "hoff_01HZ7KQMN2VXBP94FDJR8005",
+      "emitting_party": "sender",
+
+      "sender": {
+        "agent_id":  "did:key:z6MknSLrJoTcukLrE435hVNQT4JUhbvWLX4kUzqkEStBU8Vi",
+        "org_id":    "[ARB] org:meridian-wire-service",
+        "signature": "sig:3045022100f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0022046b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3"
+      },
+
+      "receiver": {
+        "agent_id":        "did:key:z6MkpTUria3zvHUqzECYzcBDCKRJBkqrHu3jcLkbFCeqwMnC",
+        "org_id":          "[ARB] org:castellan-publishing",
+        "signature":       null,
+        "acknowledged_at": null
+      },
+
+      "payload_hash":           "sha256:e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2",
+      "payload_uri":            "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/handoff-payload-005.json",
+      "handoff_timestamp":      "2026-04-30T09:14:57Z",
+      "acknowledgement_status": "pending",
+
+      "anchor_receipt": "rcpt_01HZ7KQAB1XYZPQ00007"
+    },
+
+    {
+      "record_type": "SESSION_END",
+      "schema_version": "0.2",
+
+      "session_id": "sess_01HZ7KQMN2VXBP94FDJR8TWYC",
+
+      "outcome":      "success",
+      "outcome_hash": "sha256:f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5f6a7b8c9d0e1f2a3",
+      "outcome_uri":  "[PRV] s3://meridian-agent-logs/sess_01HZ7KQMN2VXBP94FDJR8TWYC/outcome.json",
+
+      "human_review": {
+        "required":      false,
+        "reviewer_id":   null,
+        "approved_at":   null,
+        "approval_hash": null
+      },
+
+      "session_ended_at": "2026-04-30T09:15:01Z",
+      "anchor_receipt":   "rcpt_01HZ7KQAB1XYZPQ00008"
+    }
+
+  ]
+}
