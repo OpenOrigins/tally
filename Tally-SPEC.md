@@ -392,7 +392,7 @@ These record types must each receive an individual Anchor receipt (not batched):
 - How you store logs internally
 - What your agents do
 - Identity issuance (how agents acquire DIDs or key pairs)
-- The capability token format referenced by `authority_scope` — addressed in a companion spec
+- The capability token format referenced by `authority_scope` — we will update this repo with recommended formats as and when they are developed
 
 ---
 
