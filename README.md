@@ -2,7 +2,7 @@
 
 A spec and standard for trustworthy agent interactions.
 
-This branch adds a minimal Codex audit wrapper in two deployment modes:
+Tally includes a minimal Codex audit wrapper in two deployment modes:
 
 - **Docker container mode** runs Codex inside a controlled container and writes
   hook logs to a host-mounted log directory.
