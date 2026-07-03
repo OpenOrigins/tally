@@ -30,6 +30,33 @@ The Dockerfile installs the current Codex CLI with OpenAI's standalone installer
 docker compose run --rm codex
 ```
 
+## Run A Prompt
+
+For read-only prompts:
+
+```bash
+docker compose run --rm \
+  -e TALLY_RUN_ID=summary-demo \
+  codex codex exec --json -s read-only \
+  -c approval_policy='"never"' \
+  "Summarize this repository in 5 bullets."
+```
+
+For prompts that should edit files, use Docker as the sandbox boundary:
+
+```bash
+docker compose run --rm \
+  -e TALLY_RUN_ID=edit-demo \
+  codex codex exec --json -s danger-full-access \
+  -c approval_policy='"never"' \
+  "Create hello_from_codex.txt with one sentence."
+```
+
+`workspace-write` can fail inside Docker because Codex's inner filesystem
+sandbox uses Linux namespace features that are often unavailable inside an
+unprivileged container. With this wrapper, the mounted project directory is the
+workspace boundary: only mount folders you want Codex to access.
+
 ## Use This Laptop's Codex Auth
 
 If this laptop is already signed in with the Codex CLI and has a file-based
