@@ -1,0 +1,9 @@
+.git
+.DS_Store
+**/.DS_Store
+.tally-codex-logs*/
+codex-audit/target/
+codex-host/target/
+codex-container/logs/
+hello_from_codex.txt
+python_script/

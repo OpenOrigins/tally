@@ -1,11 +1,13 @@
 # Tally Codex Audit Container
 
-This container runs Codex inside Docker through a small wrapper that installs
-Codex lifecycle hooks and writes audit logs to a host-mounted directory.
+This container runs Codex inside Docker through the shared Rust `tally-codex`
+binary. The binary wraps the Codex CLI, receives Codex lifecycle hooks, writes
+audit logs to a host-mounted directory, and runs the hook heartbeat daemon.
 
 The first milestone is:
 
-- wrap the `codex` CLI
+- build and copy the shared `tally-codex` Rust binary
+- wrap the `codex` CLI with `tally-codex wrap`
 - copy a known `hooks.json` into `CODEX_HOME`
 - record Codex hook events as JSONL
 - write Tally-style records for session/prompt/tool/stop events
@@ -22,7 +24,8 @@ cd codex-container
 docker compose build
 ```
 
-The Dockerfile installs the current Codex CLI with OpenAI's standalone installer.
+The Dockerfile uses a Rust builder stage for `tally-codex`, then installs the
+current Codex CLI with OpenAI's standalone installer in the final image.
 
 ## Run Interactive Codex
 
@@ -113,7 +116,7 @@ The important streams are:
 ## Hook Heartbeat
 
 Hooks emit immediate `hook-event` heartbeat records whenever Codex fires a hook.
-On `SessionStart`, the hook logger starts a small `hook-heartbeat` daemon that
+On `SessionStart`, `tally-codex hook SessionStart` starts a `hook-heartbeat` daemon that
 emits periodic heartbeats until `Stop` or until the idle timeout is reached.
 
 ## Security Notes

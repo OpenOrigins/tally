@@ -8,7 +8,8 @@ Codex Desktop uses the same local Codex configuration as the CLI and IDE
 extension. User-level hooks load independently of project trust.
 
 The runtime hook is a native binary built from Rust source. Codex hooks call the
-binary directly; they do not call a shell wrapper or Python.
+shared `tally-codex` binary directly; they do not call a shell wrapper or
+Python. The same binary is used by the Docker container mode.
 
 ## Install
 
@@ -26,7 +27,7 @@ By default, logs go to:
 The hook binary is built to:
 
 ```text
-~/.tally-codex/bin/tally-host-hook
+~/.tally-codex/bin/tally-codex
 ```
 
 The installer backs up any existing `~/.codex/hooks.json` before editing it and
@@ -75,4 +76,5 @@ export TALLY_HOOK_HEARTBEAT_IDLE_SECONDS=300
 ```
 
 The uninstaller removes only hook handlers whose command contains
-`tally-host-hook`. It also backs up `~/.codex/hooks.json` before editing.
+`tally-codex hook` or older Tally hook commands. It also backs up
+`~/.codex/hooks.json` before editing.

@@ -11,3 +11,4 @@
 .tally-codex-logs*/
 codex-container/logs/
 codex-host/target/
+codex-audit/target/

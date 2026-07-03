@@ -1,7 +1,8 @@
 services:
   codex:
     build:
-      context: .
+      context: ..
+      dockerfile: codex-container/Dockerfile
     image: tally-codex-audit:local
     working_dir: /workspace
     stdin_open: true

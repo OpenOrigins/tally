@@ -7,6 +7,7 @@ export TALLY_WORKSPACE="${TALLY_WORKSPACE:-/workspace}"
 export TALLY_RUN_ID="${TALLY_RUN_ID:-run_$(date -u +%Y%m%dT%H%M%SZ)_$HOSTNAME}"
 export TALLY_AGENT_ID="${TALLY_AGENT_ID:-codex-container}"
 export TALLY_AGENT_VERSION="${TALLY_AGENT_VERSION:-codex-cli}"
+export PATH="/opt/tally-codex/bin:$PATH"
 
 mkdir -p "$CODEX_HOME" "$TALLY_LOG_ROOT" "$TALLY_LOG_ROOT/jsonl" "$TALLY_LOG_ROOT/tally" "$TALLY_LOG_ROOT/private" "$TALLY_LOG_ROOT/state"
 
@@ -27,14 +28,14 @@ if [ "$#" -eq 0 ]; then
 fi
 
 case "$1" in
-  bash|sh|python|python3|/bin/bash|/bin/sh)
+  bash|sh|/bin/bash|/bin/sh)
     exec "$@"
     ;;
   codex)
     shift
-    exec /opt/tally-codex/bin/tally-codex "$@"
+    exec /opt/tally-codex/bin/tally-codex wrap "$@"
     ;;
   *)
-    exec /opt/tally-codex/bin/tally-codex "$@"
+    exec /opt/tally-codex/bin/tally-codex wrap "$@"
     ;;
 esac

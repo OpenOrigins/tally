@@ -6,7 +6,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SessionStart",
+            "command": "/opt/tally-codex/bin/tally-codex hook SessionStart",
             "timeout": 15,
             "statusMessage": "Tally: recording Codex session start"
           }
@@ -18,7 +18,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py UserPromptSubmit",
+            "command": "/opt/tally-codex/bin/tally-codex hook UserPromptSubmit",
             "timeout": 15,
             "statusMessage": "Tally: recording user prompt"
           }
@@ -31,7 +31,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PreToolUse",
+            "command": "/opt/tally-codex/bin/tally-codex hook PreToolUse",
             "timeout": 15,
             "statusMessage": "Tally: recording pre-tool action"
           }
@@ -44,7 +44,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PermissionRequest",
+            "command": "/opt/tally-codex/bin/tally-codex hook PermissionRequest",
             "timeout": 15,
             "statusMessage": "Tally: recording permission request"
           }
@@ -57,7 +57,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PostToolUse",
+            "command": "/opt/tally-codex/bin/tally-codex hook PostToolUse",
             "timeout": 15,
             "statusMessage": "Tally: recording post-tool result"
           }
@@ -70,7 +70,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PreCompact",
+            "command": "/opt/tally-codex/bin/tally-codex hook PreCompact",
             "timeout": 15,
             "statusMessage": "Tally: recording pre-compact"
           }
@@ -83,7 +83,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PostCompact",
+            "command": "/opt/tally-codex/bin/tally-codex hook PostCompact",
             "timeout": 15,
             "statusMessage": "Tally: recording post-compact"
           }
@@ -96,7 +96,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SubagentStart",
+            "command": "/opt/tally-codex/bin/tally-codex hook SubagentStart",
             "timeout": 15,
             "statusMessage": "Tally: recording subagent start"
           }
@@ -109,7 +109,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SubagentStop",
+            "command": "/opt/tally-codex/bin/tally-codex hook SubagentStop",
             "timeout": 15,
             "statusMessage": "Tally: recording subagent stop"
           }
@@ -121,7 +121,7 @@
         "hooks": [
           {
             "type": "command",
-            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py Stop",
+            "command": "/opt/tally-codex/bin/tally-codex hook Stop",
             "timeout": 15,
             "statusMessage": "Tally: recording Codex stop"
           }
