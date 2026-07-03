@@ -1,0 +1,132 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SessionStart",
+            "timeout": 15,
+            "statusMessage": "Tally: recording Codex session start"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py UserPromptSubmit",
+            "timeout": 15,
+            "statusMessage": "Tally: recording user prompt"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PreToolUse",
+            "timeout": 15,
+            "statusMessage": "Tally: recording pre-tool action"
+          }
+        ]
+      }
+    ],
+    "PermissionRequest": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PermissionRequest",
+            "timeout": 15,
+            "statusMessage": "Tally: recording permission request"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PostToolUse",
+            "timeout": 15,
+            "statusMessage": "Tally: recording post-tool result"
+          }
+        ]
+      }
+    ],
+    "PreCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PreCompact",
+            "timeout": 15,
+            "statusMessage": "Tally: recording pre-compact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py PostCompact",
+            "timeout": 15,
+            "statusMessage": "Tally: recording post-compact"
+          }
+        ]
+      }
+    ],
+    "SubagentStart": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SubagentStart",
+            "timeout": 15,
+            "statusMessage": "Tally: recording subagent start"
+          }
+        ]
+      }
+    ],
+    "SubagentStop": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py SubagentStop",
+            "timeout": 15,
+            "statusMessage": "Tally: recording subagent stop"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 /opt/tally-codex/hooks/codex_hook_logger.py Stop",
+            "timeout": 15,
+            "statusMessage": "Tally: recording Codex stop"
+          }
+        ]
+      }
+    ]
+  }
+}

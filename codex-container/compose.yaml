@@ -1,0 +1,19 @@
+services:
+  codex:
+    build:
+      context: .
+    image: tally-codex-audit:local
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    environment:
+      TALLY_LOG_ROOT: /var/log/tally-codex
+      TALLY_WORKSPACE: /workspace
+      TALLY_HOOK_HEARTBEAT_SECONDS: "60"
+    volumes:
+      - ..:/workspace
+      - codex-home:/codex-home
+      - ../.tally-codex-logs:/var/log/tally-codex
+
+volumes:
+  codex-home:

@@ -7,3 +7,6 @@
 .idea*
 .idea
 
+# Codex wrapper logs
+.tally-codex-logs*/
+codex-container/logs/
