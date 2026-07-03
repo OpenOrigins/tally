@@ -1,0 +1,26 @@
+#!/usr/bin/env bash
+set -Eeuo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+REPO_ROOT="$(cd "$SCRIPT_DIR/../.." && pwd)"
+LOGGER="$REPO_ROOT/codex-container/hooks/codex_hook_logger.py"
+
+PYTHON_BIN="${TALLY_PYTHON:-}"
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  PYTHON_BIN="$(command -v python || true)"
+fi
+if [ -z "$PYTHON_BIN" ]; then
+  echo "Tally Codex hook could not find python3 or python" >&2
+  exit 127
+fi
+
+export TALLY_LOG_ROOT="${TALLY_LOG_ROOT:-$HOME/.tally-codex/logs}"
+export TALLY_WORKSPACE="${TALLY_WORKSPACE:-$PWD}"
+export TALLY_AGENT_ID="${TALLY_AGENT_ID:-codex-desktop}"
+export TALLY_AGENT_VERSION="${TALLY_AGENT_VERSION:-codex-app}"
+export TALLY_HOOK_HEARTBEAT_SECONDS="${TALLY_HOOK_HEARTBEAT_SECONDS:-60}"
+
+exec "$PYTHON_BIN" "$LOGGER" "$@"

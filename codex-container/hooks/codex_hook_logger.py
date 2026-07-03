@@ -11,7 +11,7 @@ from typing import Any
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from lib.tally_audit import AuditSink, light_git_state, scrub_environment, sha256_hex, utc_now, write_json_atomic
+from lib.tally_audit import AuditSink, light_git_state, safe_slug, scrub_environment, sha256_hex, utc_now, write_json_atomic
 
 
 def read_hook_payload() -> tuple[Any, str]:
@@ -93,6 +93,16 @@ def extract_tool_server(payload: Any) -> str:
 def stable_id(prefix: str, value: Any) -> str:
     digest = sha256_hex(value).split(":", 1)[1][:16]
     return f"{prefix}_{digest}"
+
+
+def derive_run_id(payload: Any) -> str | None:
+    value = (
+        first_string_by_key(payload, {"session_id", "thread_id", "conversation_id", "conversationId"})
+        or os.environ.get("CODEX_THREAD_ID")
+    )
+    if not value:
+        return None
+    return safe_slug(f"codex_{value}", default="codex-session")
 
 
 def build_tally_record(
@@ -286,8 +296,12 @@ def update_heartbeat_state(
 
 def main() -> int:
     event_type = sys.argv[1] if len(sys.argv) > 1 else os.environ.get("CODEX_HOOK_EVENT", "unknown")
-    sink = AuditSink("codex-hooks")
     payload, raw = read_hook_payload()
+    if not os.environ.get("TALLY_RUN_ID"):
+        run_id = derive_run_id(payload)
+        if run_id:
+            os.environ["TALLY_RUN_ID"] = run_id
+    sink = AuditSink("codex-hooks")
     raw_ref = sink.private_payload(f"hook_{event_type}_{uuid.uuid4().hex[:8]}", payload)
     observed_at = utc_now()
     metadata = {
