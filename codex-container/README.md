@@ -3,7 +3,7 @@
 This container runs Codex inside Docker through a small wrapper that installs
 Codex lifecycle hooks and writes audit logs to a host-mounted directory.
 
-The first milestone is intentionally small:
+The first milestone is:
 
 - wrap the `codex` CLI
 - copy a known `hooks.json` into `CODEX_HOME`
