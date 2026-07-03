@@ -17,7 +17,7 @@ EOF
   exit 1
 fi
 
-docker compose -f "$SCRIPT_DIR/compose.yaml" run --rm --entrypoint /bin/bash codex -lc '
+docker compose -f "$SCRIPT_DIR/compose.yaml" run --rm -T --entrypoint /bin/bash codex -lc '
   set -Eeuo pipefail
   mkdir -p /codex-home
   umask 077
