@@ -7,6 +7,9 @@ user-level hooks to `~/.codex/hooks.json`.
 Codex Desktop uses the same local Codex configuration as the CLI and IDE
 extension. User-level hooks load independently of project trust.
 
+The runtime hook is a native binary built from Rust source. Codex hooks call the
+binary directly; they do not call a shell wrapper or Python.
+
 ## Install
 
 ```bash
@@ -18,6 +21,12 @@ By default, logs go to:
 
 ```text
 ~/.tally-codex/logs/
+```
+
+The hook binary is built to:
+
+```text
+~/.tally-codex/bin/tally-host-hook
 ```
 
 The installer backs up any existing `~/.codex/hooks.json` before editing it and

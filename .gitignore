@@ -10,3 +10,4 @@
 # Codex wrapper logs
 .tally-codex-logs*/
 codex-container/logs/
+codex-host/target/
