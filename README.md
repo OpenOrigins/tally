@@ -2,6 +2,14 @@
 
 A spec and standard for trustworthy agent interactions.
 
+Tally ships audit wrappers for two agent CLIs, each with the same design and
+deployment modes:
+
+- [Codex Audit Wrapper](#codex-audit-wrapper) — `tally-codex`, wrapping the
+  Codex CLI.
+- [Claude Code Audit Wrapper](#claude-code-audit-wrapper) — `tally-claude`,
+  wrapping the Claude Code CLI.
+
 ## Codex Audit Wrapper
 
 Tally includes a minimal Codex audit wrapper with two deployment modes:
@@ -363,6 +371,33 @@ docker compose -f claude-container/compose.yaml run --rm claude claude -p "Respo
 
 The auth import script copies `~/.claude.json` through stdin and does not
 print token contents.
+
+Or sign in interactively with a Claude subscription (no API key, no host
+login to import). Run this once in a real terminal — Claude Code prints a URL
+and a one-time code to complete in a browser:
+
+```bash
+docker compose -f claude-container/compose.yaml run --rm \
+  --entrypoint claude claude
+```
+
+The login is written to the `claude-home` Docker volume, so later
+`docker compose ... run` invocations reuse it — no re-login needed. Confirm it
+persisted, then run a prompt through the wrapper:
+
+```bash
+docker compose -f claude-container/compose.yaml run --rm \
+  --entrypoint claude claude login status
+docker compose -f claude-container/compose.yaml run --rm \
+  -e TALLY_RUN_ID=summary-demo \
+  claude claude -p "Summarize this repository in 5 bullets." \
+  --dangerously-skip-permissions
+```
+
+Because Docker is the workspace boundary, `--dangerously-skip-permissions` is
+the reliable flag for a fully non-interactive container run: it lets Claude
+Code use its tools without pausing for per-tool approval. Restrict access by
+mounting only the folders Claude Code should see.
 
 ### Desktop Host Mode
 
