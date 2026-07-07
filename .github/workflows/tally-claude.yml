@@ -1,0 +1,150 @@
+name: Tally Claude Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Image version (optional — leave blank to auto-compute from run number / SHA)'
+        required: false
+        type: string
+      tag_latest:
+        description: 'Also tag as :latest'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  ECR_REGISTRY: public.ecr.aws/openorigins
+  IMAGE_NAME: tally-claude
+
+jobs:
+  version:
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      short_sha: ${{ steps.version.outputs.short_sha }}
+      tag_latest: ${{ steps.version.outputs.tag_latest }}
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Determine Version
+        id: version
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tag_latest=${{ github.event.inputs.tag_latest }}" >> $GITHUB_OUTPUT
+
+          MANUAL_VERSION="${{ github.event.inputs.version }}"
+          if [[ -n "${MANUAL_VERSION// }" ]]; then
+            VERSION="${MANUAL_VERSION// /}"
+            VERSION="${VERSION#v}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "Using manual version: ${VERSION}"
+          else
+            BUILD_NUM=${{ github.run_number }}
+            VERSION="0.1.0-build.${BUILD_NUM}"
+            echo "version=${VERSION}" >> $GITHUB_OUTPUT
+            echo "Using computed version: ${VERSION}"
+          fi
+
+  build:
+    needs: version
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        platform:
+          - linux/amd64
+          - linux/arm64
+
+    steps:
+      - name: Checkout Codebase
+        uses: actions/checkout@v4
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.ECR_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.ECR_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to AWS Public ECR
+        run: |
+          aws ecr-public get-login-password --region us-east-1 | \
+            docker login --username AWS --password-stdin public.ecr.aws
+
+      - name: Extract platform name
+        id: platform
+        run: |
+          PLATFORM="${{ matrix.platform }}"
+          ARCH="${PLATFORM#linux/}"
+          echo "arch=${ARCH}" >> $GITHUB_OUTPUT
+
+      - name: Build and Push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: claude-container/Dockerfile
+          push: true
+          platforms: ${{ matrix.platform }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}-${{ steps.platform.outputs.arch }}
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.short_sha }}-${{ steps.platform.outputs.arch }}
+          cache-from: type=gha,scope=tally-claude-${{ matrix.platform }}
+          cache-to: type=gha,mode=max,scope=tally-claude-${{ matrix.platform }}
+
+  manifest:
+    needs: [version, build]
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.ECR_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.ECR_SECRET_ACCESS_KEY }}
+          aws-region: us-east-1
+
+      - name: Login to AWS Public ECR
+        run: |
+          aws ecr-public get-login-password --region us-east-1 | \
+            docker login --username AWS --password-stdin public.ecr.aws
+
+      - name: Create and Push Multi-arch Manifest
+        run: |
+          VERSION="${{ needs.version.outputs.version }}"
+          SHORT_SHA="${{ needs.version.outputs.short_sha }}"
+          TAG_LATEST="${{ needs.version.outputs.tag_latest }}"
+          REGISTRY="${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}"
+
+          docker buildx imagetools create -t ${REGISTRY}:${VERSION} \
+            ${REGISTRY}:${VERSION}-amd64 \
+            ${REGISTRY}:${VERSION}-arm64
+
+          docker buildx imagetools create -t ${REGISTRY}:${SHORT_SHA} \
+            ${REGISTRY}:${SHORT_SHA}-amd64 \
+            ${REGISTRY}:${SHORT_SHA}-arm64
+
+          if [[ "${TAG_LATEST}" == "true" ]]; then
+            docker buildx imagetools create -t ${REGISTRY}:latest \
+              ${REGISTRY}:${VERSION}-amd64 \
+              ${REGISTRY}:${VERSION}-arm64
+          fi
+
+          echo "Multi-arch manifests created:"
+          echo "  - ${REGISTRY}:${VERSION}"
+          echo "  - ${REGISTRY}:${SHORT_SHA}"
+          if [[ "${TAG_LATEST}" == "true" ]]; then
+            echo "  - ${REGISTRY}:latest"
+          fi
