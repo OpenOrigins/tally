@@ -1,0 +1,237 @@
+#!/usr/bin/env node
+// Anchor-style audit log for real Claude Code sessions in this project.
+//
+// Every wired hook event (see .claude/settings.json) pipes its JSON payload
+// into this script via stdin. It re-shapes that payload into a record that
+// mirrors the OpenOrigins Anchor log schema (SESSION_START, HEARTBEAT,
+// INSTRUCTION_RECEIVED, ACTION_TAKEN, RESULT_RECEIVED, HANDOFF, SESSION_END)
+// and appends exactly one JSON line to logs/anchor_log.jsonl — a single,
+// append-only, one-record-per-line file, same file for every session.
+//
+// This is a local, unsigned log: no real cryptography, no external anchor
+// service. pre_state_hash/post_state_hash are fixed placeholders (not
+// computed from real state) — deliberately, so the schema shape matches
+// without pretending to verify anything it doesn't. anchor_receipt values
+// are locally-generated sequence ids, not receipts from a real anchor.
+//
+// Runs as a pure observer: always exits 0 with no stdout, so it can never
+// block a tool call or influence a permission decision, same guarantee as
+// hooks/log_hook.sh which is wired alongside it.
+
+const fs = require('fs');
+const path = require('path');
+const crypto = require('crypto');
+const { spawn } = require('child_process');
+
+const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || path.resolve(__dirname, '..');
+const LOG_DIR = path.join(PROJECT_DIR, 'logs');
+const LOG_FILE = path.join(LOG_DIR, 'anchor_log.jsonl');
+const STATE_DIR = path.join(LOG_DIR, '.anchor_state');
+const HEARTBEAT_SCRIPT = path.join(__dirname, 'heartbeat_daemon.js');
+
+const FIXED_PRE_STATE_HASH = 'sha256:' + '0'.repeat(64) + ' (placeholder, not computed)';
+const FIXED_POST_STATE_HASH = 'sha256:' + '1'.repeat(64) + ' (placeholder, not computed)';
+
+fs.mkdirSync(LOG_DIR, { recursive: true });
+fs.mkdirSync(STATE_DIR, { recursive: true });
+
+function nowIso() {
+  return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
+}
+
+function shortId() {
+  return crypto.randomBytes(4).toString('hex');
+}
+
+function nextReceipt() {
+  const seqFile = path.join(STATE_DIR, 'seq.txt');
+  let seq = 0;
+  try { seq = parseInt(fs.readFileSync(seqFile, 'utf8'), 10) || 0; } catch (_) {}
+  seq += 1;
+  fs.writeFileSync(seqFile, String(seq));
+  return `rcpt_local_${String(seq).padStart(6, '0')}_${shortId()}`;
+}
+
+function statePath(sessionId) {
+  return path.join(STATE_DIR, `${sessionId}.json`);
+}
+
+function loadState(sessionId) {
+  try {
+    return JSON.parse(fs.readFileSync(statePath(sessionId), 'utf8'));
+  } catch (_) {
+    return { lastInstructionId: null };
+  }
+}
+
+function saveState(sessionId, state) {
+  fs.writeFileSync(statePath(sessionId), JSON.stringify(state));
+}
+
+function appendRecord(record) {
+  fs.appendFileSync(LOG_FILE, JSON.stringify(record) + '\n');
+}
+
+function truncate(value, max = 500) {
+  const s = typeof value === 'string' ? value : JSON.stringify(value);
+  if (s === undefined) return null;
+  return s.length > max ? s.slice(0, max) + `...(${s.length - max} more chars truncated)` : s;
+}
+
+function heartbeatPidFile(sessionId) {
+  return path.join(STATE_DIR, `${sessionId}.heartbeat.pid`);
+}
+
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function startHeartbeatDaemon(sessionId) {
+  const pidFile = heartbeatPidFile(sessionId);
+  try {
+    const existingPid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+    if (existingPid && isPidAlive(existingPid)) return; // already running for this session
+  } catch (_) {}
+
+  const child = spawn(process.execPath, [HEARTBEAT_SCRIPT, sessionId, LOG_FILE], {
+    detached: true,
+    stdio: 'ignore',
+    windowsHide: true,
+  });
+  fs.writeFileSync(pidFile, String(child.pid));
+  child.unref();
+}
+
+function stopHeartbeatDaemon(sessionId) {
+  const pidFile = heartbeatPidFile(sessionId);
+  try {
+    const pid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+    if (pid && isPidAlive(pid)) process.kill(pid);
+  } catch (_) {}
+  try { fs.unlinkSync(pidFile); } catch (_) {}
+}
+
+let raw = '';
+process.stdin.on('data', (chunk) => { raw += chunk; });
+process.stdin.on('end', () => {
+  try {
+    main(JSON.parse(raw));
+  } catch (_) {
+    // Malformed/empty stdin: stay a silent observer, never fail the real hook.
+  }
+  process.exit(0);
+});
+
+function main(payload) {
+  const event = payload.hook_event_name || 'Unknown';
+  const sessionId = `sess_${payload.session_id || 'unknown'}`;
+  const ts = nowIso();
+
+  switch (event) {
+    case 'SessionStart': {
+      appendRecord({
+        record_type: 'SESSION_START',
+        session_id: sessionId,
+        agent_id: 'local-agent:claude-code',
+        agent_version: payload.model || 'unknown',
+        principal: { type: 'user', id: 'user:shuhood@openorigins.com' },
+        source: payload.source || 'unknown',
+        session_started_at: ts,
+        anchor_receipt: nextReceipt(),
+      });
+      startHeartbeatDaemon(sessionId);
+      break;
+    }
+
+    case 'UserPromptSubmit': {
+      const instructionId = `instr_${shortId()}`;
+      const state = loadState(sessionId);
+      state.lastInstructionId = instructionId;
+      saveState(sessionId, state);
+
+      appendRecord({
+        record_type: 'INSTRUCTION_RECEIVED',
+        session_id: sessionId,
+        instruction_id: instructionId,
+        sender: { id: 'user:shuhood@openorigins.com' },
+        declared_intent: { summary: truncate(payload.prompt, 500) },
+        instruction_received_at: ts,
+        anchor_receipt: nextReceipt(),
+      });
+      break;
+    }
+
+    case 'PreToolUse': {
+      const state = loadState(sessionId);
+      appendRecord({
+        record_type: 'ACTION_TAKEN',
+        session_id: sessionId,
+        action_id: `act_${payload.tool_use_id || shortId()}`,
+        instruction_id: state.lastInstructionId,
+        action_type: 'tool_call',
+        tool: {
+          name: payload.tool_name || 'unknown',
+          params: truncate(payload.tool_input, 500),
+        },
+        pre_state_hash: FIXED_PRE_STATE_HASH,
+        post_state_hash: FIXED_POST_STATE_HASH,
+        action_timestamp: ts,
+        anchor_receipt: nextReceipt(),
+        deviance_flag: { deviated: false, delta_category: null },
+      });
+      break;
+    }
+
+    case 'PostToolUse': {
+      appendRecord({
+        record_type: 'RESULT_RECEIVED',
+        session_id: sessionId,
+        action_id: `act_${payload.tool_use_id || shortId()}`,
+        result_interpretation: { summary: truncate(payload.tool_response, 500) },
+        result_received_at: ts,
+        exception: { occurred: false },
+        anchor_receipt: nextReceipt(),
+      });
+      break;
+    }
+
+    case 'SubagentStart': {
+      appendRecord({
+        record_type: 'HANDOFF',
+        session_id: sessionId,
+        handoff_id: `hoff_${shortId()}`,
+        emitting_party: 'sender',
+        sender: { agent_id: 'local-agent:claude-code' },
+        receiver: { agent_id: `local-agent:subagent:${payload.agent_type || 'unknown'}` },
+        handoff_timestamp: ts,
+        acknowledgement_status: 'pending',
+        anchor_receipt: nextReceipt(),
+      });
+      break;
+    }
+
+    case 'SessionEnd': {
+      appendRecord({
+        record_type: 'SESSION_END',
+        session_id: sessionId,
+        outcome: payload.reason || 'unknown',
+        session_ended_at: ts,
+        anchor_receipt: nextReceipt(),
+      });
+      stopHeartbeatDaemon(sessionId);
+      try { fs.unlinkSync(statePath(sessionId)); } catch (_) {}
+      break;
+    }
+
+    default:
+      // Other wired events (PermissionRequest, PreCompact, PostCompact,
+      // SubagentStop) don't map cleanly onto the Anchor schema; they're
+      // still captured raw by hooks/log_hook.sh alongside this script.
+      break;
+  }
+}
