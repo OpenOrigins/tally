@@ -1,0 +1,12 @@
+{
+  "name": "tally-anchor-hook",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Anchor-style Claude Code audit hook (jsonl + SQLite log)",
+  "engines": {
+    "node": ">=22"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0"
+  }
+}

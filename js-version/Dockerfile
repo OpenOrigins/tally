@@ -39,6 +39,13 @@ WORKDIR /workspace
 COPY .claude/ /workspace/.claude/
 COPY hooks/ /workspace/hooks/
 COPY test/ /workspace/test/
+COPY package.json /workspace/package.json
+
+# better-sqlite3 is a native addon; build tools are needed to compile it
+# against Alpine's musl libc (no prebuilt binary is published for musl).
+RUN apk add --no-cache --virtual .build-deps python3 make g++ \
+    && npm install --omit=dev --prefix /workspace \
+    && apk del .build-deps
 
 RUN chmod +x /workspace/hooks/*.sh /workspace/test/*.sh
 

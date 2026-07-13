@@ -13,3 +13,9 @@
 codex-container/logs/
 codex-host/target/
 codex-audit/target/
+
+# js-version
+js-version/node_modules/
+js-version/logs/*.sqlite
+js-version/logs/*.sqlite-wal
+js-version/logs/*.sqlite-shm

@@ -5,8 +5,10 @@
 // into this script via stdin. It re-shapes that payload into a record that
 // mirrors the OpenOrigins Anchor log schema (SESSION_START, HEARTBEAT,
 // INSTRUCTION_RECEIVED, ACTION_TAKEN, RESULT_RECEIVED, HANDOFF, SESSION_END)
-// and appends exactly one JSON line to logs/anchor_log.jsonl — a single,
-// append-only, one-record-per-line file, same file for every session.
+// and appends exactly one JSON line to logs/anchor_log.jsonl (a single,
+// append-only, one-record-per-line file, same file for every session), and
+// inserts the same record as a row into logs/anchor_log.sqlite for queryable
+// storage.
 //
 // This is a local, unsigned log: no real cryptography, no external anchor
 // service. pre_state_hash/post_state_hash are fixed placeholders (not
@@ -22,10 +24,12 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { spawn } = require('child_process');
+const Database = require('better-sqlite3');
 
 const PROJECT_DIR = process.env.CLAUDE_PROJECT_DIR || path.resolve(__dirname, '..');
 const LOG_DIR = path.join(PROJECT_DIR, 'logs');
 const LOG_FILE = path.join(LOG_DIR, 'anchor_log.jsonl');
+const DB_FILE = path.join(LOG_DIR, 'anchor_log.sqlite');
 const STATE_DIR = path.join(LOG_DIR, '.anchor_state');
 const HEARTBEAT_SCRIPT = path.join(__dirname, 'heartbeat_daemon.js');
 
@@ -34,6 +38,24 @@ const FIXED_POST_STATE_HASH = 'sha256:' + '1'.repeat(64) + ' (placeholder, not c
 
 fs.mkdirSync(LOG_DIR, { recursive: true });
 fs.mkdirSync(STATE_DIR, { recursive: true });
+
+const db = new Database(DB_FILE);
+db.pragma('journal_mode = WAL');
+db.exec(`
+  CREATE TABLE IF NOT EXISTS anchor_log (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    record_type TEXT NOT NULL,
+    session_id TEXT,
+    anchor_receipt TEXT,
+    recorded_at TEXT NOT NULL,
+    payload TEXT NOT NULL
+  );
+  CREATE INDEX IF NOT EXISTS idx_anchor_log_session ON anchor_log (session_id);
+  CREATE INDEX IF NOT EXISTS idx_anchor_log_record_type ON anchor_log (record_type);
+`);
+const insertRecordStmt = db.prepare(
+  'INSERT INTO anchor_log (record_type, session_id, anchor_receipt, recorded_at, payload) VALUES (@record_type, @session_id, @anchor_receipt, @recorded_at, @payload)'
+);
 
 function nowIso() {
   return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -70,6 +92,13 @@ function saveState(sessionId, state) {
 
 function appendRecord(record) {
   fs.appendFileSync(LOG_FILE, JSON.stringify(record) + '\n');
+  insertRecordStmt.run({
+    record_type: record.record_type,
+    session_id: record.session_id || null,
+    anchor_receipt: record.anchor_receipt || null,
+    recorded_at: nowIso(),
+    payload: JSON.stringify(record),
+  });
 }
 
 function truncate(value, max = 500) {
@@ -98,7 +127,7 @@ function startHeartbeatDaemon(sessionId) {
     if (existingPid && isPidAlive(existingPid)) return; // already running for this session
   } catch (_) {}
 
-  const child = spawn(process.execPath, [HEARTBEAT_SCRIPT, sessionId, LOG_FILE], {
+  const child = spawn(process.execPath, [HEARTBEAT_SCRIPT, sessionId, LOG_FILE, DB_FILE], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
@@ -124,6 +153,7 @@ process.stdin.on('end', () => {
   } catch (_) {
     // Malformed/empty stdin: stay a silent observer, never fail the real hook.
   }
+  try { db.close(); } catch (_) {}
   process.exit(0);
 });
 

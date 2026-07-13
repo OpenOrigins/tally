@@ -3,8 +3,9 @@
 //
 // Spawned detached by anchor_hook.js's SessionStart handler, one per Claude
 // Code session_id. Appends a HEARTBEAT record to the shared anchor_log.jsonl
-// every INTERVAL_MS while the session is open, so any gap between real
-// actions still shows periodic liveness records instead of silence.
+// and anchor_log.sqlite every INTERVAL_MS while the session is open, so any
+// gap between real actions still shows periodic liveness records instead of
+// silence.
 //
 // SessionEnd's reliability across every termination path (Ctrl+C, window
 // close, kill) isn't documented, so this daemon also self-terminates after
@@ -12,13 +13,20 @@
 // process if the clean-shutdown hook never fires.
 
 const fs = require('fs');
+const Database = require('better-sqlite3');
 
-const [, , sessionId, logFile] = process.argv;
-if (!sessionId || !logFile) process.exit(1);
+const [, , sessionId, logFile, dbFile] = process.argv;
+if (!sessionId || !logFile || !dbFile) process.exit(1);
 
 const INTERVAL_MS = 60 * 1000;
 const MAX_RUNTIME_MS = 6 * 60 * 60 * 1000; // 6h safety net
 const startedAt = Date.now();
+
+const db = new Database(dbFile);
+db.pragma('journal_mode = WAL');
+const insertHeartbeatStmt = db.prepare(
+  'INSERT INTO anchor_log (record_type, session_id, anchor_receipt, recorded_at, payload) VALUES (@record_type, @session_id, NULL, @recorded_at, @payload)'
+);
 
 function appendHeartbeat() {
   const record = {
@@ -28,8 +36,15 @@ function appendHeartbeat() {
   };
   try {
     fs.appendFileSync(logFile, JSON.stringify(record) + '\n');
+    insertHeartbeatStmt.run({
+      record_type: record.record_type,
+      session_id: record.session_id,
+      recorded_at: record.timestamp,
+      payload: JSON.stringify(record),
+    });
   } catch (_) {
     // Log file/dir gone: nothing sensible left to do.
+    try { db.close(); } catch (_) {}
     process.exit(0);
   }
 }
@@ -37,6 +52,7 @@ function appendHeartbeat() {
 const timer = setInterval(() => {
   if (Date.now() - startedAt > MAX_RUNTIME_MS) {
     clearInterval(timer);
+    try { db.close(); } catch (_) {}
     process.exit(0);
     return;
   }

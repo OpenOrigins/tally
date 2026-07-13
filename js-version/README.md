@@ -10,10 +10,11 @@ faithful local reshaping of Claude Code's own hook events into
 
 ```
 .claude/settings.json          wires hook events to hooks/anchor_hook.js (and hooks/log_hook.sh)
-hooks/anchor_hook.js            reshapes each event into one Anchor-schema JSON line
+hooks/anchor_hook.js            reshapes each event into one Anchor-schema record
 hooks/heartbeat_daemon.js       background process emitting periodic HEARTBEAT records
 hooks/log_hook.sh               generic raw-event logger, runs alongside anchor_hook.js
-logs/anchor_log.jsonl           the anchor log itself — one JSON object per line, append-only
+logs/anchor_log.jsonl           the anchor log — one JSON object per line, append-only
+logs/anchor_log.sqlite          the same records as rows in an `anchor_log` table (queryable)
 logs/.anchor_state/             per-session scratch state (last instruction id, heartbeat pid)
 ```
 
@@ -22,7 +23,8 @@ logs/.anchor_state/             per-session scratch state (last instruction id, 
 Claude Code dispatches hook events as JSON on stdin to whatever commands
 `.claude/settings.json` wires up. `hooks/anchor_hook.js` is wired to the
 events that map cleanly onto the Anchor schema, and turns each into one
-record appended to `logs/anchor_log.jsonl`:
+record appended to `logs/anchor_log.jsonl` **and** inserted as a row into
+`logs/anchor_log.sqlite` (table `anchor_log`, one row per record):
 
 | Claude Code event | Anchor record      | Notes |
 |---|---|---|
@@ -83,6 +85,12 @@ the exact hook declarations), then run a normal session and tail the log:
 
 ```bash
 tail -f logs/anchor_log.jsonl
+```
+
+or query the SQLite log directly:
+
+```bash
+sqlite3 logs/anchor_log.sqlite "SELECT record_type, session_id, recorded_at FROM anchor_log ORDER BY id DESC LIMIT 10;"
 ```
 
 Ask Claude to run a tool call and watch `INSTRUCTION_RECEIVED` →
