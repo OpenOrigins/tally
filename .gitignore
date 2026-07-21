@@ -19,3 +19,9 @@ js-version/node_modules/
 # js-version/logs/*.sqlite
 js-version/logs/*.sqlite-wal
 js-version/logs/*.sqlite-shm
+
+# js-version-codex
+js-version-codex/node_modules/
+js-version-codex/logs/*.sqlite-wal
+js-version-codex/logs/*.sqlite-shm
+js-version-codex/logs/raw_hooks/*.jsonl

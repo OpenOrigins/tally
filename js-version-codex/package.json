@@ -1,0 +1,16 @@
+{
+  "name": "tally-anchor-hook-codex",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Anchor-style Codex CLI audit hook (jsonl + SQLite log)",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "install-hooks": "node install/install_hooks.js",
+    "uninstall-hooks": "node install/uninstall_hooks.js"
+  },
+  "dependencies": {
+    "better-sqlite3": "^11.3.0"
+  }
+}

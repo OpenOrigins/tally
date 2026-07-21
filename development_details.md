@@ -1,9 +1,7 @@
 # Tally Development Details
 
 ## SQLite Log Structure
-Required SQLite log schema for tally daemon reading and hash generation.
-
-### SESSION_START
+Required SQLite log schema for tally daemon reading and hash generationLeg### SESSION_START
 
 |  SQLite Structure | Log in js-version | Tally Spec Structure | 
 |-----|-------|-------|
@@ -150,6 +148,12 @@ Required SQLite log schema for tally daemon reading and hash generation.
 | schema_version |     | schema_version |
 | session_id |  session_id   | session_id |
 |  |     | agent_id |
+|  |     | anchor_instance_id |
+|  |     | active_sessions |
+| timestamp |  timestamp   | timestamp |
+|  |     | anchor_receipt |
+
+    | agent_id |
 |  |     | anchor_instance_id |
 |  |     | active_sessions |
 | timestamp |  timestamp   | timestamp |
