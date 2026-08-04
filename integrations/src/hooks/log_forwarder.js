@@ -151,6 +151,42 @@ async function sendWithRetry(record, apiKey, apiUrl) {
   }
 }
 
+function isPidAlive(pid) {
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+// Atomically claims PID_FILE via exclusive create so at most one forwarder
+// ever runs, even if anchor_hook.js's SessionStart handler spawns several in
+// quick succession (its own alive-check is TOCTOU-racy). Without this, two
+// live forwarders would both tail the same offset file and each send the
+// records in between -- duplicate POSTs to the API.
+function acquireSingletonLock(pidFile) {
+  for (let attempt = 0; attempt < 5; attempt += 1) {
+    try {
+      const fd = fs.openSync(pidFile, 'wx');
+      fs.writeSync(fd, String(process.pid));
+      fs.closeSync(fd);
+      return true;
+    } catch (err) {
+      if (err.code !== 'EEXIST') throw err;
+      let existingPid;
+      try {
+        existingPid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
+      } catch (_) {
+        continue; // pid file vanished between our open() and read(); retry the create
+      }
+      if (existingPid && isPidAlive(existingPid)) return false; // genuinely already running
+      try { fs.unlinkSync(pidFile); } catch (_) {} // stale lock left by a crashed instance
+    }
+  }
+  return false; // couldn't resolve the lock after retries; don't risk a duplicate instance
+}
+
 let draining = false;
 let redrainRequested = false;
 
@@ -228,7 +264,11 @@ async function drain() {
 }
 
 const startedAt = Date.now();
-fs.writeFileSync(PID_FILE, String(process.pid));
+if (!acquireSingletonLock(PID_FILE)) {
+  // Another forwarder already holds the lock -- exit quietly rather than
+  // risk double-sending anything.
+  process.exit(0);
+}
 
 function cleanupAndExit() {
   try { fs.unlinkSync(PID_FILE); } catch (_) {}

@@ -27,6 +27,8 @@ const fs = require('fs');
 const path = require('path');
 const os = require('os');
 const crypto = require('crypto');
+const https = require('https');
+const http = require('http');
 const { spawn } = require('child_process');
 
 // This file is compiled with pkg into a standalone anchor_hook(.exe) binary.
@@ -43,6 +45,13 @@ const STATE_DIR = path.join(LOG_DIR, '.state');
 // Sibling heartbeat/forwarder binaries, installed alongside this one.
 const HEARTBEAT_BIN = path.join(REAL_DIR, `heartbeat_daemon${EXE_SUFFIX}`);
 const FORWARDER_BIN = path.join(REAL_DIR, `log_forwarder${EXE_SUFFIX}`);
+
+// Same api_key.txt/config.json that log_forwarder.js reads -- kept in sync
+// with it rather than shared, since each hook is compiled standalone.
+const API_KEY_FILE = path.join(STATE_DIR, 'api_key.txt');
+const CONFIG_FILE = path.join(STATE_DIR, 'config.json');
+const DEFAULT_API_URL = 'https://api.dev2.openorigins.com/v1/tally/logs';
+const HEARTBEAT_STATUS_TIMEOUT_MS = 3000;
 
 const FIXED_PRE_STATE_HASH = 'sha256:' + '0'.repeat(64) + ' (placeholder, not computed)';
 const FIXED_POST_STATE_HASH = 'sha256:' + '1'.repeat(64) + ' (placeholder, not computed)';
@@ -106,6 +115,73 @@ function truncate(value, max = 500) {
   return s.length > max ? s.slice(0, max) + `...(${s.length - max} more chars truncated)` : s;
 }
 
+function readApiKey() {
+  try {
+    return fs.readFileSync(API_KEY_FILE, 'utf8').trim();
+  } catch (_) {
+    return null;
+  }
+}
+
+function readApiUrl() {
+  try {
+    const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    if (cfg && typeof cfg.apiUrl === 'string' && cfg.apiUrl) return cfg.apiUrl;
+  } catch (_) {}
+  return DEFAULT_API_URL;
+}
+
+// Asks the server (the same one logs are shipped to) whether heartbeats are
+// currently switched on. Checked once per session, at SessionStart -- not
+// re-polled mid-session, so a toggle flip takes effect on the next session
+// rather than the current one. Fails OPEN (resolves true) on any network
+// error, timeout, non-2xx, or unparseable body: a heartbeat is a liveness
+// signal, and swallowing it because the status check itself broke would give
+// a false impression of a dead session.
+function fetchHeartbeatEnabled(apiKey, apiUrl) {
+  return new Promise((resolve) => {
+    let target;
+    try {
+      target = new URL(apiUrl);
+    } catch (_) {
+      resolve(true);
+      return;
+    }
+    target.pathname = '/v1/tally/heartbeat-status';
+    target.search = '';
+    const transport = target.protocol === 'http:' ? http : https;
+    const req = transport.request(
+      {
+        hostname: target.hostname,
+        port: target.port || (target.protocol === 'http:' ? 80 : 443),
+        path: target.pathname,
+        method: 'GET',
+        headers: { 'x-api-key': apiKey },
+        timeout: HEARTBEAT_STATUS_TIMEOUT_MS,
+      },
+      (res) => {
+        let body = '';
+        res.on('data', (chunk) => { body += chunk; });
+        res.on('end', () => {
+          if (res.statusCode < 200 || res.statusCode >= 300) {
+            resolve(true);
+            return;
+          }
+          try {
+            const parsed = JSON.parse(body);
+            resolve(parsed.heartbeatEnabled !== false); // absent/malformed => default on
+          } catch (_) {
+            resolve(true);
+          }
+        });
+      },
+    );
+    req.on('timeout', () => { req.destroy(); resolve(true); });
+    req.on('error', () => resolve(true));
+    req.end();
+  });
+}
+
 function heartbeatPidFile(sessionId) {
   return path.join(STATE_DIR, `${sessionId}.heartbeat.pid`);
 }
@@ -123,15 +199,20 @@ function startHeartbeatDaemon(sessionId, agentId) {
   const pidFile = heartbeatPidFile(sessionId);
   try {
     const existingPid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
-    if (existingPid && isPidAlive(existingPid)) return; // already running for this session
+    if (existingPid && isPidAlive(existingPid)) return; // fast path only -- not relied on for correctness
   } catch (_) {}
 
+  // Deliberately does NOT write pidFile here: heartbeat_daemon.js claims it
+  // atomically itself on startup (see its acquireSingletonLock), and a second
+  // blind overwrite from this side would clobber that lock -- e.g. if two
+  // SessionStart events race and both pass the check above, both children get
+  // spawned, but only one successfully self-locks and keeps running; whoever
+  // wrote pidFile last here would otherwise point it at the wrong pid.
   const child = spawn(HEARTBEAT_BIN, [sessionId, LOG_FILE, agentId], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
-  fs.writeFileSync(pidFile, String(child.pid));
   child.unref();
 }
 
@@ -155,30 +236,31 @@ function startForwarderDaemon() {
   const pidFile = forwarderPidFile();
   try {
     const existingPid = parseInt(fs.readFileSync(pidFile, 'utf8'), 10);
-    if (existingPid && isPidAlive(existingPid)) return; // already running
+    if (existingPid && isPidAlive(existingPid)) return; // fast path only -- not relied on for correctness
   } catch (_) {}
 
+  // Same reasoning as startHeartbeatDaemon above: log_forwarder.js claims
+  // pidFile atomically itself, so this side must not also write it.
   const child = spawn(FORWARDER_BIN, [], {
     detached: true,
     stdio: 'ignore',
     windowsHide: true,
   });
-  fs.writeFileSync(pidFile, String(child.pid));
   child.unref();
 }
 
 let raw = '';
 process.stdin.on('data', (chunk) => { raw += chunk; });
-process.stdin.on('end', () => {
+process.stdin.on('end', async () => {
   try {
-    main(JSON.parse(raw));
+    await main(JSON.parse(raw));
   } catch (_) {
     // Malformed/empty stdin: stay a silent observer, never fail the real hook.
   }
   process.exit(0);
 });
 
-function main(payload) {
+async function main(payload) {
   const event = payload.hook_event_name || 'Unknown';
   const sessionId = `sess_${payload.session_id || 'unknown'}`;
   const ts = nowIso();
@@ -203,7 +285,10 @@ function main(payload) {
         source: payload.source || 'unknown',
         session_started_at: ts,
       });
-      startHeartbeatDaemon(sessionId, agentId);
+
+      const apiKey = readApiKey();
+      const heartbeatEnabled = apiKey ? await fetchHeartbeatEnabled(apiKey, readApiUrl()) : true;
+      if (heartbeatEnabled) startHeartbeatDaemon(sessionId, agentId);
       startForwarderDaemon();
       break;
     }

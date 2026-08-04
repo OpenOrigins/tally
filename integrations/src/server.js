@@ -99,35 +99,54 @@ function detectStatus() {
   };
 }
 
-// Fire-and-forget: let the server know a client just finished wiring up the
-// hooks. Best-effort only -- a failure here must never block or fail the
-// local install.
+// Let the server know a client just finished wiring up the hooks.
+// Best-effort only -- a failure here must never block or fail the local
+// install -- but the caller does await this (with a timeout) so the process
+// doesn't exit via /api/shutdown before the request has a chance to land.
 function notifyClientConnected(apiKey, apiUrl) {
-  try {
-    const target = new URL(apiUrl && apiUrl.trim() ? apiUrl.trim() : DEFAULT_API_URL);
-    target.pathname = '/v1/tally/onboarding/client-connected';
-    target.search = '';
-    const payload = JSON.stringify({ source: 'claude-code' });
-    const req = https.request(
-      {
-        hostname: target.hostname,
-        port: target.port || 443,
-        path: target.pathname,
-        method: 'POST',
-        headers: {
-          'x-api-key': apiKey,
-          'Content-Type': 'application/json',
-          'Content-Length': Buffer.byteLength(payload),
+  return new Promise((resolve) => {
+    let settled = false;
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      resolve();
+    };
+
+    try {
+      const target = new URL('https://api.dev2.openorigins.com/v1/tally/onboarding/client-connected');
+      const payload = JSON.stringify({ source: 'claude-code' });
+      const req = https.request(
+        {
+          hostname: target.hostname,
+          port: target.port || 443,
+          path: target.pathname,
+          method: 'POST',
+          headers: {
+            'x-api-key': apiKey,
+            'Content-Type': 'application/json',
+            'Content-Length': Buffer.byteLength(payload),
+          },
+          timeout: 5000,
         },
-      },
-      (res) => res.resume(),
-    );
-    req.on('error', (err) => console.error('client-connected notification failed:', err.message));
-    req.write(payload);
-    req.end();
-  } catch (err) {
-    console.error('client-connected notification failed:', err.message);
-  }
+        (res) => {
+          res.resume();
+          res.on('end', done);
+        },
+      );
+      req.on('error', (err) => {
+        console.error('client-connected notification failed:', err.message);
+        done();
+      });
+      req.on('timeout', () => {
+        req.destroy(new Error('timed out'));
+      });
+      req.write(payload);
+      req.end();
+    } catch (err) {
+      console.error('client-connected notification failed:', err.message);
+      done();
+    }
+  });
 }
 
 function backupFile(file) {
@@ -160,7 +179,7 @@ function mergeHooksIntoSettings(settings, tallyDir) {
   return merged;
 }
 
-function doInstall({ apiKey, apiUrl }) {
+async function doInstall({ apiKey, apiUrl }) {
   if (!apiKey || !apiKey.trim()) {
     throw new Error('API key is required.');
   }
@@ -212,8 +231,10 @@ function doInstall({ apiKey, apiUrl }) {
   );
 
   // 6. Tell the server the hooks are wired up, using the same key the user
-  // just entered. Best-effort -- doesn't block or fail the install.
-  notifyClientConnected(apiKey.trim(), apiUrl);
+  // just entered. Best-effort -- doesn't fail the install -- but we await it
+  // so the GUI's immediate follow-up /api/shutdown call can't kill the
+  // process before this request has finished.
+  await notifyClientConnected(apiKey.trim(), apiUrl);
 
   return {
     claudeDir,
@@ -269,7 +290,7 @@ const server = http.createServer(async (req, res) => {
 
     if (req.method === 'POST' && req.url === '/api/install') {
       const body = JSON.parse((await readBody(req)) || '{}');
-      const result = doInstall(body);
+      const result = await doInstall(body);
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ ok: true, ...result }));
       return;
