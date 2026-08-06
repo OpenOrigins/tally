@@ -999,7 +999,9 @@ fn append_jsonl_locked(path: &Path, value: &Value) -> Result<()> {
     let lock_path = PathBuf::from(format!("{}.lock", path.display()));
     let lock = OpenOptions::new()
         .create(true)
-        .append(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
         .open(lock_path)?;
     lock.lock_exclusive()?;
     let mut file = OpenOptions::new().create(true).append(true).open(path)?;
