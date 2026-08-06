@@ -1,0 +1,55 @@
+{
+  "hooks": {
+    "SessionStart": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ],
+    "UserPromptSubmit": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ],
+    "PreToolUse": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ],
+    "PermissionRequest": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" }] }
+    ],
+    "PostToolUse": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ],
+    "PreCompact": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" }] }
+    ],
+    "PostCompact": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" }] }
+    ],
+    "SubagentStart": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ],
+    "SubagentStop": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" }] }
+    ],
+    "Stop": [
+      { "hooks": [{ "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" }] }
+    ],
+    "SessionEnd": [
+      { "hooks": [
+        { "type": "command", "command": "bash \"$CLAUDE_PROJECT_DIR/hooks/log_hook.sh\"" },
+        { "type": "command", "command": "node \"$CLAUDE_PROJECT_DIR/hooks/anchor_hook.js\"" }
+      ] }
+    ]
+  }
+}

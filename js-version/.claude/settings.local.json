@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(export CLAUDE_PROJECT_DIR=\"/d/OpenOrigins/Projects/Tally-Claude_Code\")",
+      "Bash(node hooks/anchor_hook.js)",
+      "Bash(tasklist //FI 'PID eq __TRACKED_VAR__')"
+    ]
+  }
+}
