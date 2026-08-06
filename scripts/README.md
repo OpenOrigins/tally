@@ -1,6 +1,6 @@
 # Push test logs
 
-Generate random [Tally](../Tally-SPEC.md) v0.2 records and `POST` them to OpenOrigins ingest (`/v1/tally/logs`).
+Generate random [Tally](../docs/Tally-SPEC.md) v0.2 records and `POST` them to OpenOrigins ingest (`/v1/tally/logs`).
 
 Uses stdlib only — no pip install.
 

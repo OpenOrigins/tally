@@ -1,5 +1,5 @@
 [workspace]
-members = ["claude-audit", "codex-audit"]
+members = ["claude", "codex"]
 resolver = "2"
 
 [workspace.package]

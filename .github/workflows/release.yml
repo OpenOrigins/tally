@@ -1,73 +1,38 @@
-name: CI
+name: Native Release
 
 on:
-  pull_request:
   push:
-    branches:
-      - dev
-      - main
+    tags:
+      - "v*"
 
 permissions:
-  contents: read
-  checks: write
-
-concurrency:
-  group: ci-${{ github.workflow }}-${{ github.ref }}
-  cancel-in-progress: true
+  contents: write
 
 jobs:
-  security:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Audit Rust dependencies
-        uses: rustsec/audit-check@69366f33c96575abad1ee0dba8212993eecbe998 # v2.0.0
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-
-  quality:
-    runs-on: ubuntu-24.04
-    steps:
-      - name: Check out repository
-        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install Rust toolchain
-        run: rustup show
-
-      - name: Install Python
-        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
-        with:
-          python-version: "3.13"
-
-      - name: Run release checks
-        run: ./scripts/release-check.sh
-
-  native:
-    name: Native smoke (${{ matrix.label }})
+  build:
+    name: Build (${{ matrix.label }})
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: ubuntu-24.04
-            label: linux-x86_64
             target: x86_64-unknown-linux-musl
+            label: linux-x86_64
             macos_deployment_target: ""
             executable_suffix: ""
           - os: windows-2025
-            label: windows-x86_64
             target: x86_64-pc-windows-msvc
+            label: windows-x86_64
             macos_deployment_target: ""
             executable_suffix: .exe
           - os: macos-15
-            label: macos-arm64
             target: aarch64-apple-darwin
+            label: macos-arm64
             macos_deployment_target: "11.0"
             executable_suffix: ""
           - os: macos-15-intel
-            label: macos-x86_64
             target: x86_64-apple-darwin
+            label: macos-x86_64
             macos_deployment_target: "10.15"
             executable_suffix: ""
     runs-on: ${{ matrix.os }}
@@ -76,9 +41,6 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-      - name: Install Rust toolchain
-        run: rustup show
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
@@ -94,7 +56,10 @@ jobs:
         with:
           python-version: "3.13"
 
-      - name: Test workspace
+      - name: Verify release tag matches package version
+        run: python scripts/check_release_tag.py ${{ github.ref_name }}
+
+      - name: Test release target
         run: cargo test --workspace --all-targets --locked --target ${{ matrix.target }}
 
       - name: Build release executables
@@ -109,8 +74,33 @@ jobs:
       - name: Preserve push-test ingest behavior
         run: python tests/test_push_test_logs.py
 
-      - name: Test release packaging
+      - name: Package executables and checksums
         run: >-
           python scripts/package_release.py
           --target ${{ matrix.target }}
           --label ${{ matrix.label }}
+
+      - name: Upload release assets
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: native-${{ matrix.label }}
+          path: dist/*
+          if-no-files-found: error
+
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Download tested release assets
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: native-*
+          path: dist
+          merge-multiple: true
+
+      - name: Publish GitHub release
+        uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
+        with:
+          files: dist/*
+          generate_release_notes: true
+          fail_on_unmatched_files: true

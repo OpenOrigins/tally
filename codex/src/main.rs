@@ -17,7 +17,7 @@ const EVENTS: &[HookEvent] = &[
     HookEvent::new(
         "SessionStart",
         Some("*"),
-        "Tally: recording Claude Code session start",
+        "Tally: recording Codex session start",
     ),
     HookEvent::new("UserPromptSubmit", None, "Tally: recording user prompt"),
     HookEvent::new("PreToolUse", Some("*"), "Tally: recording pre-tool action"),
@@ -39,14 +39,14 @@ const EVENTS: &[HookEvent] = &[
         "Tally: recording subagent start",
     ),
     HookEvent::new("SubagentStop", Some("*"), "Tally: recording subagent stop"),
-    HookEvent::new("Stop", None, "Tally: recording Claude Code stop"),
+    HookEvent::new("Stop", None, "Tally: recording Codex stop"),
 ];
 
 fn main() {
     match run() {
         Ok(code) => std::process::exit(code),
         Err(error) => {
-            eprintln!("tally-claude: {error}");
+            eprintln!("tally-codex: {error}");
             std::process::exit(1);
         }
     }
@@ -58,7 +58,7 @@ fn run() -> Result<i32> {
         Some("hook") => {
             let event = args
                 .next()
-                .or_else(|| env::var("CLAUDE_HOOK_EVENT").ok())
+                .or_else(|| env::var("CODEX_HOOK_EVENT").ok())
                 .unwrap_or_else(|| "unknown".to_string());
             record_hook_event(&event)?;
             Ok(0)
@@ -75,13 +75,31 @@ fn run() -> Result<i32> {
             uninstall_desktop_hooks()?;
             Ok(0)
         }
-        Some("wrap") => wrap_claude(args.collect()),
+        Some("wrap") => wrap_codex(args.collect()),
+        Some("--help" | "-h" | "help") => {
+            print_help();
+            Ok(0)
+        }
+        Some("--version" | "version") => {
+            println!("tally-codex {}", env!("CARGO_PKG_VERSION"));
+            Ok(0)
+        }
         Some(event_name) => {
             record_hook_event(event_name)?;
             Ok(0)
         }
-        None => wrap_claude(Vec::new()),
+        None => {
+            install_desktop_hooks()?;
+            Ok(0)
+        }
     }
+}
+
+fn print_help() {
+    println!(
+        "tally-codex {}\n\nRun without arguments to install hooks.\n\nCommands:\n  install       Install or update Codex hooks\n  uninstall     Remove Tally hooks\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
+        env!("CARGO_PKG_VERSION")
+    );
 }
 
 fn record_hook_event(event_type: &str) -> Result<()> {
@@ -95,7 +113,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         }
     }
 
-    let sink = AuditSink::new("claude-hooks")?;
+    let sink = AuditSink::new("codex-hooks")?;
     let raw_ref = sink.private_payload(
         &format!("hook_{}_{}", event_type, unique_suffix()),
         &payload,
@@ -112,10 +130,10 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     });
     let event_id = format!("evt_{}", random_hex(8));
     let event = json!({
-        "schema_version": "tally-claude.v1",
+        "schema_version": "tally-codex.v1",
         "event_id": event_id,
         "run_id": sink.run_id,
-        "source": "claude-hooks",
+        "source": "codex-hooks",
         "event_type": event_type,
         "observed_at": observed_at,
         "payload_hash": raw_ref["hash"],
@@ -123,7 +141,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         "metadata": metadata,
     });
 
-    sink.append_jsonl("claude-hooks", &event)?;
+    sink.append_jsonl("codex-hooks", &event)?;
     update_heartbeat_state(
         &sink,
         event_type,
@@ -144,26 +162,43 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     Ok(())
 }
 
-fn wrap_claude(args: Vec<String>) -> Result<i32> {
+fn wrap_codex(args: Vec<String>) -> Result<i32> {
     set_runtime_defaults();
 
-    let is_print_mode = matches!(args.first().map(String::as_str), Some("-p" | "--print"));
-    if is_print_mode && env_enabled("TALLY_TEE_CLAUDE_STDIO", true) {
-        run_claude_with_tee(&args)
+    let mut codex_args = Vec::new();
+    if should_bypass_hook_trust(args.first().map(String::as_str)) {
+        codex_args.push("--dangerously-bypass-hook-trust".to_string());
+    }
+    codex_args.extend(args.clone());
+
+    if args.first().map(String::as_str) == Some("exec")
+        && env_enabled("TALLY_TEE_CODEX_STDIO", true)
+    {
+        run_codex_with_tee(&codex_args)
     } else {
-        let status = Command::new("claude").args(&args).status()?;
+        let status = Command::new("codex").args(&codex_args).status()?;
         Ok(status.code().unwrap_or(1))
     }
 }
 
-fn run_claude_with_tee(args: &[String]) -> Result<i32> {
-    let stdio_dir = log_root().join("claude-stdio");
+fn should_bypass_hook_trust(first_arg: Option<&str>) -> bool {
+    if !env_enabled("TALLY_BYPASS_HOOK_TRUST", true) {
+        return false;
+    }
+    !matches!(
+        first_arg,
+        Some("login" | "logout" | "help" | "--help" | "-h" | "--version" | "version")
+    )
+}
+
+fn run_codex_with_tee(args: &[String]) -> Result<i32> {
+    let stdio_dir = log_root().join("codex-stdio");
     fs::create_dir_all(&stdio_dir)?;
     let run_id = run_id();
     let stdout_log = stdio_dir.join(format!("{run_id}.stdout.log"));
     let stderr_log = stdio_dir.join(format!("{run_id}.stderr.log"));
 
-    let mut child = Command::new("claude")
+    let mut child = Command::new("codex")
         .args(args)
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -172,11 +207,11 @@ fn run_claude_with_tee(args: &[String]) -> Result<i32> {
     let stdout = child
         .stdout
         .take()
-        .ok_or("failed to capture claude stdout")?;
+        .ok_or("failed to capture codex stdout")?;
     let stderr = child
         .stderr
         .take()
-        .ok_or("failed to capture claude stderr")?;
+        .ok_or("failed to capture codex stderr")?;
     let stdout_thread = thread::spawn(move || tee_stream(stdout, stdout_log, false));
     let stderr_thread = thread::spawn(move || tee_stream(stderr, stderr_log, true));
 
@@ -339,20 +374,20 @@ fn run_heartbeat_daemon() -> Result<()> {
 fn install_desktop_hooks() -> Result<()> {
     set_runtime_defaults();
 
-    let settings_path = settings_path();
-    fs::create_dir_all(settings_path.parent().unwrap_or_else(|| Path::new(".")))?;
+    let hooks_path = hooks_path();
+    fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::create_dir_all(log_root())?;
     let hook_bin = env::current_exe()?.display().to_string();
 
-    let mut config = if settings_path.exists() {
-        read_json_file(&settings_path)?
+    let mut config = if hooks_path.exists() {
+        read_json_file(&hooks_path)?
     } else {
         json!({"hooks": {}})
     };
     if !config.is_object() {
         return Err(format!(
             "refusing to modify non-object JSON at {}",
-            settings_path.display()
+            hooks_path.display()
         )
         .into());
     }
@@ -360,7 +395,7 @@ fn install_desktop_hooks() -> Result<()> {
         config["hooks"] = json!({});
     }
 
-    let backup = backup_if_exists(&settings_path)?;
+    let backup = backup_if_exists(&hooks_path)?;
     remove_tally_hooks(&mut config);
     let hooks = config["hooks"]
         .as_object_mut()
@@ -374,13 +409,13 @@ fn install_desktop_hooks() -> Result<()> {
             .push(event.to_hook_group(&hook_bin));
     }
 
-    write_json_pretty(&settings_path, &config)?;
+    write_json_atomic(&hooks_path, &config)?;
     println!(
-        "Installed Tally Claude Code hooks into {}",
-        settings_path.display()
+        "Installed Tally Codex Desktop hooks into {}",
+        hooks_path.display()
     );
     if let Some(backup) = backup {
-        println!("Backed up previous settings file to {}", backup.display());
+        println!("Backed up previous hooks file to {}", backup.display());
     }
     println!("Hook binary: {hook_bin}");
     println!("Logs: {}", log_root().display());
@@ -388,28 +423,28 @@ fn install_desktop_hooks() -> Result<()> {
 }
 
 fn uninstall_desktop_hooks() -> Result<()> {
-    let settings_path = settings_path();
-    if !settings_path.exists() {
-        println!("No settings file found at {}", settings_path.display());
+    let hooks_path = hooks_path();
+    if !hooks_path.exists() {
+        println!("No hooks file found at {}", hooks_path.display());
         return Ok(());
     }
-    let mut config = read_json_file(&settings_path)?;
+    let mut config = read_json_file(&hooks_path)?;
     if !config.is_object() || !config.get("hooks").map(Value::is_object).unwrap_or(false) {
-        println!(
-            "No Tally hooks found in {} (no hooks key present)",
-            settings_path.display()
-        );
-        return Ok(());
+        return Err(format!(
+            "refusing to modify {}: unexpected hooks file shape",
+            hooks_path.display()
+        )
+        .into());
     }
-    let backup = backup_if_exists(&settings_path)?;
+    let backup = backup_if_exists(&hooks_path)?;
     let removed = remove_tally_hooks(&mut config);
-    write_json_pretty(&settings_path, &config)?;
+    write_json_atomic(&hooks_path, &config)?;
     println!(
         "Removed {removed} Tally hook handler(s) from {}",
-        settings_path.display()
+        hooks_path.display()
     );
     if let Some(backup) = backup {
-        println!("Backed up previous settings file to {}", backup.display());
+        println!("Backed up previous hooks file to {}", backup.display());
     }
     Ok(())
 }
@@ -433,25 +468,25 @@ fn build_tally_record(
     match event_type {
         "SessionStart" => json!({
             "record_type": "SESSION_START",
-            "schema_version": "0.2-mvp",
+            "schema_version": "0.2",
             "session_id": session_id,
             "agent_id": agent_id(),
             "agent_version": agent_version(),
-            "principal": {"type": "human", "id": "[ARB] claude-user"},
+            "principal": {"type": "human", "id": "[ARB] codex-user"},
             "authority_scope_hash": sha256_value(metadata),
             "authority_scope_uri": raw_uri,
             "authority_granted_at": observed_at,
             "session_started_at": metadata["observed_at"],
-            "claude_hook_event": event_type,
+            "codex_hook_event": event_type,
             "raw_hook_hash": raw_hash,
         }),
         "UserPromptSubmit" => {
             let summary = prompt
                 .map(|value| value.chars().take(240).collect::<String>())
-                .unwrap_or_else(|| "User prompt submitted to Claude Code".to_string());
+                .unwrap_or_else(|| "User prompt submitted to Codex".to_string());
             json!({
                 "record_type": "INSTRUCTION_RECEIVED",
-                "schema_version": "0.2-mvp",
+                "schema_version": "0.2",
                 "session_id": session_id,
                 "instruction_id": stable_id("instr", payload),
                 "sender": {"id": "[ARB] user", "signature": sha256_value(payload)},
@@ -465,28 +500,26 @@ fn build_tally_record(
                     "detail_hash": raw_ref["hash"],
                     "detail_uri": raw_ref["uri"],
                 },
-                "claude_hook_event": event_type,
+                "codex_hook_event": event_type,
             })
         }
         "PreToolUse" | "PermissionRequest" => {
-            let tool_params = first_mapping_by_key(
-                payload,
-                &["tool_input", "arguments", "args", "params", "input"],
-            )
-            .cloned()
-            .unwrap_or_else(|| payload.clone());
+            let tool_params =
+                first_mapping_by_key(payload, &["arguments", "args", "params", "input"])
+                    .cloned()
+                    .unwrap_or_else(|| payload.clone());
             json!({
                 "record_type": "ACTION_TAKEN",
-                "schema_version": "0.2-mvp",
+                "schema_version": "0.2",
                 "session_id": session_id,
                 "action_id": action_id(payload),
-                "instruction_id": first_string_by_key(payload, &["instruction_id", "prompt_id", "turn_id", "turnId"])
+                "instruction_id": first_string_by_key(payload, &["instruction_id", "turn_id", "turnId"])
                     .unwrap_or_else(|| stable_id("instr", &Value::String(session_id.clone()))),
                 "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
                 "tool": {
-                    "server": first_string_by_key(payload, &["server", "server_name", "mcp_server"])
-                        .unwrap_or_else(|| "claude-code".to_string()),
-                    "name": first_string_by_key(payload, &["tool_name", "toolName", "name", "command"])
+                    "server": first_string_by_key(payload, &["server", "server_name", "mcp_server", "recipient_namespace"])
+                        .unwrap_or_else(|| "codex".to_string()),
+                    "name": first_string_by_key(payload, &["tool_name", "toolName", "name", "command", "mcp_tool_name", "recipient_name"])
                         .unwrap_or_else(|| event_type.to_string()),
                     "params_hash": sha256_value(&tool_params),
                     "params_uri": raw_ref["uri"],
@@ -497,23 +530,22 @@ fn build_tally_record(
                 "post_state_uri": Value::Null,
                 "action_timestamp": observed_at,
                 "deviance_flag": {"deviated": false, "delta_category": Value::Null, "delta_hash": Value::Null, "delta_uri": Value::Null},
-                "claude_hook_event": event_type,
+                "codex_hook_event": event_type,
                 "raw_hook_hash": raw_ref["hash"],
             })
         }
         "PostToolUse" => {
-            let has_error =
-                first_string_by_key(payload, &["tool_error", "error", "exception"]).is_some();
+            let has_error = first_string_by_key(payload, &["error", "exception"]).is_some();
             json!({
                 "record_type": "RESULT_RECEIVED",
-                "schema_version": "0.2-mvp",
+                "schema_version": "0.2",
                 "session_id": session_id,
                 "action_id": action_id(payload),
                 "result_hash": raw_ref["hash"],
                 "result_uri": raw_ref["uri"],
                 "result_received_at": observed_at,
                 "result_interpretation": {
-                    "summary": "[ARB] Claude Code reported a tool result",
+                    "summary": "[ARB] Codex reported a tool result",
                     "detail_hash": raw_ref["hash"],
                     "detail_uri": raw_ref["uri"],
                 },
@@ -523,24 +555,24 @@ fn build_tally_record(
                     "description_hash": if has_error { raw_ref["hash"].clone() } else { Value::Null },
                     "description_uri": if has_error { raw_ref["uri"].clone() } else { Value::Null },
                 },
-                "claude_hook_event": event_type,
+                "codex_hook_event": event_type,
             })
         }
         "Stop" => json!({
             "record_type": "SESSION_END",
-            "schema_version": "0.2-mvp",
+            "schema_version": "0.2",
             "session_id": session_id,
-            "outcome": "claude_turn_stopped",
+            "outcome": "codex_turn_stopped",
             "outcome_hash": raw_ref["hash"],
             "outcome_uri": raw_ref["uri"],
             "session_ended_at": observed_at,
-            "claude_hook_event": event_type,
+            "codex_hook_event": event_type,
         }),
         _ => json!({
-            "record_type": "CLAUDE_LIFECYCLE",
-            "schema_version": "0.2-mvp",
+            "record_type": "CODEX_LIFECYCLE",
+            "schema_version": "0.2",
             "session_id": session_id,
-            "claude_hook_event": event_type,
+            "codex_hook_event": event_type,
             "event_hash": raw_ref["hash"],
             "event_uri": raw_ref["uri"],
             "observed_at": observed_at,
@@ -557,7 +589,7 @@ fn record_type_for_hook(event_type: &str) -> &'static str {
         "PreToolUse" | "PermissionRequest" => "ACTION_TAKEN",
         "PostToolUse" => "RESULT_RECEIVED",
         "Stop" => "SESSION_END",
-        _ => "CLAUDE_LIFECYCLE",
+        _ => "CODEX_LIFECYCLE",
     }
 }
 
@@ -680,7 +712,7 @@ impl AuditSink {
         let mut with_defaults = record.clone();
         with_defaults["run_id"] = Value::String(self.run_id.clone());
         if with_defaults.get("schema_version").is_none() {
-            with_defaults["schema_version"] = Value::String("0.2-mvp".to_string());
+            with_defaults["schema_version"] = Value::String("0.2".to_string());
         }
         write_json_atomic(&path, &with_defaults)?;
         Ok(path)
@@ -694,7 +726,7 @@ impl AuditSink {
     ) -> Result<()> {
         let timestamp = utc_now();
         let mut event = json!({
-            "schema_version": "tally-claude.v1",
+            "schema_version": "tally-codex.v1",
             "run_id": self.run_id,
             "source": self.source,
             "event_type": "heartbeat",
@@ -705,7 +737,7 @@ impl AuditSink {
         self.append_jsonl(stream_name, &event)?;
         self.write_tally_record(&json!({
             "record_type": "HEARTBEAT",
-            "schema_version": "0.2-mvp",
+            "schema_version": "0.2",
             "session_id": self.run_id,
             "agent_id": agent_id(),
             "active_sessions": active_sessions,
@@ -735,9 +767,10 @@ fn remove_tally_hooks(config: &mut Value) -> usize {
             let before = handlers.len();
             handlers.retain(|handler| {
                 let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                let is_current_hook =
-                    command.contains("tally-claude") && command.contains(" hook ");
-                !is_current_hook
+                let is_current_hook = command.contains("tally-codex") && command.contains(" hook ");
+                let is_legacy_hook =
+                    command.contains("tally-host-hook") || command.contains("codex_hook_logger.py");
+                !(is_current_hook || is_legacy_hook)
             });
             removed += before - handlers.len();
             !handlers.is_empty()
@@ -761,8 +794,8 @@ fn set_runtime_defaults() {
             .display()
             .to_string(),
     );
-    set_default("TALLY_AGENT_ID", "claude-desktop");
-    set_default("TALLY_AGENT_VERSION", "claude-code");
+    set_default("TALLY_AGENT_ID", "codex-desktop");
+    set_default("TALLY_AGENT_VERSION", "codex");
     set_default("TALLY_HOOK_HEARTBEAT_SECONDS", "60");
 }
 
@@ -829,7 +862,6 @@ fn extract_session_id(payload: &Value) -> Option<String> {
         payload,
         &[
             "session_id",
-            "sessionId",
             "thread_id",
             "conversation_id",
             "conversationId",
@@ -839,8 +871,8 @@ fn extract_session_id(payload: &Value) -> Option<String> {
 
 fn derive_run_id(payload: &Value) -> Option<String> {
     extract_session_id(payload)
-        .or_else(|| env::var("CLAUDE_SESSION_ID").ok())
-        .map(|value| safe_slug(&format!("claude_{value}"), "claude-session"))
+        .or_else(|| env::var("CODEX_THREAD_ID").ok())
+        .map(|value| safe_slug(&format!("codex_{value}"), "codex-session"))
 }
 
 fn stable_id(prefix: &str, value: &Value) -> String {
@@ -876,7 +908,7 @@ fn action_id(payload: &Value) -> String {
 
 fn scrub_environment() -> Value {
     let allowed: BTreeSet<&str> = [
-        "CLAUDE_PROJECT_DIR",
+        "CODEX_HOME",
         "HOME",
         "HOSTNAME",
         "LANG",
@@ -905,7 +937,7 @@ fn scrub_environment() -> Value {
         if denied.iter().any(|fragment| upper.contains(fragment)) {
             continue;
         }
-        if allowed.contains(key.as_str()) || key.starts_with("TALLY_") || key.starts_with("CLAUDE_")
+        if allowed.contains(key.as_str()) || key.starts_with("TALLY_") || key.starts_with("CODEX_")
         {
             out.insert(key, Value::String(value.chars().take(500).collect()));
         }
@@ -987,7 +1019,14 @@ fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
     }
     let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), random_hex(4)));
     write_json_pretty(&tmp, value)?;
-    fs::rename(tmp, path)?;
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error.into());
+    }
     Ok(())
 }
 
@@ -1082,6 +1121,7 @@ fn seconds_since(value: &str) -> i64 {
         .unwrap_or(0)
 }
 
+#[cfg(unix)]
 fn process_is_alive(pid: &str) -> bool {
     if pid.is_empty() {
         return false;
@@ -1094,6 +1134,23 @@ fn process_is_alive(pid: &str) -> bool {
         .unwrap_or(false)
 }
 
+#[cfg(windows)]
+fn process_is_alive(pid: &str) -> bool {
+    if pid.is_empty() || !pid.chars().all(|ch| ch.is_ascii_digit()) {
+        return false;
+    }
+    Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
+        .output()
+        .map(|output| {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .any(|field| field == pid)
+        })
+        .unwrap_or(false)
+}
+
+#[cfg(unix)]
 fn shell_quote(value: &str) -> String {
     if value
         .chars()
@@ -1105,16 +1162,37 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+#[cfg(windows)]
+fn shell_quote(value: &str) -> String {
+    if value
+        .chars()
+        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '\\' | '/' | '.' | '_' | '-' | ':'))
+    {
+        value.to_string()
+    } else {
+        format!("\"{value}\"")
+    }
+}
+
 fn unique_suffix() -> String {
     format!("{}-{}", std::process::id(), random_hex(4))
 }
 
 fn home_dir() -> String {
-    env::var("HOME").unwrap_or_else(|_| ".".to_string())
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .or_else(|_| {
+            Ok::<_, env::VarError>(format!(
+                "{}{}",
+                env::var("HOMEDRIVE")?,
+                env::var("HOMEPATH")?
+            ))
+        })
+        .unwrap_or_else(|_| ".".to_string())
 }
 
 fn default_log_root() -> String {
-    format!("{}/.tally-claude/logs", home_dir())
+    format!("{}/.tally-codex/logs", home_dir())
 }
 
 fn log_root() -> PathBuf {
@@ -1151,11 +1229,12 @@ fn run_id() -> String {
         })
 }
 
-fn settings_path() -> PathBuf {
-    if let Ok(path) = env::var("TALLY_CLAUDE_SETTINGS_PATH") {
+fn hooks_path() -> PathBuf {
+    if let Ok(path) = env::var("CODEX_HOOKS_PATH") {
         return expand_home(&path);
     }
-    expand_home(&format!("{}/.claude/settings.json", home_dir()))
+    let codex_home = env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir()));
+    expand_home(&format!("{codex_home}/hooks.json"))
 }
 
 fn expand_home(value: &str) -> PathBuf {
@@ -1215,11 +1294,11 @@ fn env_u64(key: &str, default: u64) -> u64 {
 }
 
 fn agent_id() -> String {
-    env::var("TALLY_AGENT_ID").unwrap_or_else(|_| "claude-desktop".to_string())
+    env::var("TALLY_AGENT_ID").unwrap_or_else(|_| "codex-desktop".to_string())
 }
 
 fn agent_version() -> String {
-    env::var("TALLY_AGENT_VERSION").unwrap_or_else(|_| "claude-code".to_string())
+    env::var("TALLY_AGENT_VERSION").unwrap_or_else(|_| "codex".to_string())
 }
 
 #[cfg(test)]
@@ -1228,7 +1307,7 @@ mod tests {
 
     #[test]
     fn parse_payload_keeps_json_and_wraps_raw_text() {
-        assert_eq!(parse_payload(r#"{"session_id":"s1"}"#)["session_id"], "s1");
+        assert_eq!(parse_payload(r#"{"thread_id":"t1"}"#)["thread_id"], "t1");
         assert_eq!(parse_payload("not json")["raw_stdin"], "not json");
         assert!(parse_payload("").as_object().unwrap().is_empty());
     }
@@ -1249,30 +1328,32 @@ mod tests {
         assert_eq!(record_type_for_hook("PreToolUse"), "ACTION_TAKEN");
         assert_eq!(record_type_for_hook("PostToolUse"), "RESULT_RECEIVED");
         assert_eq!(record_type_for_hook("Stop"), "SESSION_END");
-        assert_eq!(record_type_for_hook("Other"), "CLAUDE_LIFECYCLE");
+        assert_eq!(record_type_for_hook("Other"), "CODEX_LIFECYCLE");
     }
 
     #[test]
-    fn uses_tool_use_id_to_correlate_actions_and_results() {
-        let pre = json!({"tool_use_id": "tool-123", "tool_input": {"command": "true"}});
-        let post = json!({"tool_use_id": "tool-123", "tool_response": {"stdout": ""}});
+    fn uses_tool_call_id_to_correlate_actions_and_results() {
+        let pre = json!({"tool_call_id": "tool-123", "arguments": {"command": "true"}});
+        let post = json!({"tool_call_id": "tool-123", "result": {"stdout": ""}});
         assert_eq!(action_id(&pre), "act_tool-123");
         assert_eq!(action_id(&pre), action_id(&post));
     }
 
     #[test]
-    fn removes_current_tally_hooks_only() {
+    fn removes_current_and_legacy_tally_hooks_only() {
         let mut config = json!({
             "hooks": {
                 "SessionStart": [{
                     "hooks": [
                         {"type": "command", "command": "/bin/echo keep"},
-                        {"type": "command", "command": "/tmp/tally-claude hook SessionStart"}
+                        {"type": "command", "command": "/tmp/tally-codex hook SessionStart"},
+                        {"type": "command", "command": "/tmp/tally-host-hook SessionStart"},
+                        {"type": "command", "command": "python3 codex_hook_logger.py SessionStart"}
                     ]
                 }]
             }
         });
-        assert_eq!(remove_tally_hooks(&mut config), 1);
+        assert_eq!(remove_tally_hooks(&mut config), 3);
         let handlers = config["hooks"]["SessionStart"][0]["hooks"]
             .as_array()
             .unwrap();
