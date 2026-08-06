@@ -4,6 +4,13 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.2 - 2026-08-06
+
+### Fixed
+
+- Treat successful HTTP responses with Tally API error bodies as forwarding
+  failures so local queues are retained and users see retryable ingest errors.
+
 ## 0.1.1 - 2026-08-06
 
 ### Changed
