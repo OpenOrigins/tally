@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>OpenOrigins Log Visualizer</title>
+<title>Tally Log Verifier</title>
 <style>
 * { box-sizing: border-box; margin: 0; padding: 0; }
 :root {
@@ -46,6 +46,9 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 .dz-change { font-size:11px; color:var(--muted); margin-top:6px; text-decoration:underline; cursor:pointer; }
 .dz-arrow { font-size:22px; color:var(--border); flex-shrink:0; }
 .drop-hint { font-size:12px; color:var(--muted); text-align:center; }
+.demo-row { display:flex; align-items:center; gap:10px; flex-wrap:wrap; justify-content:center; }
+.demo-label { font-size:11px; color:var(--muted); text-transform:uppercase; letter-spacing:.7px; font-weight:700; }
+.demo-error { min-height:16px; color:var(--red); font-size:12px; text-align:center; }
 .hidden-input { display:none; }
 
 /* ── Visualizer ── */
@@ -155,7 +158,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 <body>
 
 <div class="hdr">
-  <div class="hdr-logo"><span>◈</span> OpenOrigins Log Visualizer</div>
+  <div class="hdr-logo"><span>◈</span> Tally Log Verifier</div>
   <button class="btn hdr-reset" id="btnReset" style="display:none" onclick="resetToDropScreen()">← Load different files</button>
 </div>
 
@@ -163,7 +166,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 <div id="dropScreen">
   <div class="drop-intro">
     <h2>Drop two agent log files</h2>
-    <p>Load a sender's log and a receiver's log from any OpenOrigins-compatible session.<br>The visualizer will replay the session and surface any anomalies.</p>
+    <p>Load a sender's log and a receiver's log from any Tally-compatible session.<br>The visualizer will replay the session and surface any anomalies.</p>
   </div>
   <div class="drop-zones">
     <div class="drop-zone" id="zoneA" onclick="browseFile('a')" ondragover="onDragOver(event,'a')" ondragleave="onDragLeave('a')" ondrop="onDrop(event,'a')">
@@ -178,7 +181,15 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
       <div class="dz-sublabel" id="dzSubB">Drag & drop or click to browse</div>
     </div>
   </div>
-  <div class="drop-hint">Expects the JSON format defined in the OpenOrigins Agent Log Specification v0.2</div>
+  <div>
+    <div class="demo-row" aria-label="Bundled demo scenarios">
+      <span class="demo-label">Try a scenario</span>
+      <button class="btn" type="button" onclick="loadExample('one')">1 · Disputed handoff</button>
+      <button class="btn" type="button" onclick="loadExample('two')">2 · Missing activity</button>
+    </div>
+    <div class="demo-error" id="demoError" role="status" aria-live="polite"></div>
+  </div>
+  <div class="drop-hint">Expects the JSON format defined in the Tally Agent Log Specification v0.2</div>
   <input type="file" accept=".json" class="hidden-input" id="fileInputA" onchange="onFileInput(event,'a')">
   <input type="file" accept=".json" class="hidden-input" id="fileInputB" onchange="onFileInput(event,'b')">
 </div>
@@ -199,7 +210,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
     <button class="btn" id="btnAll"  onclick="showAll()">Show All</button>
     <div class="prog-wrap"><div class="prog-fill" id="pFill"></div></div>
     <span class="step-lbl" id="stepLbl">0 / 0</span>
-    <button class="btn primary" id="btnDispute" style="display:none" onclick="openDispute()">View OpenOrigins Analysis →</button>
+    <button class="btn primary" id="btnDispute" style="display:none" onclick="openDispute()">View Tally Analysis →</button>
   </div>
 </div>
 
@@ -253,6 +264,26 @@ function readFile(file, side) {
     }
   };
   reader.readAsText(file);
+}
+
+async function loadExample(name) {
+  const error = document.getElementById('demoError');
+  error.textContent = '';
+  try {
+    const base = `../examples/${name}`;
+    const [aResponse, bResponse] = await Promise.all([
+      fetch(`${base}/anchor-log-agent-a.json`),
+      fetch(`${base}/anchor-log-agent-b.json`),
+    ]);
+    if (!aResponse.ok || !bResponse.ok) throw new Error('example files were not found');
+    const [a, b] = await Promise.all([aResponse.json(), bResponse.json()]);
+    logs = { a, b };
+    markZoneLoaded('a', a);
+    markZoneLoaded('b', b);
+    visualize();
+  } catch (err) {
+    error.textContent = `Could not load the bundled scenario: ${err.message}. Serve the repository over HTTP or choose the JSON files above.`;
+  }
 }
 
 function markZoneLoaded(side, json) {
@@ -516,7 +547,7 @@ function buildCardEl(s, an) {
       const hashCls = m ? (r.emitting_party === 'receiver' ? 'bad' : '') : (r.emitting_party === 'receiver' ? 'ok' : '');
       html += `<div><span class="hash-pill ${hashCls}">${shortHash(r.payload_hash)}</span></div>`;
       if (m && r.emitting_party === 'receiver') {
-        html += `<div class="banner bad">⚠ Hash differs from sender's record. OpenOrigins flags this as a material contradiction.</div>`;
+        html += `<div class="banner bad">⚠ Hash differs from sender's record. Tally flags this as a material contradiction.</div>`;
       }
       if (!m && r.emitting_party === 'receiver') {
         html += `<div class="banner ok">✓ Payload hash matches sender's anchored record.</div>`;
@@ -624,7 +655,7 @@ function openDispute() {
   const findings = buildFindings(an, infoA, infoB);
 
   let html = `<div class="d-hdr">
-    <span class="oo-pill">◈ OpenOrigins</span>
+    <span class="oo-pill">◈ Tally</span>
     <h2>Session analysis</h2>
     <button class="btn d-close" onclick="closeDispute()">✕ Close</button>
   </div>`;
@@ -634,7 +665,7 @@ function openDispute() {
   } else {
     findings.forEach(f => {
       if (f.kind === 'verdict') {
-        html += `<div class="verdict"><div class="verdict-lbl">◈ OpenOrigins — Next Steps</div><p>${f.text}</p></div>`;
+        html += `<div class="verdict"><div class="verdict-lbl">◈ Tally — Next Steps</div><p>${f.text}</p></div>`;
         return;
       }
       html += `<div class="finding"><div class="f-head ${f.cls}">${f.icon} ${f.title}</div><div class="f-body"><p>${f.body}</p>`;
@@ -661,7 +692,7 @@ function buildFindings(an, infoA, infoB) {
   Object.entries(an.handoffMismatches).forEach(([id, m]) => {
     items.push({ kind:'finding', cls:'red', icon:'⚠',
       title: 'Material contradiction: HANDOFF payload hashes do not match',
-      body: `Handoff <code>${id}</code> was independently anchored by both parties. OpenOrigins compared the two records and found differing payload_hash values. Neither log is authoritative on its own — the contradiction is the finding.`,
+      body: `Handoff <code>${id}</code> was independently anchored by both parties. Tally compared the two records and found differing payload_hash values. Neither log is authoritative on its own — the contradiction is the finding.`,
       evidence: [
         { cls:'a', label:`${infoA.name} (sender) recorded`, value: shortHash(m.hashA), bad:false },
         { cls:'b', label:`${infoB.name} (receiver) recorded`, value: shortHash(m.hashB), bad:true },
@@ -719,8 +750,8 @@ function buildFindings(an, infoA, infoB) {
     const anyRed = items.some(i => i.cls === 'red');
     items.push({ kind:'verdict',
       text: anyRed
-        ? 'One or more material findings were identified from PUBLIC-tier fields alone. OpenOrigins proceeds to arbitrator-tier unsealing per the standard process, or requests voluntary production of private-field plaintext to verify content against anchored hashes.'
-        : 'No structural anomalies were found. All deviance was self-reported by the agents. If content-level verification is needed, OpenOrigins may request voluntary production of private-field plaintext.'
+        ? 'One or more material findings were identified from PUBLIC-tier fields alone. The verifier proceeds to arbitrator-tier unsealing per the standard process, or requests voluntary production of private-field plaintext to verify content against anchored hashes.'
+        : 'No structural anomalies were found. All deviance was self-reported by the agents. If content-level verification is needed, the verifier may request voluntary production of private-field plaintext.'
     });
   }
 
