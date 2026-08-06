@@ -71,6 +71,14 @@ fn run() -> Result<i32> {
             tally_common::forward_pending(&onboarding_state_dir())?;
             Ok(0)
         }
+        Some("gui") => {
+            run_installer_gui()?;
+            Ok(0)
+        }
+        Some(argument) if argument.starts_with("-psn_") => {
+            run_installer_gui()?;
+            Ok(0)
+        }
         Some("install-desktop-hooks" | "install") => {
             let options =
                 tally_common::parse_install_options(args.collect::<Vec<_>>(), "Claude Code")?;
@@ -95,8 +103,7 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         None => {
-            let options = tally_common::parse_install_options(Vec::new(), "Claude Code")?;
-            install_desktop_hooks(options)?;
+            run_installer_gui()?;
             Ok(0)
         }
     }
@@ -104,9 +111,21 @@ fn run() -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-claude {}\n\nRun without arguments for interactive installation.\n\nCommands:\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Claude Code hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Claude Code through Tally\n  hook EVENT    Record a hook event\n",
+        "tally-claude {}\n\nRun without arguments to open the installer.\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Claude Code hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Claude Code through Tally\n  hook EVENT    Record a hook event\n",
         env!("CARGO_PKG_VERSION")
     );
+}
+
+fn run_installer_gui() -> Result<()> {
+    tally_common::run_installer_gui(
+        tally_common::GuiConfig {
+            product: "Claude Code",
+            config_path: settings_path(),
+            state_dir: onboarding_state_dir(),
+            installed_binary_path: installed_binary_path(),
+        },
+        install_desktop_hooks,
+    )
 }
 
 fn record_hook_event(event_type: &str) -> Result<()> {
@@ -361,14 +380,18 @@ fn run_heartbeat_daemon() -> Result<()> {
     Ok(())
 }
 
-fn install_desktop_hooks(options: tally_common::InstallOptions) -> Result<()> {
+fn install_desktop_hooks(
+    options: tally_common::InstallOptions,
+) -> Result<tally_common::InstallReport> {
     set_runtime_defaults();
 
     let settings_path = settings_path();
     let state_dir = onboarding_state_dir();
+    let installed_binary_path = installed_binary_path();
     fs::create_dir_all(settings_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::create_dir_all(log_root())?;
-    let hook_bin = env::current_exe()?.display().to_string();
+    let source_binary = env::current_exe()?;
+    let hook_bin = installed_binary_path.display().to_string();
 
     let mut config = if settings_path.exists() {
         read_json_file(&settings_path)?
@@ -392,6 +415,7 @@ fn install_desktop_hooks(options: tally_common::InstallOptions) -> Result<()> {
         tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
     let api_config_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::config_path(&state_dir))?;
+    let binary_snapshot = tally_common::FileSnapshot::capture(&installed_binary_path)?;
     remove_tally_hooks(&mut config);
     let hooks = config["hooks"]
         .as_object_mut()
@@ -405,18 +429,24 @@ fn install_desktop_hooks(options: tally_common::InstallOptions) -> Result<()> {
             .push(event.to_hook_group(&hook_bin));
     }
 
-    tally_common::write_credentials(&state_dir, &options)?;
-    if let Err(error) = write_json_atomic(&settings_path, &config) {
+    let install_result = (|| -> Result<()> {
+        tally_common::install_executable(&source_binary, &installed_binary_path)?;
+        tally_common::write_credentials(&state_dir, &options)?;
+        write_json_atomic(&settings_path, &config)?;
+        Ok(())
+    })();
+    if let Err(error) = install_result {
         let _ = settings_snapshot.restore();
         let _ = key_snapshot.restore();
         let _ = api_config_snapshot.restore();
+        let _ = binary_snapshot.restore();
         return Err(error);
     }
     println!(
         "Installed Tally Claude Code hooks into {}",
         settings_path.display()
     );
-    if let Some(backup) = backup {
+    if let Some(backup) = backup.as_ref() {
         println!("Backed up previous settings file to {}", backup.display());
     }
     println!("Hook binary: {hook_bin}");
@@ -426,11 +456,28 @@ fn install_desktop_hooks(options: tally_common::InstallOptions) -> Result<()> {
         tally_common::api_key_path(&state_dir).display()
     );
     println!("Ingest API: {}", options.api_url);
-    match tally_common::notify_client_connected(&options.api_key, &options.api_url, "claude-code") {
-        Ok(()) => println!("OpenOrigins dashboard connection confirmed."),
-        Err(error) => eprintln!("Warning: {}", tally_common::handshake_warning(&error)),
-    }
-    Ok(())
+    let handshake_error = match tally_common::notify_client_connected(
+        &options.api_key,
+        &options.api_url,
+        "claude-code",
+    ) {
+        Ok(()) => {
+            println!("OpenOrigins dashboard connection confirmed.");
+            None
+        }
+        Err(error) => {
+            eprintln!("Warning: {}", tally_common::handshake_warning(&error));
+            Some(error)
+        }
+    };
+    Ok(tally_common::InstallReport {
+        config_path: settings_path,
+        state_dir,
+        logs_path: log_root(),
+        installed_binary_path,
+        backup_path: backup,
+        handshake_error,
+    })
 }
 
 fn uninstall_desktop_hooks() -> Result<()> {
@@ -1270,11 +1317,22 @@ fn onboarding_state_dir() -> PathBuf {
         .join(".state")
 }
 
+fn installed_binary_path() -> PathBuf {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    settings_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("tally")
+        .join("bin")
+        .join(format!("tally-claude{suffix}"))
+}
+
 fn remove_local_credentials() -> Result<()> {
     let state_dir = onboarding_state_dir();
     for path in [
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
+        installed_binary_path(),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}

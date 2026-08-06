@@ -7,7 +7,9 @@ Tally records verifiable Codex and Claude Code agent activity as structured audi
 Generate an Agent API key in the OpenOrigins dashboard, then download
 `tally-codex` or `tally-claude` for your operating system from
 [Releases](https://github.com/OpenOrigins/tally/releases). Run the executable for
-an interactive key prompt, or install directly:
+the graphical installer, paste the dashboard Agent API key, and select **Install
+Tally**. On macOS, extract the archive and open the included `.app`. Or install
+directly from a terminal:
 
 ```sh
 tar -xzf <download>.tar.gz # macOS only

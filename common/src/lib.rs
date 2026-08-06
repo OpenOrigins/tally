@@ -8,6 +8,10 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
+mod installer_gui;
+
+pub use installer_gui::{run_installer_gui, GuiConfig};
+
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const DEFAULT_API_URL: &str = "https://api.dev2.openorigins.com/v1/tally/logs";
@@ -16,6 +20,16 @@ const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 pub struct InstallOptions {
     pub api_key: String,
     pub api_url: String,
+}
+
+#[derive(Debug)]
+pub struct InstallReport {
+    pub config_path: PathBuf,
+    pub state_dir: PathBuf,
+    pub logs_path: PathBuf,
+    pub installed_binary_path: PathBuf,
+    pub backup_path: Option<PathBuf>,
+    pub handshake_error: Option<String>,
 }
 
 pub struct FileSnapshot {
@@ -100,10 +114,24 @@ where
         Some(key) if !key.is_empty() => key,
         _ => prompt_api_key(product)?,
     };
+    install_options(api_key, api_url)
+}
+
+pub fn install_options(api_key: String, api_url: Option<String>) -> Result<InstallOptions> {
+    let api_key = api_key.trim().to_string();
+    if api_key.is_empty() {
+        return Err("Agent API key cannot be empty".into());
+    }
+    if api_key.len() > 4096 || api_key.chars().any(char::is_control) {
+        return Err("Agent API key has an invalid format".into());
+    }
     let api_url = api_url
         .map(|url| url.trim().to_string())
         .filter(|url| !url.is_empty())
         .unwrap_or_else(|| DEFAULT_API_URL.to_string());
+    if api_url.len() > 2048 {
+        return Err("API URL is too long".into());
+    }
     validate_api_url(&api_url)?;
     Ok(InstallOptions { api_key, api_url })
 }
@@ -187,6 +215,17 @@ pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<(
         let _ = config_snapshot.restore();
         return Err(error);
     }
+    Ok(())
+}
+
+pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
+    if destination.exists() && fs::canonicalize(source).ok() == fs::canonicalize(destination).ok() {
+        return Ok(());
+    }
+    if let Some(parent) = destination.parent() {
+        create_private_dir(parent)?;
+    }
+    atomic_write(destination, &fs::read(source)?, 0o755)?;
     Ok(())
 }
 

@@ -7,8 +7,10 @@ Tags matching `v*` build and test native executables on:
 - Windows Server 2025 x86_64
 - Linux x86_64 (static musl build)
 
-The workflow publishes macOS `.tar.gz` archives, Linux/Windows executables, and
-SHA-256 files for every release asset.
+The workflow publishes macOS `.tar.gz` archives containing a Finder-openable
+`.app` and CLI symlink, Linux/Windows executables, and SHA-256 files for every
+release asset. Windows executables and macOS apps open the graphical installer
+when launched without arguments.
 
 ## Checklist
 

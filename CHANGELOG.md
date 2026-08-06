@@ -4,6 +4,18 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Restore a shared graphical installer for macOS and Windows with dashboard
+  Agent API key entry, custom ingest URL support, and explicit handshake status.
+- Package Finder-openable macOS app bundles alongside CLI symlinks in each
+  release archive.
+
+### Changed
+
+- Copy each installer executable into stable local Tally storage before wiring
+  hooks, so removing the downloaded installer does not break logging.
+
 ## 0.1.3 - 2026-08-06
 
 ### Changed

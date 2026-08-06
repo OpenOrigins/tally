@@ -7,7 +7,9 @@ publish.workspace = true
 
 [dependencies]
 fs2.workspace = true
+getrandom.workspace = true
 rpassword.workspace = true
 serde_json.workspace = true
+tiny_http.workspace = true
 ureq.workspace = true
 url.workspace = true

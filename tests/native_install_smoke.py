@@ -15,6 +15,9 @@ import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.error import HTTPError
+from urllib.parse import parse_qs, urlsplit
+from urllib.request import Request, urlopen
 
 EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
 EXPECTED_TYPES = [
@@ -133,6 +136,116 @@ def header(request: dict, name: str) -> str | None:
     return next((value for key, value in request["headers"] if key == name), None)
 
 
+def gui_request(
+    origin: str,
+    token: str,
+    path: str,
+    body: dict,
+    *,
+    authorized: bool = True,
+    expected_status: int = 200,
+) -> tuple[dict, object]:
+    headers = {"content-type": "application/json", "origin": origin}
+    if authorized:
+        headers["x-tally-installer-token"] = token
+    request = Request(
+        f"{origin}{path}",
+        data=json.dumps(body).encode("utf-8"),
+        headers=headers,
+        method="POST",
+    )
+    try:
+        response = urlopen(request, timeout=10)
+    except HTTPError as error:
+        response = error
+    response_body = json.loads(response.read().decode("utf-8"))
+    assert response.status == expected_status, response_body
+    return response_body, response.headers
+
+
+def gui_install(
+    binary: Path,
+    env: dict[str, str],
+    root: Path,
+    api_key: str,
+    api_url: str,
+    *,
+    expect_connected: bool,
+) -> dict:
+    url_file = root / f"{binary.name}-{time.time_ns()}.gui-url"
+    gui_env = env.copy()
+    gui_env.update(
+        {
+            "TALLY_GUI_NO_OPEN": "1",
+            "TALLY_GUI_URL_FILE": str(url_file),
+        }
+    )
+    process = subprocess.Popen(
+        [str(binary), "gui"],
+        text=True,
+        env=gui_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not url_file.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"GUI exited before startup\n{stdout}\n{stderr}")
+            time.sleep(0.05)
+        assert url_file.exists(), "GUI did not publish its local URL"
+
+        split = urlsplit(url_file.read_text(encoding="utf-8"))
+        token = parse_qs(split.fragment).get("token", [""])[0]
+        origin = f"{split.scheme}://{split.netloc}"
+        assert split.hostname == "127.0.0.1"
+        assert len(token) == 64
+        assert api_key not in url_file.read_text(encoding="utf-8")
+
+        with urlopen(f"{origin}/", timeout=10) as response:
+            html = response.read().decode("utf-8")
+            assert "Agent API key" in html
+            assert api_key not in html
+            assert "default-src 'self'" in response.headers["content-security-policy"]
+            assert response.headers["cache-control"] == "no-store"
+
+        unauthorized, _ = gui_request(
+            origin,
+            token,
+            "/api/status",
+            {},
+            authorized=False,
+            expected_status=403,
+        )
+        assert not unauthorized["ok"]
+
+        status, _ = gui_request(origin, token, "/api/status", {})
+        assert status["installed"]
+        result, _ = gui_request(
+            origin,
+            token,
+            "/api/install",
+            {"apiKey": api_key, "apiUrl": api_url},
+        )
+        assert result["connected"] is expect_connected
+        assert api_key not in json.dumps(result)
+        if expect_connected:
+            assert result["warning"] is None
+        else:
+            assert "Mark connected manually" in result["warning"]
+
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
+        assert api_key not in stdout
+        assert api_key not in stderr
+        return result
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=5)
+
+
 def smoke(source_binary: Path, agent: str, root: Path) -> None:
     binary_dir = root / f"{agent} binary with spaces"
     binary_dir.mkdir(parents=True)
@@ -160,6 +273,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     state_dir = config_path.parent / "tally" / "logs" / ".state"
     api_key_path = state_dir / "api_key.txt"
     api_config_path = state_dir / "config.json"
+    installed_binary = (
+        config_path.parent
+        / "tally"
+        / "bin"
+        / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+    )
     env = os.environ.copy()
     env.update(
         {
@@ -177,7 +296,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     env.pop("TALLY_STATE_DIR", None)
 
     api_key = secrets.token_urlsafe(32)
-    server = CaptureServer([config_path, api_key_path, api_config_path])
+    server = CaptureServer([config_path, api_key_path, api_config_path, installed_binary])
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
@@ -204,6 +323,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
 
         assert api_key_path.read_text(encoding="utf-8") == api_key
         assert api_key.encode("utf-8") not in binary.read_bytes()
+        assert installed_binary.exists()
+        assert installed_binary.read_bytes() == binary.read_bytes()
         assert json.loads(api_config_path.read_text(encoding="utf-8")) == {
             "apiUrl": server.api_url
         }
@@ -216,7 +337,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert "echo keep" in json.dumps(config)
         assert api_key not in json.dumps(config)
         assert len(tally_commands(config)) == 10
-        assert all(str(binary) in command for command in tally_commands(config))
+        assert all(str(installed_binary) in command for command in tally_commands(config))
 
         run(
             binary,
@@ -227,6 +348,17 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         )
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert len(tally_commands(config)) == 10, "reinstall duplicated hook handlers"
+
+        gui_install(
+            binary,
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert len(tally_commands(config)) == 10, "GUI reinstall duplicated hook handlers"
 
         session_start = next(
             command
@@ -247,6 +379,18 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         stable_api_config = api_config_path.read_bytes()
         with server.lock:
             server.response_status = 503
+        gui_install(
+            binary,
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=False,
+        )
+        assert config_path.read_bytes() == stable_hooks
+        assert api_key_path.read_bytes() == stable_key
+        assert api_config_path.read_bytes() == stable_api_config
+
         failed_handshake = run(
             binary,
             "install",
@@ -314,6 +458,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     assert list(config_path.parent.glob(f"{config_path.name}.backup-*"))
     assert not api_key_path.exists()
     assert not api_config_path.exists()
+    assert not installed_binary.exists()
 
 
 def main() -> None:
