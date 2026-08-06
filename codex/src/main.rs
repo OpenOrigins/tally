@@ -666,7 +666,9 @@ impl AuditSink {
         let lock_path = self.state_dir.join(format!("{}.counter.lock", self.source));
         let lock = OpenOptions::new()
             .create(true)
-            .append(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
             .open(lock_path)?;
         lock.lock_exclusive()?;
         let current = fs::read_to_string(&counter)
