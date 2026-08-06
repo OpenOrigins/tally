@@ -67,8 +67,13 @@ fn run() -> Result<i32> {
             run_heartbeat_daemon()?;
             Ok(0)
         }
+        Some("forward-pending") => {
+            tally_common::forward_pending(&onboarding_state_dir())?;
+            Ok(0)
+        }
         Some("install-desktop-hooks" | "install") => {
-            install_desktop_hooks()?;
+            let options = tally_common::parse_install_options(args.collect::<Vec<_>>(), "Codex")?;
+            install_desktop_hooks(options)?;
             Ok(0)
         }
         Some("uninstall-desktop-hooks" | "uninstall") => {
@@ -89,7 +94,8 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         None => {
-            install_desktop_hooks()?;
+            let options = tally_common::parse_install_options(Vec::new(), "Codex")?;
+            install_desktop_hooks(options)?;
             Ok(0)
         }
     }
@@ -97,7 +103,7 @@ fn run() -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-codex {}\n\nRun without arguments to install hooks.\n\nCommands:\n  install       Install or update Codex hooks\n  uninstall     Remove Tally hooks\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
+        "tally-codex {}\n\nRun without arguments for interactive installation.\n\nCommands:\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Codex hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -371,10 +377,11 @@ fn run_heartbeat_daemon() -> Result<()> {
     Ok(())
 }
 
-fn install_desktop_hooks() -> Result<()> {
+fn install_desktop_hooks(options: tally_common::InstallOptions) -> Result<()> {
     set_runtime_defaults();
 
     let hooks_path = hooks_path();
+    let state_dir = onboarding_state_dir();
     fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::create_dir_all(log_root())?;
     let hook_bin = env::current_exe()?.display().to_string();
@@ -396,6 +403,11 @@ fn install_desktop_hooks() -> Result<()> {
     }
 
     let backup = backup_if_exists(&hooks_path)?;
+    let hooks_snapshot = tally_common::FileSnapshot::capture(&hooks_path)?;
+    let key_snapshot =
+        tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
+    let api_config_snapshot =
+        tally_common::FileSnapshot::capture(&tally_common::config_path(&state_dir))?;
     remove_tally_hooks(&mut config);
     let hooks = config["hooks"]
         .as_object_mut()
@@ -409,7 +421,13 @@ fn install_desktop_hooks() -> Result<()> {
             .push(event.to_hook_group(&hook_bin));
     }
 
-    write_json_atomic(&hooks_path, &config)?;
+    tally_common::write_credentials(&state_dir, &options)?;
+    if let Err(error) = write_json_atomic(&hooks_path, &config) {
+        let _ = hooks_snapshot.restore();
+        let _ = key_snapshot.restore();
+        let _ = api_config_snapshot.restore();
+        return Err(error);
+    }
     println!(
         "Installed Tally Codex Desktop hooks into {}",
         hooks_path.display()
@@ -419,6 +437,15 @@ fn install_desktop_hooks() -> Result<()> {
     }
     println!("Hook binary: {hook_bin}");
     println!("Logs: {}", log_root().display());
+    println!(
+        "Agent API key: stored securely at {}",
+        tally_common::api_key_path(&state_dir).display()
+    );
+    println!("Ingest API: {}", options.api_url);
+    match tally_common::notify_client_connected(&options.api_key, &options.api_url, "codex") {
+        Ok(()) => println!("OpenOrigins dashboard connection confirmed."),
+        Err(error) => eprintln!("Warning: {}", tally_common::handshake_warning(&error)),
+    }
     Ok(())
 }
 
@@ -426,6 +453,7 @@ fn uninstall_desktop_hooks() -> Result<()> {
     let hooks_path = hooks_path();
     if !hooks_path.exists() {
         println!("No hooks file found at {}", hooks_path.display());
+        remove_local_credentials()?;
         return Ok(());
     }
     let mut config = read_json_file(&hooks_path)?;
@@ -446,6 +474,7 @@ fn uninstall_desktop_hooks() -> Result<()> {
     if let Some(backup) = backup {
         println!("Backed up previous hooks file to {}", backup.display());
     }
+    remove_local_credentials()?;
     Ok(())
 }
 
@@ -717,6 +746,7 @@ impl AuditSink {
             with_defaults["schema_version"] = Value::String("0.2".to_string());
         }
         write_json_atomic(&path, &with_defaults)?;
+        let _ = tally_common::enqueue_record(&onboarding_state_dir(), &path, &env::current_exe()?);
         Ok(path)
     }
 
@@ -1239,6 +1269,33 @@ fn hooks_path() -> PathBuf {
     }
     let codex_home = env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir()));
     expand_home(&format!("{codex_home}/hooks.json"))
+}
+
+fn onboarding_state_dir() -> PathBuf {
+    if let Ok(path) = env::var("TALLY_STATE_DIR") {
+        return expand_home(&path);
+    }
+    hooks_path()
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("tally")
+        .join("logs")
+        .join(".state")
+}
+
+fn remove_local_credentials() -> Result<()> {
+    let state_dir = onboarding_state_dir();
+    for path in [
+        tally_common::api_key_path(&state_dir),
+        tally_common::config_path(&state_dir),
+    ] {
+        match fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
 }
 
 fn expand_home(value: &str) -> PathBuf {
