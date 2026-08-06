@@ -7,6 +7,7 @@ import argparse
 import hashlib
 import shutil
 import stat
+import tarfile
 from pathlib import Path
 
 
@@ -22,13 +23,32 @@ def main() -> None:
     source_dir = Path("target") / args.target / "release"
     for name in ("tally-codex", "tally-claude"):
         source = source_dir / f"{name}{suffix}"
+        if args.label.startswith("macos-"):
+            destination = args.output / f"{name}-{args.label}.tar.gz"
+            write_macos_archive(source, destination, name)
+            write_checksum(destination)
+            continue
+
         destination = args.output / f"{name}-{args.label}{suffix}"
         shutil.copy2(source, destination)
         destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
-        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
-        destination.with_name(f"{destination.name}.sha256").write_text(
-            f"{digest}  {destination.name}\n", encoding="ascii"
-        )
+        write_checksum(destination)
+
+
+def write_macos_archive(source: Path, archive_path: Path, archive_name: str) -> None:
+    executable_mode = source.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
+    with tarfile.open(str(archive_path), "w:gz") as archive:
+        info = archive.gettarinfo(str(source), arcname=archive_name)
+        info.mode = executable_mode & 0o777
+        with source.open("rb") as handle:
+            archive.addfile(info, handle)
+
+
+def write_checksum(path: Path) -> None:
+    digest = hashlib.sha256(path.read_bytes()).hexdigest()
+    path.with_name(f"{path.name}.sha256").write_text(
+        f"{digest}  {path.name}\n", encoding="ascii"
+    )
 
 
 if __name__ == "__main__":

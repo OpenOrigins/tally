@@ -10,12 +10,13 @@ Generate an Agent API key in the OpenOrigins dashboard, then download
 an interactive key prompt, or install directly:
 
 ```sh
+tar -xzf <download>.tar.gz # macOS only
 tally-codex install --api-key <agent-api-key>
 tally-claude install --api-key <agent-api-key>
 ```
 
-Add `--api-url <url>` only when using a custom ingest endpoint. On macOS/Linux,
-make the downloaded file executable first with `chmod +x <file>`.
+Add `--api-url <url>` only when using a custom ingest endpoint. On Linux, make
+the downloaded file executable first with `chmod +x <file>`.
 
 To remove the hooks, run the executable with `uninstall`.
 

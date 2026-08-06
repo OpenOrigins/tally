@@ -8,8 +8,8 @@ All notable changes to Tally are documented in this file.
 
 ### Changed
 
-- Rolled back macOS DMG installer packaging and restored direct native
-  executable release assets.
+- Rolled back macOS DMG installer packaging and package macOS downloads as
+  `.tar.gz` archives that preserve executable permissions.
 
 ## 0.1.2 - 2026-08-06
 

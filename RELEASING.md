@@ -7,8 +7,8 @@ Tags matching `v*` build and test native executables on:
 - Windows Server 2025 x86_64
 - Linux x86_64 (static musl build)
 
-The workflow publishes `tally-codex-*`, `tally-claude-*`, and a SHA-256 file for
-every executable to the GitHub release.
+The workflow publishes macOS `.tar.gz` archives, Linux/Windows executables, and
+SHA-256 files for every release asset.
 
 ## Checklist
 
@@ -17,7 +17,7 @@ every executable to the GitHub release.
 3. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
 4. Merge to `dev` and confirm all required PR checks pass.
 5. Tag the tested commit as `v<version>` and push the tag.
-6. Verify all eight executables and checksum files in the release.
+6. Verify all macOS archives, Linux/Windows executables, and checksum files in the release.
 7. Install each executable on a clean target and run one real agent session.
 
 The workflow produces unsigned binaries. Configure platform signing and macOS
