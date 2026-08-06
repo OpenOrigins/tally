@@ -7,19 +7,8 @@ Tags matching `v*` build and test native executables on:
 - Windows Server 2025 x86_64
 - Linux x86_64 (static musl build)
 
-The workflow publishes notarized macOS `.dmg` installers, Linux/Windows
-executables, and SHA-256 files for every release asset.
-
-macOS releases require these GitHub secrets:
-
-- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64`
-- `APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD`
-- `APPLE_ID`
-- `APPLE_TEAM_ID`
-- `APPLE_APP_SPECIFIC_PASSWORD`
-
-`APPLE_DEVELOPER_ID_APPLICATION_IDENTITY` and `APPLE_KEYCHAIN_PASSWORD` are
-optional overrides.
+The workflow publishes `tally-codex-*`, `tally-claude-*`, and a SHA-256 file for
+every executable to the GitHub release.
 
 ## Checklist
 
@@ -28,8 +17,8 @@ optional overrides.
 3. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
 4. Merge to `dev` and confirm all required PR checks pass.
 5. Tag the tested commit as `v<version>` and push the tag.
-6. Verify all macOS DMGs, Linux/Windows executables, and checksum files in the release.
+6. Verify all eight executables and checksum files in the release.
 7. Install each executable on a clean target and run one real agent session.
 
-The workflow fails macOS release jobs unless Developer ID signing and Apple
-notarization succeed.
+The workflow produces unsigned binaries. Configure platform signing and macOS
+notarization credentials before treating downloads as a polished public release.
