@@ -1,0 +1,20 @@
+services:
+  claude:
+    build:
+      context: ..
+      dockerfile: claude-container/Dockerfile
+    image: tally-claude-audit:local
+    working_dir: /workspace
+    stdin_open: true
+    tty: true
+    environment:
+      TALLY_LOG_ROOT: /var/log/tally-claude
+      TALLY_WORKSPACE: /workspace
+      TALLY_HOOK_HEARTBEAT_SECONDS: "60"
+    volumes:
+      - ..:/workspace
+      - claude-home:/home/claude
+      - ../.tally-claude-logs:/var/log/tally-claude
+
+volumes:
+  claude-home:

@@ -7,3 +7,7 @@ codex-host/target/
 codex-container/logs/
 hello_from_codex.txt
 python_script/
+.tally-claude-logs*/
+claude-audit/target/
+claude-host/target/
+claude-container/logs/

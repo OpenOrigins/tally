@@ -1,0 +1,12 @@
+[package]
+name = "tally-claude"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.89"
+publish = false
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+fs2 = "0.4"
+serde_json = "1"
+sha2 = "0.10"
