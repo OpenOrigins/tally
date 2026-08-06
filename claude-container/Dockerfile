@@ -1,16 +1,20 @@
-FROM rust:1.89-slim-bookworm AS audit-builder
+ARG RUST_IMAGE=public.ecr.aws/docker/library/rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6
+ARG RUNTIME_IMAGE=public.ecr.aws/docker/library/node:22.23.2-bookworm-slim@sha256:d649c27dae7ba0137b3cef5dd75baa422c08dc3d9e3fc0c23dfb172dc3cc6436
 
-WORKDIR /build/claude-audit
-COPY claude-audit/Cargo.toml claude-audit/Cargo.lock ./
-COPY claude-audit/src ./src
-RUN cargo build --release --bin tally-claude
+FROM ${RUST_IMAGE} AS audit-builder
 
-FROM debian:bookworm-slim
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY codex-audit/Cargo.toml codex-audit/Cargo.toml
+COPY claude-audit/Cargo.toml claude-audit/Cargo.toml
+COPY codex-audit/src codex-audit/src
+COPY claude-audit/src claude-audit/src
+RUN cargo build --locked --release --package tally-claude
 
-ARG USERNAME=claude
-ARG USER_UID=1000
-ARG USER_GID=1000
-ARG NODE_MAJOR=22
+FROM ${RUNTIME_IMAGE}
+
+ARG USERNAME=node
+ARG CLAUDE_CODE_VERSION=2.1.223
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV TALLY_LOG_ROOT=/var/log/tally-claude
@@ -27,34 +31,35 @@ RUN apt-get update \
     curl \
     findutils \
     git \
-    gnupg \
     jq \
     less \
     ripgrep \
     tini \
     tzdata \
-  && curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | bash - \
-  && apt-get install -y --no-install-recommends nodejs \
   && rm -rf /var/lib/apt/lists/*
 
 # Official install method for the Claude Code CLI (npm), see:
 # https://code.claude.com/docs/en/quickstart
-RUN npm install -g @anthropic-ai/claude-code
+RUN npm install -g "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
+  && claude --version | grep -F "${CLAUDE_CODE_VERSION}"
 
-RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
-  && useradd --uid "${USER_UID}" --gid "${USER_GID}" --create-home --shell /bin/bash "${USERNAME}" \
-  && mkdir -p /workspace /var/log/tally-claude /opt/tally-claude/bin /opt/tally-claude/claude \
+RUN mkdir -p /workspace /var/log/tally-claude /opt/tally-claude/bin /opt/tally-claude/claude \
   && chown -R "${USERNAME}:${USERNAME}" /workspace /var/log/tally-claude /opt/tally-claude "/home/${USERNAME}"
 
 USER ${USERNAME}
 
-COPY --from=audit-builder --chown=${USERNAME}:${USERNAME} /build/claude-audit/target/release/tally-claude /opt/tally-claude/bin/tally-claude
+COPY --from=audit-builder --chown=${USERNAME}:${USERNAME} /build/target/release/tally-claude /opt/tally-claude/bin/tally-claude
 COPY --chown=${USERNAME}:${USERNAME} claude-container/bin/entrypoint.sh /opt/tally-claude/bin/entrypoint.sh
 COPY --chown=${USERNAME}:${USERNAME} claude-container/claude /opt/tally-claude/claude
 
 RUN chmod +x /opt/tally-claude/bin/*
 
 WORKDIR /workspace
+
+LABEL org.opencontainers.image.title="Tally Claude Code Audit Wrapper" \
+      org.opencontainers.image.description="Claude Code CLI with local Tally audit hooks" \
+      org.opencontainers.image.source="https://github.com/OpenOrigins/tally" \
+      org.opencontainers.image.licenses="NOASSERTION"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/tally-claude/bin/entrypoint.sh"]
 CMD ["claude"]

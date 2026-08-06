@@ -494,7 +494,7 @@ fn build_tally_record(
                 "record_type": "ACTION_TAKEN",
                 "schema_version": "0.2-mvp",
                 "session_id": session_id,
-                "action_id": stable_id("act", payload),
+                "action_id": action_id(payload),
                 "instruction_id": first_string_by_key(payload, &["instruction_id", "turn_id", "turnId"])
                     .unwrap_or_else(|| stable_id("instr", &Value::String(session_id.clone()))),
                 "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
@@ -522,8 +522,7 @@ fn build_tally_record(
                 "record_type": "RESULT_RECEIVED",
                 "schema_version": "0.2-mvp",
                 "session_id": session_id,
-                "action_id": first_string_by_key(payload, &["action_id", "tool_call_id", "call_id", "id"])
-                    .unwrap_or_else(|| stable_id("act", payload)),
+                "action_id": action_id(payload),
                 "result_hash": raw_ref["hash"],
                 "result_uri": raw_ref["uri"],
                 "result_received_at": observed_at,
@@ -867,6 +866,28 @@ fn stable_id(prefix: &str, value: &Value) -> String {
     )
 }
 
+fn action_id(payload: &Value) -> String {
+    first_string_by_key(
+        payload,
+        &[
+            "tool_use_id",
+            "toolUseId",
+            "action_id",
+            "tool_call_id",
+            "call_id",
+            "id",
+        ],
+    )
+    .map(|value| {
+        if value.starts_with("act_") {
+            value
+        } else {
+            format!("act_{value}")
+        }
+    })
+    .unwrap_or_else(|| stable_id("act", payload))
+}
+
 fn scrub_environment() -> Value {
     let allowed: BTreeSet<&str> = [
         "CODEX_HOME",
@@ -1051,7 +1072,7 @@ fn utc_now() -> String {
 }
 
 fn backup_stamp() -> String {
-    Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+    Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string()
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1244,6 +1265,14 @@ mod tests {
         assert_eq!(record_type_for_hook("PostToolUse"), "RESULT_RECEIVED");
         assert_eq!(record_type_for_hook("Stop"), "SESSION_END");
         assert_eq!(record_type_for_hook("Other"), "CODEX_LIFECYCLE");
+    }
+
+    #[test]
+    fn uses_tool_call_id_to_correlate_actions_and_results() {
+        let pre = json!({"tool_call_id": "tool-123", "arguments": {"command": "true"}});
+        let post = json!({"tool_call_id": "tool-123", "result": {"stdout": ""}});
+        assert_eq!(action_id(&pre), "act_tool-123");
+        assert_eq!(action_id(&pre), action_id(&post));
     }
 
     #[test]

@@ -1,6 +1,10 @@
 .git
 .DS_Store
 **/.DS_Store
+target/
+output/
+paper/
+tmp/
 .tally-codex-logs*/
 codex-audit/target/
 codex-host/target/

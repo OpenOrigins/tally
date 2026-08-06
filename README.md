@@ -10,6 +10,23 @@ deployment modes:
 - [Claude Code Audit Wrapper](#claude-code-audit-wrapper) — `tally-claude`,
   wrapping the Claude Code CLI.
 
+## Release Status
+
+The current release candidate supports Linux `amd64`/`arm64` containers and
+source-built host hooks on macOS and Linux. Windows packages are not currently
+produced. Container builds pin their base images, Codex CLI 0.146.1, Node.js
+22.23.2, and Claude Code 2.1.223 so those inputs change only when intentionally
+updated and tested.
+
+Run the full acceptance suite without production credentials:
+
+```bash
+./scripts/release-check.sh --docker
+```
+
+See [RELEASING.md](RELEASING.md) for the release checklist and remaining public
+release requirements.
+
 ## Codex Audit Wrapper
 
 Tally includes a minimal Codex audit wrapper with two deployment modes:
@@ -61,10 +78,10 @@ flowchart LR
 
 ## Shared Rust Binary
 
-Build locally:
+Build both wrappers locally:
 
 ```bash
-cargo build --release --manifest-path codex-audit/Cargo.toml --bin tally-codex
+cargo build --locked --release --workspace
 ```
 
 Command surface:
@@ -283,10 +300,10 @@ flowchart LR
 
 ### Shared Rust Binary
 
-Build locally:
+Build both wrappers locally:
 
 ```bash
-cargo build --release --manifest-path claude-audit/Cargo.toml --bin tally-claude
+cargo build --locked --release --workspace
 ```
 
 Command surface:

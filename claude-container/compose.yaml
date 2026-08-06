@@ -13,7 +13,7 @@ services:
       TALLY_HOOK_HEARTBEAT_SECONDS: "60"
     volumes:
       - ..:/workspace
-      - claude-home:/home/claude
+      - claude-home:/home/node
       - ../.tally-claude-logs:/var/log/tally-claude
 
 volumes:

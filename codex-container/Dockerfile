@@ -1,15 +1,22 @@
-FROM rust:1.89-slim-bookworm AS audit-builder
+ARG RUST_IMAGE=public.ecr.aws/docker/library/rust:1.89-slim-bookworm@sha256:d7fc7de78bb8c1469933aeecbf801314d30d7d6e9f0578bba4cfa285bfa37fe6
+ARG RUNTIME_IMAGE=public.ecr.aws/docker/library/debian:bookworm-slim@sha256:abd67ffcfa541b485a3dff59865ab629aa048a6c613e639d36e7456b0b229241
 
-WORKDIR /build/codex-audit
-COPY codex-audit/Cargo.toml codex-audit/Cargo.lock ./
-COPY codex-audit/src ./src
-RUN cargo build --release --bin tally-codex
+FROM ${RUST_IMAGE} AS audit-builder
 
-FROM debian:bookworm-slim
+WORKDIR /build
+COPY Cargo.toml Cargo.lock ./
+COPY codex-audit/Cargo.toml codex-audit/Cargo.toml
+COPY claude-audit/Cargo.toml claude-audit/Cargo.toml
+COPY codex-audit/src codex-audit/src
+COPY claude-audit/src claude-audit/src
+RUN cargo build --locked --release --package tally-codex
+
+FROM ${RUNTIME_IMAGE}
 
 ARG USERNAME=codex
 ARG USER_UID=1000
 ARG USER_GID=1000
+ARG CODEX_RELEASE=0.146.1
 
 ENV DEBIAN_FRONTEND=noninteractive
 ENV CODEX_HOME=/codex-home
@@ -42,15 +49,21 @@ RUN groupadd --gid "${USER_GID}" "${USERNAME}" \
   && chown -R "${USERNAME}:${USERNAME}" /workspace /codex-home /var/log/tally-codex /opt/tally-codex "/home/${USERNAME}/.local"
 
 USER ${USERNAME}
-RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 sh
+RUN curl -fsSL https://chatgpt.com/codex/install.sh | CODEX_NON_INTERACTIVE=1 CODEX_RELEASE="${CODEX_RELEASE}" sh \
+  && codex --version | grep -F "${CODEX_RELEASE}"
 
-COPY --from=audit-builder --chown=${USERNAME}:${USERNAME} /build/codex-audit/target/release/tally-codex /opt/tally-codex/bin/tally-codex
+COPY --from=audit-builder --chown=${USERNAME}:${USERNAME} /build/target/release/tally-codex /opt/tally-codex/bin/tally-codex
 COPY --chown=${USERNAME}:${USERNAME} codex-container/bin/entrypoint.sh /opt/tally-codex/bin/entrypoint.sh
 COPY --chown=${USERNAME}:${USERNAME} codex-container/codex /opt/tally-codex/codex
 
 RUN chmod +x /opt/tally-codex/bin/*
 
 WORKDIR /workspace
+
+LABEL org.opencontainers.image.title="Tally Codex Audit Wrapper" \
+      org.opencontainers.image.description="Codex CLI with local Tally audit hooks" \
+      org.opencontainers.image.source="https://github.com/OpenOrigins/tally" \
+      org.opencontainers.image.licenses="NOASSERTION"
 
 ENTRYPOINT ["/usr/bin/tini", "--", "/opt/tally-codex/bin/entrypoint.sh"]
 CMD ["codex"]

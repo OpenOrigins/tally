@@ -11,6 +11,7 @@
 
 # Codex wrapper logs
 .tally-codex-logs*/
+/target/
 codex-container/logs/
 codex-host/target/
 codex-audit/target/
@@ -20,9 +21,3 @@ codex-audit/target/
 claude-container/logs/
 claude-host/target/
 claude-audit/target/
-
-# JavaScript wrapper dependencies and runtime data
-js-version/node_modules/
-js-version/logs/
-js-version-codex/node_modules/
-js-version-codex/logs/

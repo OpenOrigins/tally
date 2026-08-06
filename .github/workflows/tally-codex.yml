@@ -101,6 +101,9 @@ jobs:
           file: codex-container/Dockerfile
           push: true
           platforms: ${{ matrix.platform }}
+          labels: |
+            org.opencontainers.image.version=${{ needs.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.version }}-${{ steps.platform.outputs.arch }}
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ needs.version.outputs.short_sha }}-${{ steps.platform.outputs.arch }}
