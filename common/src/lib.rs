@@ -304,11 +304,32 @@ fn post_json(url: &str, api_key: &str, body: &str) -> std::result::Result<(), St
         .set("content-type", "application/json")
         .send_string(body)
     {
-        Ok(response) if (200..300).contains(&response.status()) => Ok(()),
+        Ok(response) if (200..300).contains(&response.status()) => {
+            response_body_error(response.into_string().unwrap_or_default().trim())
+        }
         Ok(response) => Err(format!("server returned HTTP {}", response.status())),
         Err(ureq::Error::Status(status, _)) => Err(format!("server returned HTTP {status}")),
         Err(ureq::Error::Transport(error)) => Err(error.to_string()),
     }
+}
+
+fn response_body_error(body: &str) -> std::result::Result<(), String> {
+    if body.is_empty() {
+        return Ok(());
+    }
+    let Ok(value) = serde_json::from_str::<Value>(body) else {
+        return Ok(());
+    };
+    let status_code = value["status_code"]
+        .as_i64()
+        .or_else(|| value["statusCode"].as_i64())
+        .unwrap_or_default();
+    if status_code < 400 {
+        return Ok(());
+    }
+    let code = value["code"].as_str().unwrap_or("api_error");
+    let message = value["message"].as_str().unwrap_or(code);
+    Err(format!("server returned {status_code}: {message}"))
 }
 
 fn write_forward_status(state_dir: &Path, ok: bool, error: Option<&str>) -> Result<()> {
@@ -383,4 +404,26 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::response_body_error;
+
+    #[test]
+    fn accepts_empty_or_success_response_bodies() {
+        assert!(response_body_error("").is_ok());
+        assert!(response_body_error(r#"{"status_code":200,"ok":true}"#).is_ok());
+        assert!(response_body_error("accepted").is_ok());
+    }
+
+    #[test]
+    fn rejects_successful_http_response_with_error_body() {
+        let error = response_body_error(
+            r#"{"billingSetupRequired":true,"code":"billing_setup_required","message":"billing_setup_required: Add a payment method before ingesting Agent Logs","status_code":402}"#,
+        )
+        .unwrap_err();
+        assert!(error.contains("402"));
+        assert!(error.contains("billing_setup_required"));
+    }
 }
