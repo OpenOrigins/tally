@@ -597,7 +597,7 @@ dependencies = [
 
 [[package]]
 name = "tally-claude"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -608,7 +608,7 @@ dependencies = [
 
 [[package]]
 name = "tally-codex"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "chrono",
  "fs2",
@@ -619,7 +619,7 @@ dependencies = [
 
 [[package]]
 name = "tally-common"
-version = "0.1.0"
+version = "0.1.1"
 dependencies = [
  "fs2",
  "rpassword",

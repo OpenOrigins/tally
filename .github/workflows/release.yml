@@ -74,7 +74,24 @@ jobs:
       - name: Preserve push-test ingest behavior
         run: python tests/test_push_test_logs.py
 
+      - name: Package macOS installers and checksums
+        if: startsWith(matrix.label, 'macos-')
+        env:
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_BASE64 }}
+          APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_CERTIFICATE_PASSWORD }}
+          APPLE_DEVELOPER_ID_APPLICATION_IDENTITY: ${{ secrets.APPLE_DEVELOPER_ID_APPLICATION_IDENTITY }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_KEYCHAIN_PASSWORD: ${{ secrets.APPLE_KEYCHAIN_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: >-
+          python scripts/package_release.py
+          --target ${{ matrix.target }}
+          --label ${{ matrix.label }}
+          --require-macos-notarization
+
       - name: Package executables and checksums
+        if: ${{ !startsWith(matrix.label, 'macos-') }}
         run: >-
           python scripts/package_release.py
           --target ${{ matrix.target }}

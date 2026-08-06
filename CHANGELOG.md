@@ -4,6 +4,15 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.1 - 2026-08-06
+
+### Changed
+
+- Package macOS downloads as notarized DMG installer apps instead of raw
+  executables, and require Apple signing/notarization in tag releases.
+
+## 0.1.0 - 2026-08-06
+
 ### Added
 
 - Native Codex and Claude Code executables for macOS arm64/x86_64, Windows
