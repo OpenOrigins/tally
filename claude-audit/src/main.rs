@@ -469,15 +469,17 @@ fn build_tally_record(
             })
         }
         "PreToolUse" | "PermissionRequest" => {
-            let tool_params =
-                first_mapping_by_key(payload, &["tool_input", "arguments", "args", "params", "input"])
-                    .cloned()
-                    .unwrap_or_else(|| payload.clone());
+            let tool_params = first_mapping_by_key(
+                payload,
+                &["tool_input", "arguments", "args", "params", "input"],
+            )
+            .cloned()
+            .unwrap_or_else(|| payload.clone());
             json!({
                 "record_type": "ACTION_TAKEN",
                 "schema_version": "0.2-mvp",
                 "session_id": session_id,
-                "action_id": stable_id("act", payload),
+                "action_id": action_id(payload),
                 "instruction_id": first_string_by_key(payload, &["instruction_id", "prompt_id", "turn_id", "turnId"])
                     .unwrap_or_else(|| stable_id("instr", &Value::String(session_id.clone()))),
                 "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
@@ -500,13 +502,13 @@ fn build_tally_record(
             })
         }
         "PostToolUse" => {
-            let has_error = first_string_by_key(payload, &["tool_error", "error", "exception"]).is_some();
+            let has_error =
+                first_string_by_key(payload, &["tool_error", "error", "exception"]).is_some();
             json!({
                 "record_type": "RESULT_RECEIVED",
                 "schema_version": "0.2-mvp",
                 "session_id": session_id,
-                "action_id": first_string_by_key(payload, &["action_id", "tool_call_id", "call_id", "id"])
-                    .unwrap_or_else(|| stable_id("act", payload)),
+                "action_id": action_id(payload),
                 "result_hash": raw_ref["hash"],
                 "result_uri": raw_ref["uri"],
                 "result_received_at": observed_at,
@@ -733,7 +735,8 @@ fn remove_tally_hooks(config: &mut Value) -> usize {
             let before = handlers.len();
             handlers.retain(|handler| {
                 let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                let is_current_hook = command.contains("tally-claude") && command.contains(" hook ");
+                let is_current_hook =
+                    command.contains("tally-claude") && command.contains(" hook ");
                 !is_current_hook
             });
             removed += before - handlers.len();
@@ -849,6 +852,28 @@ fn stable_id(prefix: &str, value: &Value) -> String {
     )
 }
 
+fn action_id(payload: &Value) -> String {
+    first_string_by_key(
+        payload,
+        &[
+            "tool_use_id",
+            "toolUseId",
+            "action_id",
+            "tool_call_id",
+            "call_id",
+            "id",
+        ],
+    )
+    .map(|value| {
+        if value.starts_with("act_") {
+            value
+        } else {
+            format!("act_{value}")
+        }
+    })
+    .unwrap_or_else(|| stable_id("act", payload))
+}
+
 fn scrub_environment() -> Value {
     let allowed: BTreeSet<&str> = [
         "CLAUDE_PROJECT_DIR",
@@ -880,9 +905,7 @@ fn scrub_environment() -> Value {
         if denied.iter().any(|fragment| upper.contains(fragment)) {
             continue;
         }
-        if allowed.contains(key.as_str())
-            || key.starts_with("TALLY_")
-            || key.starts_with("CLAUDE_")
+        if allowed.contains(key.as_str()) || key.starts_with("TALLY_") || key.starts_with("CLAUDE_")
         {
             out.insert(key, Value::String(value.chars().take(500).collect()));
         }
@@ -1035,7 +1058,7 @@ fn utc_now() -> String {
 }
 
 fn backup_stamp() -> String {
-    Utc::now().format("%Y%m%dT%H%M%SZ").to_string()
+    Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string()
 }
 
 fn random_hex(bytes: usize) -> String {
@@ -1227,6 +1250,14 @@ mod tests {
         assert_eq!(record_type_for_hook("PostToolUse"), "RESULT_RECEIVED");
         assert_eq!(record_type_for_hook("Stop"), "SESSION_END");
         assert_eq!(record_type_for_hook("Other"), "CLAUDE_LIFECYCLE");
+    }
+
+    #[test]
+    fn uses_tool_use_id_to_correlate_actions_and_results() {
+        let pre = json!({"tool_use_id": "tool-123", "tool_input": {"command": "true"}});
+        let post = json!({"tool_use_id": "tool-123", "tool_response": {"stdout": ""}});
+        assert_eq!(action_id(&pre), "act_tool-123");
+        assert_eq!(action_id(&pre), action_id(&post));
     }
 
     #[test]

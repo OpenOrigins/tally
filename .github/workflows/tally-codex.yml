@@ -32,15 +32,21 @@ jobs:
 
       - name: Determine Version
         id: version
+        env:
+          MANUAL_VERSION: ${{ github.event.inputs.version }}
+          TAG_LATEST_INPUT: ${{ github.event.inputs.tag_latest }}
         run: |
           SHORT_SHA=$(git rev-parse --short HEAD)
           echo "short_sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
-          echo "tag_latest=${{ github.event.inputs.tag_latest }}" >> $GITHUB_OUTPUT
+          echo "tag_latest=${TAG_LATEST_INPUT}" >> $GITHUB_OUTPUT
 
-          MANUAL_VERSION="${{ github.event.inputs.version }}"
           if [[ -n "${MANUAL_VERSION// }" ]]; then
             VERSION="${MANUAL_VERSION// /}"
             VERSION="${VERSION#v}"
+            if [[ ! "${VERSION}" =~ ^[0-9A-Za-z][0-9A-Za-z._-]{0,127}$ ]]; then
+              echo "Invalid image version: ${VERSION}" >&2
+              exit 1
+            fi
             echo "version=${VERSION}" >> $GITHUB_OUTPUT
             echo "Using manual version: ${VERSION}"
           else

@@ -113,12 +113,18 @@ function notifyClientConnected(apiKey, apiUrl) {
     };
 
     try {
-      const target = new URL('https://api.dev2.openorigins.com/v1/tally/onboarding/client-connected');
+      const target = new URL(apiUrl && apiUrl.trim() ? apiUrl.trim() : DEFAULT_API_URL);
+      target.pathname = '/v1/tally/onboarding/client-connected';
+      target.search = '';
+      if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+        throw new Error(`unsupported API URL protocol: ${target.protocol}`);
+      }
+      const transport = target.protocol === 'http:' ? http : https;
       const payload = JSON.stringify({ source: 'claude-code' });
-      const req = https.request(
+      const req = transport.request(
         {
           hostname: target.hostname,
-          port: target.port || 443,
+          port: target.port || (target.protocol === 'http:' ? 80 : 443),
           path: target.pathname,
           method: 'POST',
           headers: {
@@ -203,9 +209,9 @@ async function doInstall({ apiKey, apiUrl }) {
     try { fs.chmodSync(dest, 0o755); } catch (_) {}
   }
 
-  // 2. Write the API key locally (0600 where supported). Never transmitted
-  // anywhere by the installer itself -- only read later by log_forwarder.js
-  // over HTTPS to the configured endpoint.
+  // 2. Write the API key locally (0600 where supported). The installer uses it
+  // only for onboarding on the configured API origin; the forwarder later uses
+  // it for log delivery to the configured endpoint.
   const apiKeyPath = path.join(stateDir, 'api_key.txt');
   fs.writeFileSync(apiKeyPath, apiKey.trim(), { mode: 0o600 });
   try { fs.chmodSync(apiKeyPath, 0o600); } catch (_) {}
@@ -254,8 +260,16 @@ const MIME = {
 function serveStatic(req, res) {
   let reqPath = req.url === '/' ? '/index.html' : req.url;
   reqPath = reqPath.split('?')[0];
-  const filePath = path.join(GUI_DIR, reqPath);
-  if (!filePath.startsWith(GUI_DIR)) {
+  try {
+    reqPath = decodeURIComponent(reqPath);
+  } catch (_) {
+    res.writeHead(400);
+    res.end('Bad request');
+    return;
+  }
+  const filePath = path.resolve(GUI_DIR, reqPath.replace(/^[/\\]+/, ''));
+  const relativePath = path.relative(GUI_DIR, filePath);
+  if (relativePath.startsWith('..') || path.isAbsolute(relativePath)) {
     res.writeHead(403);
     res.end('Forbidden');
     return;
@@ -274,7 +288,16 @@ function serveStatic(req, res) {
 function readBody(req) {
   return new Promise((resolve, reject) => {
     let data = '';
-    req.on('data', (chunk) => { data += chunk; });
+    let size = 0;
+    req.on('data', (chunk) => {
+      size += chunk.length;
+      if (size > 64 * 1024) {
+        reject(new Error('request body too large'));
+        req.destroy();
+        return;
+      }
+      data += chunk;
+    });
     req.on('end', () => resolve(data));
     req.on('error', reject);
   });

@@ -15,8 +15,8 @@
 // or API outage just pauses shipping -- it never skips a record, and at most
 // re-sends the one record that was in flight when it died (at-least-once,
 // not exactly-once). If no offset file exists yet (first run), the offset is
-// initialized to the log's current end, so pre-existing backlog is skipped
-// and only records appended from that point on are ever forwarded.
+// initialized to zero so records already written before the daemon starts,
+// including the first SESSION_START, are delivered.
 //
 // The API key and endpoint URL are both read fresh from disk on every drain
 // rather than cached at startup, so rotating logs/.state/api_key.txt or
@@ -70,18 +70,8 @@ function readOffset() {
   try {
     return parseInt(fs.readFileSync(OFFSET_FILE, 'utf8'), 10) || 0;
   } catch (_) {
-    // No persisted offset yet: skip any backlog already in the log file and
-    // start from the current end, so only newly-appended records get shipped.
-    // Persist this baseline immediately -- otherwise every future call would
-    // hit this same fallback and re-adopt "now" as the start, never advancing.
-    let offset = 0;
-    try {
-      offset = fs.statSync(LOG_FILE).size;
-    } catch (_) {
-      offset = 0;
-    }
-    writeOffset(offset);
-    return offset;
+    writeOffset(0);
+    return 0;
   }
 }
 
@@ -101,6 +91,10 @@ function postRecord(record, apiKey, apiUrl) {
   return new Promise((resolve, reject) => {
     const body = JSON.stringify(record);
     const url = new URL(apiUrl);
+    if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+      reject(new Error(`unsupported API URL protocol: ${url.protocol}`));
+      return;
+    }
     const transport = url.protocol === 'http:' ? http : https;
     const req = transport.request(
       {

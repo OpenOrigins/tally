@@ -90,7 +90,11 @@ function detectClientSurface() {
 }
 
 function statePath(sessionId) {
-  return path.join(STATE_DIR, `${sessionId}.json`);
+  return path.join(STATE_DIR, `${stateKey(sessionId)}.json`);
+}
+
+function stateKey(sessionId) {
+  return crypto.createHash('sha256').update(String(sessionId)).digest('hex');
 }
 
 function loadState(sessionId) {
@@ -147,6 +151,10 @@ function fetchHeartbeatEnabled(apiKey, apiUrl) {
       resolve(true);
       return;
     }
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') {
+      resolve(true);
+      return;
+    }
     target.pathname = '/v1/tally/heartbeat-status';
     target.search = '';
     const transport = target.protocol === 'http:' ? http : https;
@@ -183,7 +191,7 @@ function fetchHeartbeatEnabled(apiKey, apiUrl) {
 }
 
 function heartbeatPidFile(sessionId) {
-  return path.join(STATE_DIR, `${sessionId}.heartbeat.pid`);
+  return path.join(STATE_DIR, `${stateKey(sessionId)}.heartbeat.pid`);
 }
 
 function isPidAlive(pid) {

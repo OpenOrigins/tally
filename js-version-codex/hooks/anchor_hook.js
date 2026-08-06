@@ -30,6 +30,7 @@
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const os = require('os');
 const { spawn } = require('child_process');
 const Database = require('better-sqlite3');
 
@@ -51,6 +52,7 @@ fs.mkdirSync(LOG_DIR, { recursive: true });
 fs.mkdirSync(STATE_DIR, { recursive: true });
 
 const db = new Database(DB_FILE);
+db.pragma('busy_timeout = 5000');
 db.pragma('journal_mode = WAL');
 db.exec(`
   CREATE TABLE IF NOT EXISTS anchor_log (
@@ -63,10 +65,19 @@ db.exec(`
   );
   CREATE INDEX IF NOT EXISTS idx_anchor_log_session ON anchor_log (session_id);
   CREATE INDEX IF NOT EXISTS idx_anchor_log_record_type ON anchor_log (record_type);
+  CREATE TABLE IF NOT EXISTS anchor_state (
+    key TEXT PRIMARY KEY,
+    value INTEGER NOT NULL
+  );
 `);
 const insertRecordStmt = db.prepare(
   'INSERT INTO anchor_log (record_type, session_id, anchor_receipt, recorded_at, payload) VALUES (@record_type, @session_id, @anchor_receipt, @recorded_at, @payload)'
 );
+const nextReceiptStmt = db.prepare(`
+  INSERT INTO anchor_state (key, value) VALUES ('receipt_sequence', 1)
+  ON CONFLICT(key) DO UPDATE SET value = value + 1
+  RETURNING value
+`);
 
 function nowIso() {
   return new Date().toISOString().replace(/\.\d+Z$/, 'Z');
@@ -77,16 +88,25 @@ function shortId() {
 }
 
 function nextReceipt() {
-  const seqFile = path.join(STATE_DIR, 'seq.txt');
-  let seq = 0;
-  try { seq = parseInt(fs.readFileSync(seqFile, 'utf8'), 10) || 0; } catch (_) {}
-  seq += 1;
-  fs.writeFileSync(seqFile, String(seq));
+  const { value: seq } = nextReceiptStmt.get();
   return `rcpt_local_${String(seq).padStart(6, '0')}_${shortId()}`;
 }
 
+function detectPrincipalId() {
+  if (process.env.TALLY_PRINCIPAL_ID) return process.env.TALLY_PRINCIPAL_ID;
+  let username = 'unknown';
+  try { username = os.userInfo().username || username; } catch (_) {}
+  let hostname = 'unknown-host';
+  try { hostname = os.hostname() || hostname; } catch (_) {}
+  return `user:${username}@${hostname}`;
+}
+
+function stateKey(sessionId) {
+  return crypto.createHash('sha256').update(String(sessionId)).digest('hex');
+}
+
 function statePath(sessionId) {
-  return path.join(STATE_DIR, `${sessionId}.json`);
+  return path.join(STATE_DIR, `${stateKey(sessionId)}.json`);
 }
 
 function loadState(sessionId) {
@@ -133,7 +153,7 @@ function extractSessionId(payload) {
 }
 
 function heartbeatPidFile(sessionId) {
-  return path.join(STATE_DIR, `${sessionId}.heartbeat.pid`);
+  return path.join(STATE_DIR, `${stateKey(sessionId)}.heartbeat.pid`);
 }
 
 function isPidAlive(pid) {
@@ -191,6 +211,7 @@ function main(payload, argvEvent) {
   const event = payload.hook_event_name || argvEvent || 'Unknown';
   const sessionId = `sess_${extractSessionId(payload)}`;
   const ts = nowIso();
+  const principalId = detectPrincipalId();
 
   switch (event) {
     case 'SessionStart': {
@@ -199,7 +220,7 @@ function main(payload, argvEvent) {
         session_id: sessionId,
         agent_id: 'local-agent:codex',
         agent_version: payload.model || payload.codex_version || 'unknown',
-        principal: { type: 'user', id: 'user:shuhood@openorigins.com' },
+        principal: { type: 'user', id: principalId },
         source: payload.source || 'unknown',
         session_started_at: ts,
         anchor_receipt: nextReceipt(),
@@ -219,7 +240,7 @@ function main(payload, argvEvent) {
         record_type: 'INSTRUCTION_RECEIVED',
         session_id: sessionId,
         instruction_id: instructionId,
-        sender: { id: 'user:shuhood@openorigins.com' },
+        sender: { id: principalId },
         declared_intent: { summary: truncate(prompt, 500) },
         instruction_received_at: ts,
         anchor_receipt: nextReceipt(),
@@ -258,7 +279,7 @@ function main(payload, argvEvent) {
         action_id: `act_${payload.tool_use_id || payload.call_id || shortId()}`,
         result_interpretation: { summary: truncate(result, 500) },
         result_received_at: ts,
-        exception: { occurred: Boolean(payload.error || payload.exception) },
+        exception: { occurred: Boolean(payload.tool_error || payload.error || payload.exception) },
         anchor_receipt: nextReceipt(),
       });
       break;
