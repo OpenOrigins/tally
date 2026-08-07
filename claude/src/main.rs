@@ -438,6 +438,11 @@ fn install_desktop_hooks(
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
         tally_common::write_credentials(&state_dir, &options)?;
         write_json_atomic(&settings_path, &config)?;
+        if let Err(error) =
+            tally_common::remove_legacy_installed_executable(&settings_path, "tally-claude")
+        {
+            eprintln!("Warning: could not remove the previous hook executable: {error}");
+        }
         Ok(())
     })();
     if let Err(error) = install_result {
@@ -1356,12 +1361,7 @@ fn installed_binary_path() -> PathBuf {
 }
 
 fn installed_binary_path_for_settings_path(path: &Path) -> PathBuf {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("tally")
-        .join("bin")
-        .join(format!("tally-claude{suffix}"))
+    tally_common::installed_executable_path(path, "tally-claude")
 }
 
 fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
@@ -1370,6 +1370,7 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
         installed_binary_path_for_settings_path(path),
+        tally_common::legacy_installed_executable_path(path, "tally-claude"),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}

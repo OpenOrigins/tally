@@ -454,6 +454,11 @@ fn install_desktop_hooks(
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
         tally_common::write_credentials(&state_dir, &options)?;
         write_json_atomic(&hooks_path, &config)?;
+        if let Err(error) =
+            tally_common::remove_legacy_installed_executable(&hooks_path, "tally-codex")
+        {
+            eprintln!("Warning: could not remove the previous hook executable: {error}");
+        }
         Ok(())
     })();
     if let Err(error) = install_result {
@@ -692,15 +697,20 @@ impl HookEvent {
         if let Some(matcher) = self.matcher {
             group.insert("matcher".to_string(), Value::String(matcher.to_string()));
         }
-        group.insert(
-            "hooks".to_string(),
-            json!([{
-                "type": "command",
-                "command": hook_command(hook_bin, self.name, state_dir),
-                "timeout": 15,
-                "statusMessage": self.status,
-            }]),
-        );
+        let command = hook_command(hook_bin, self.name, state_dir);
+        let handler = json!({
+            "type": "command",
+            "command": command,
+            "timeout": 15,
+            "statusMessage": self.status,
+        });
+        #[cfg(windows)]
+        let handler = {
+            let mut handler = handler;
+            handler["commandWindows"] = handler["command"].clone();
+            handler
+        };
+        group.insert("hooks".to_string(), Value::Array(vec![handler]));
         Value::Object(group)
     }
 }
@@ -1366,12 +1376,7 @@ fn installed_binary_path() -> PathBuf {
 }
 
 fn installed_binary_path_for_hooks_path(path: &Path) -> PathBuf {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    path.parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("tally")
-        .join("bin")
-        .join(format!("tally-codex{suffix}"))
+    tally_common::installed_executable_path(path, "tally-codex")
 }
 
 fn remove_local_credentials_for_hooks_path(path: &Path) -> Result<()> {
@@ -1380,6 +1385,7 @@ fn remove_local_credentials_for_hooks_path(path: &Path) -> Result<()> {
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
         installed_binary_path_for_hooks_path(path),
+        tally_common::legacy_installed_executable_path(path, "tally-codex"),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}

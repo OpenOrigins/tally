@@ -17,6 +17,9 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.label }})
+    permissions:
+      contents: read
+      id-token: write
     strategy:
       fail-fast: false
       matrix:
@@ -76,6 +79,73 @@ jobs:
       - name: Build release executables
         run: cargo build --workspace --release --locked --target ${{ matrix.target }}
 
+      - name: Require Windows signing configuration
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        env:
+          AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
+          AZURE_SUBSCRIPTION_ID: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+          SIGNING_ENDPOINT: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          SIGNING_ACCOUNT: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          SIGNING_PROFILE: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+        run: |
+          $required = @{
+            AZURE_CLIENT_ID = $env:AZURE_CLIENT_ID
+            AZURE_TENANT_ID = $env:AZURE_TENANT_ID
+            AZURE_SUBSCRIPTION_ID = $env:AZURE_SUBSCRIPTION_ID
+            AZURE_ARTIFACT_SIGNING_ENDPOINT = $env:SIGNING_ENDPOINT
+            AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME = $env:SIGNING_ACCOUNT
+            AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME = $env:SIGNING_PROFILE
+          }
+          $missing = @($required.GetEnumerator() | Where-Object {
+            [string]::IsNullOrWhiteSpace($_.Value)
+          } | ForEach-Object Key)
+          if ($missing.Count -gt 0) {
+            throw "Windows releases require Artifact Signing configuration: $($missing -join ', ')"
+          }
+
+      - name: Authenticate to Azure for Windows signing
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: azure/login@f5d393ae46f8fde4be8b75f32e3fc50e654ad0ca # v3.0.1
+        with:
+          client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          subscription-id: ${{ secrets.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Sign Windows executables
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: ${{ vars.AZURE_ARTIFACT_SIGNING_ENDPOINT }}
+          signing-account-name: ${{ vars.AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME }}
+          certificate-profile-name: ${{ vars.AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME }}
+          files: |
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\tally-codex.exe
+            ${{ github.workspace }}\target\${{ matrix.target }}\release\tally-claude.exe
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Verify Windows publisher signatures
+        if: matrix.target == 'x86_64-pc-windows-msvc'
+        shell: pwsh
+        run: |
+          $files = @(
+            "target\${{ matrix.target }}\release\tally-codex.exe",
+            "target\${{ matrix.target }}\release\tally-claude.exe"
+          )
+          foreach ($file in $files) {
+            $signature = Get-AuthenticodeSignature -FilePath $file
+            if ($signature.Status -ne "Valid") {
+              throw "$file has invalid Authenticode status: $($signature.Status)"
+            }
+            if ($null -eq $signature.TimeStamperCertificate) {
+              throw "$file does not have a trusted timestamp"
+            }
+            Write-Host "$file signed by $($signature.SignerCertificate.Subject)"
+          }
+
       - name: Test installation and records as an end user
         run: >-
           python tests/native_install_smoke.py
@@ -101,6 +171,8 @@ jobs:
   publish:
     needs: build
     runs-on: ubuntu-24.04
+    permissions:
+      contents: write
     steps:
       - name: Download tested release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4

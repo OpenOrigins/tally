@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import secrets
@@ -70,15 +71,19 @@ def run_installed_hook(command: str, env: dict[str, str], payload: dict) -> None
         )
 
 
-def tally_commands(config: dict) -> list[str]:
-    commands: list[str] = []
+def tally_handlers(config: dict) -> list[dict]:
+    handlers: list[dict] = []
     for groups in config.get("hooks", {}).values():
         for group in groups:
             for hook in group.get("hooks", []):
                 command = hook.get("command", "")
                 if "tally-" in command and " hook " in command:
-                    commands.append(command)
-    return commands
+                    handlers.append(hook)
+    return handlers
+
+
+def tally_commands(config: dict) -> list[str]:
+    return [handler["command"] for handler in tally_handlers(config)]
 
 
 def command_references_path(command: str, path: Path) -> bool:
@@ -86,6 +91,23 @@ def command_references_path(command: str, path: Path) -> bool:
     normalized_command = command.replace("\\", "/").casefold()
     normalized_path = str(path).replace("\\", "/").casefold()
     return normalized_path in normalized_command
+
+
+def installed_binary_path(config_path: Path, agent: str, env: dict[str, str]) -> Path:
+    name = f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+    if os.name != "nt":
+        return config_path.parent / "tally" / "bin" / name
+    normalized_config = str(config_path).replace("/", "\\").lower()
+    config_id = hashlib.sha256(normalized_config.encode()).hexdigest()[:12]
+    return (
+        Path(env["LOCALAPPDATA"])
+        / "Programs"
+        / "OpenOrigins"
+        / "Tally"
+        / agent
+        / config_id
+        / name
+    )
 
 
 class CaptureServer(ThreadingHTTPServer):
@@ -299,12 +321,6 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     state_dir = config_path.parent / "tally" / "logs" / ".state"
     api_key_path = state_dir / "api_key.txt"
     api_config_path = state_dir / "config.json"
-    installed_binary = (
-        config_path.parent
-        / "tally"
-        / "bin"
-        / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
-    )
     env = os.environ.copy()
     env.update(
         {
@@ -316,10 +332,22 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             "TALLY_WORKSPACE": str(root),
         }
     )
+    if os.name == "nt":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
     env.pop("CODEX_HOME", None)
     env.pop("CODEX_HOOKS_PATH", None)
     env.pop("TALLY_CLAUDE_SETTINGS_PATH", None)
     env.pop("TALLY_STATE_DIR", None)
+    installed_binary = installed_binary_path(config_path, agent, env)
+    legacy_installed_binary = (
+        config_path.parent
+        / "tally"
+        / "bin"
+        / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+    )
+    if os.name == "nt":
+        legacy_installed_binary.parent.mkdir(parents=True)
+        legacy_installed_binary.write_bytes(b"legacy unsigned hook executable")
 
     api_key = secrets.token_urlsafe(32)
     server = CaptureServer([config_path, api_key_path, api_config_path, installed_binary])
@@ -356,6 +384,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert api_key.encode("utf-8") not in binary.read_bytes()
         assert installed_binary.exists()
         assert installed_binary.read_bytes() == binary.read_bytes()
+        if os.name == "nt":
+            assert config_path.parent not in installed_binary.parents
+            assert "Programs" in installed_binary.parts
+            assert not legacy_installed_binary.exists()
         assert json.loads(api_config_path.read_text(encoding="utf-8")) == {
             "apiUrl": server.api_url
         }
@@ -372,6 +404,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert all(command_references_path(command, installed_binary) for command in commands), (
             f"hooks do not reference installed binary {installed_binary}: {commands}"
         )
+        if os.name == "nt" and agent == "codex":
+            assert all(
+                handler.get("commandWindows") == handler["command"]
+                for handler in tally_handlers(config)
+            )
 
         run(
             binary,
@@ -405,12 +442,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         custom_state_dir = custom_config_path.parent / "tally" / "logs" / ".state"
         custom_api_key_path = custom_state_dir / "api_key.txt"
         custom_api_config_path = custom_state_dir / "config.json"
-        custom_installed_binary = (
-            custom_config_path.parent
-            / "tally"
-            / "bin"
-            / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
-        )
+        custom_installed_binary = installed_binary_path(custom_config_path, agent, env)
         server.expected_files = [
             custom_config_path,
             custom_api_key_path,
@@ -457,11 +489,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         custom_gui_config_path.parent.mkdir(parents=True)
         custom_gui_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         custom_gui_state_dir = custom_gui_config_path.parent / "tally" / "logs" / ".state"
-        custom_gui_installed_binary = (
-            custom_gui_config_path.parent
-            / "tally"
-            / "bin"
-            / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+        custom_gui_installed_binary = installed_binary_path(
+            custom_gui_config_path, agent, env
         )
         server.expected_files = [
             custom_gui_config_path,

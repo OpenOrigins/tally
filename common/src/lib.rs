@@ -1,5 +1,7 @@
 use fs2::FileExt;
 use serde_json::{json, Value};
+#[cfg(windows)]
+use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
@@ -320,6 +322,59 @@ pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
     }
     atomic_write(destination, &fs::read(source)?, 0o755)?;
     Ok(())
+}
+
+pub fn installed_executable_path(config_path: &Path, binary_name: &str) -> PathBuf {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    #[cfg(windows)]
+    {
+        let local_app_data = env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from(home_dir()).join("AppData").join("Local"));
+        let normalized_config = config_path
+            .to_string_lossy()
+            .replace('/', "\\")
+            .to_lowercase();
+        let digest = format!("{:x}", Sha256::digest(normalized_config.as_bytes()));
+        return local_app_data
+            .join("Programs")
+            .join("OpenOrigins")
+            .join("Tally")
+            .join(binary_name.trim_start_matches("tally-"))
+            .join(&digest[..12])
+            .join(format!("{binary_name}{suffix}"));
+    }
+    #[cfg(not(windows))]
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("tally")
+        .join("bin")
+        .join(format!("{binary_name}{suffix}"))
+}
+
+pub fn legacy_installed_executable_path(config_path: &Path, binary_name: &str) -> PathBuf {
+    let suffix = if cfg!(windows) { ".exe" } else { "" };
+    config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("tally")
+        .join("bin")
+        .join(format!("{binary_name}{suffix}"))
+}
+
+pub fn remove_legacy_installed_executable(config_path: &Path, binary_name: &str) -> Result<()> {
+    let legacy = legacy_installed_executable_path(config_path, binary_name);
+    let current = installed_executable_path(config_path, binary_name);
+    if legacy == current {
+        return Ok(());
+    }
+    match fs::remove_file(legacy) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
 }
 
 pub fn notify_client_connected(
