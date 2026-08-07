@@ -307,6 +307,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
+        if os.name != "nt":
+            no_args = run(binary, env=env)
+            assert "Commands:" in no_args.stdout
+            assert "Tally installer:" not in no_args.stdout
+
         installed = run(
             binary,
             "install",

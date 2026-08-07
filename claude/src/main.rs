@@ -103,7 +103,11 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         None => {
-            run_installer_gui()?;
+            if tally_common::should_open_gui_without_args() {
+                run_installer_gui()?;
+            } else {
+                print_help();
+            }
             Ok(0)
         }
     }
@@ -111,7 +115,7 @@ fn run() -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-claude {}\n\nRun without arguments to open the installer.\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Claude Code hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Claude Code through Tally\n  hook EVENT    Record a hook event\n",
+        "tally-claude {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Claude Code hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Claude Code through Tally\n  hook EVENT    Record a hook event\n",
         env!("CARGO_PKG_VERSION")
     );
 }

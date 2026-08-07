@@ -17,6 +17,20 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 pub const DEFAULT_API_URL: &str = "https://api.dev2.openorigins.com/v1/tally/logs";
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 
+pub fn should_open_gui_without_args() -> bool {
+    if cfg!(windows) {
+        return true;
+    }
+    env::current_exe()
+        .map(|path| executable_is_in_app_bundle(&path))
+        .unwrap_or(false)
+}
+
+fn executable_is_in_app_bundle(path: &Path) -> bool {
+    path.ancestors()
+        .any(|ancestor| ancestor.extension().and_then(|value| value.to_str()) == Some("app"))
+}
+
 pub struct InstallOptions {
     pub api_key: String,
     pub api_url: String,
@@ -447,7 +461,18 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::response_body_error;
+    use super::{executable_is_in_app_bundle, response_body_error};
+    use std::path::Path;
+
+    #[test]
+    fn identifies_app_bundle_executables() {
+        assert!(executable_is_in_app_bundle(Path::new(
+            "/Applications/Tally Codex.app/Contents/MacOS/tally-codex"
+        )));
+        assert!(!executable_is_in_app_bundle(Path::new(
+            "/usr/local/bin/tally-codex"
+        )));
+    }
 
     #[test]
     fn accepts_empty_or_success_response_bodies() {
