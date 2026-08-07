@@ -22,6 +22,7 @@ def main() -> None:
         (root / "Cargo.toml").write_text(
             '[workspace]\n[workspace.package]\nversion = "9.8.7"\n', encoding="ascii"
         )
+        (root / "LICENSE").write_text("test license\n", encoding="ascii")
         release_dir = root / "target" / "test-target" / "release"
         release_dir.mkdir(parents=True)
         for name in ("tally-codex", "tally-claude"):
@@ -54,6 +55,7 @@ def main() -> None:
                 names = archive.namelist()
                 assert executable in names
                 assert f"{app_name}/Contents/Info.plist" in names
+                assert f"{app_name}/Contents/Resources/LICENSE" in names
                 assert {name.split("/", 1)[0] for name in names} == {app_name}
                 mode = archive.getinfo(executable).external_attr >> 16
                 assert stat.S_IMODE(mode) == 0o755
@@ -63,12 +65,15 @@ def main() -> None:
                 assert plist["CFBundleShortVersionString"] == "9.8.7"
                 assert plist["LSMinimumSystemVersion"] == "11.0"
                 assert plist["LSUIElement"] is True
+                assert archive.read(f"{app_name}/Contents/Resources/LICENSE") == b"test license\n"
 
             cli_archive = root / "dist" / f"{binary_name}-macos-arm64-cli.tar.gz"
             assert_checksum(cli_archive)
             with tarfile.open(cli_archive, "r:gz") as archive:
-                assert archive.getnames() == [binary_name]
+                assert archive.getnames() == [binary_name, "LICENSE"]
                 assert stat.S_IMODE(archive.getmember(binary_name).mode) == 0o755
+                assert stat.S_IMODE(archive.getmember("LICENSE").mode) == 0o644
+                assert archive.extractfile("LICENSE").read() == b"test license\n"
 
             if sys.platform == "darwin":
                 extract_dir = root / f"extract-{bundle_suffix}"

@@ -198,12 +198,18 @@ jobs:
     permissions:
       contents: write
     steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
       - name: Download tested release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: native-*
           path: dist
           merge-multiple: true
+
+      - name: Include Apache license
+        run: cp LICENSE dist/LICENSE-Apache-2.0.txt
 
       - name: Publish tagged GitHub release
         if: github.event_name == 'push'

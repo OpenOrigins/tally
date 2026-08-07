@@ -4,13 +4,14 @@ Tally's public Windows executables must be Authenticode-signed before release. T
 
 ## SignPath setup
 
-1. Choose and add an OSI-approved license to the repository. SignPath Foundation requires one for its free open-source program; Tally does not currently declare a license.
-2. Publish the code-signing policy required by SignPath Foundation, including project roles and privacy behavior.
-3. [Apply to SignPath Foundation](https://signpath.org/apply.html) for free open-source signing.
-4. Install the SignPath GitHub App for `OpenOrigins/tally` and configure GitHub.com as the trusted build system.
-5. Create a Tally project, release signing policy, and artifact configuration in SignPath.
-6. Configure the artifact as a ZIP containing `tally-codex.exe` and `tally-claude.exe`, with Authenticode signing enabled for both PE files.
-7. Create an API token for a SignPath user with submitter permission for that signing policy.
+Tally is licensed under the OSI-approved Apache License 2.0.
+
+1. Publish the code-signing policy required by SignPath Foundation, including project roles and privacy behavior.
+2. [Apply to SignPath Foundation](https://signpath.org/apply.html) for free open-source signing.
+3. Install the SignPath GitHub App for `OpenOrigins/tally` and configure GitHub.com as the trusted build system.
+4. Create a Tally project, release signing policy, and artifact configuration in SignPath.
+5. Configure the artifact as a ZIP containing `tally-codex.exe` and `tally-claude.exe`, with Authenticode signing enabled for both PE files.
+6. Create an API token for a SignPath user with submitter permission for that signing policy.
 
 ## GitHub configuration
 

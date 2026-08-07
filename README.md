@@ -34,3 +34,5 @@ cargo build --locked --release --workspace
 ```
 
 Windows binaries end in `.exe`. The [specification and examples](docs/) are in `docs/`.
+
+Licensed under the [Apache License 2.0](LICENSE).

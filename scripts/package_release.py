@@ -86,10 +86,14 @@ def build_macos_app(
     app = directory / app_name
     contents = app / "Contents"
     macos = contents / "MacOS"
+    resources = contents / "Resources"
     macos.mkdir(parents=True)
+    resources.mkdir()
     contents.chmod(0o755)
     macos.chmod(0o755)
+    resources.chmod(0o755)
     (contents / "Info.plist").write_bytes(plist)
+    shutil.copy2("LICENSE", resources / "LICENSE")
     executable = macos / binary_name
     shutil.copy2(source, executable)
     executable.chmod(0o755)
@@ -118,6 +122,10 @@ def write_cli_archive(source: Path, archive_path: Path, binary_name: str) -> Non
         info.mode = 0o755
         with source.open("rb") as handle:
             archive.addfile(info, handle)
+        license_info = archive.gettarinfo("LICENSE", arcname="LICENSE")
+        license_info.mode = 0o644
+        with Path("LICENSE").open("rb") as handle:
+            archive.addfile(license_info, handle)
 
 
 def write_checksum(path: Path) -> None:
