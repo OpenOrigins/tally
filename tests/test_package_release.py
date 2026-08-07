@@ -11,6 +11,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import zipfile
 from pathlib import Path
 
 
@@ -45,43 +46,62 @@ def main() -> None:
             ("tally-codex", "Tally Codex", "codex"),
             ("tally-claude", "Tally Claude Code", "claude"),
         ):
-            archive_path = root / "dist" / f"{binary_name}-macos-arm64.tar.gz"
-            checksum_path = archive_path.with_name(f"{archive_path.name}.sha256")
-            assert archive_path.exists()
-            expected_checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-            assert checksum_path.read_bytes() == (
-                f"{expected_checksum}  {archive_path.name}\n".encode("ascii")
-            )
-
+            app_name = f"{product_name}.app"
             executable = f"{product_name}.app/Contents/MacOS/{binary_name}"
-            with tarfile.open(archive_path, "r:gz") as archive:
-                names = archive.getnames()
+            app_archive = root / "dist" / f"{binary_name}-macos-arm64-app.zip"
+            assert_checksum(app_archive)
+            with zipfile.ZipFile(app_archive) as archive:
+                names = archive.namelist()
                 assert executable in names
-                assert f"{product_name}.app/Contents/Info.plist" in names
-                link = archive.getmember(binary_name)
-                assert link.issym()
-                assert link.linkname == executable
-                assert stat.S_IMODE(archive.getmember(executable).mode) == 0o755
-                plist = plistlib.loads(
-                    archive.extractfile(f"{product_name}.app/Contents/Info.plist").read()
-                )
+                assert f"{app_name}/Contents/Info.plist" in names
+                assert {name.split("/", 1)[0] for name in names} == {app_name}
+                mode = archive.getinfo(executable).external_attr >> 16
+                assert stat.S_IMODE(mode) == 0o755
+                plist = plistlib.loads(archive.read(f"{app_name}/Contents/Info.plist"))
                 assert plist["CFBundleExecutable"] == binary_name
                 assert plist["CFBundleIdentifier"] == f"com.openorigins.tally.{bundle_suffix}"
                 assert plist["CFBundleShortVersionString"] == "9.8.7"
                 assert plist["LSMinimumSystemVersion"] == "11.0"
                 assert plist["LSUIElement"] is True
 
-            extract_dir = root / f"extract-{bundle_suffix}"
-            extract_dir.mkdir()
-            with tarfile.open(archive_path, "r:gz") as archive:
-                archive.extractall(extract_dir, filter="data")
-            extracted = extract_dir / binary_name
-            assert extracted.is_symlink()
-            assert extracted.resolve().is_file()
-            if os.name != "nt":
-                assert os.access(extracted, os.X_OK)
+            cli_archive = root / "dist" / f"{binary_name}-macos-arm64-cli.tar.gz"
+            assert_checksum(cli_archive)
+            with tarfile.open(cli_archive, "r:gz") as archive:
+                assert archive.getnames() == [binary_name]
+                assert stat.S_IMODE(archive.getmember(binary_name).mode) == 0o755
+
+            if sys.platform == "darwin":
+                extract_dir = root / f"extract-{bundle_suffix}"
+                subprocess.run(
+                    ["ditto", "-x", "-k", str(app_archive), str(extract_dir)],
+                    check=True,
+                )
+                extracted_app = extract_dir / app_name
+                subprocess.run(
+                    [
+                        "codesign",
+                        "--verify",
+                        "--deep",
+                        "--strict",
+                        "--verbose=2",
+                        str(extracted_app),
+                    ],
+                    check=True,
+                )
+                assert os.access(
+                    extracted_app / "Contents" / "MacOS" / binary_name, os.X_OK
+                )
 
     print("Release packaging tests passed.")
+
+
+def assert_checksum(path: Path) -> None:
+    checksum_path = path.with_name(f"{path.name}.sha256")
+    assert path.exists()
+    expected_checksum = hashlib.sha256(path.read_bytes()).hexdigest()
+    assert checksum_path.read_bytes() == (
+        f"{expected_checksum}  {path.name}\n".encode("ascii")
+    )
 
 
 if __name__ == "__main__":

@@ -12,7 +12,7 @@ Tally**. On macOS, extract the archive and open the included `.app`. Or install
 directly from a terminal:
 
 ```sh
-tar -xzf <download>.tar.gz # macOS only
+tar -xzf <macos-cli-download>.tar.gz # macOS CLI only
 tally-codex install --api-key <agent-api-key>
 tally-claude install --api-key <agent-api-key>
 ```

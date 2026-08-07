@@ -125,6 +125,13 @@ jobs:
         run: |
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
           gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
+          for agent in codex claude; do
+            for architecture in arm64 x86_64; do
+              legacy="tally-$agent-macos-$architecture.tar.gz"
+              gh release delete-asset "$RELEASE_TAG" "$legacy" --yes --repo "$GITHUB_REPOSITORY" || true
+              gh release delete-asset "$RELEASE_TAG" "$legacy.sha256" --yes --repo "$GITHUB_REPOSITORY" || true
+            done
+          done
 
       - name: Update refreshed release instructions
         if: github.event_name == 'workflow_dispatch'
@@ -138,11 +145,11 @@ jobs:
 
             Generate an Agent API key in the OpenOrigins dashboard.
 
-            - **macOS:** Download the archive for your Mac, extract it, then open the included `Tally Codex.app` or `Tally Claude Code.app`.
+            - **macOS:** Download the `-app.zip` for your Mac. It extracts directly to `Tally Codex.app` or `Tally Claude Code.app`; open that app. Terminal users can download the separate `-cli.tar.gz`.
             - **Windows:** Download and run the `.exe` for Codex or Claude Code.
             - **Linux:** Make the downloaded file executable and run it from a terminal.
 
             The graphical installer asks for the Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation remains available with `install --api-key <agent-api-key>`.
 
-            macOS applications are currently unsigned, so Gatekeeper may require **Open Anyway**. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
+            macOS applications have a verified ad-hoc bundle signature but are not Apple-notarized, so Gatekeeper may require **Open Anyway**. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
         run: gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES" --repo "$GITHUB_REPOSITORY"

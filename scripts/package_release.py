@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import io
 import plistlib
 import shutil
 import stat
+import subprocess
+import sys
 import tarfile
+import tempfile
 import tomllib
+import zipfile
 from pathlib import Path
 
 
@@ -28,9 +31,16 @@ def main() -> None:
     for name in ("tally-codex", "tally-claude"):
         source = source_dir / f"{name}{suffix}"
         if args.label.startswith("macos-"):
-            destination = args.output / f"{name}-{args.label}.tar.gz"
-            write_macos_archive(source, destination, name, version, args.label)
-            write_checksum(destination)
+            with tempfile.TemporaryDirectory(prefix=f"{name}-app-") as directory:
+                app = build_macos_app(
+                    source, Path(directory), name, version, args.label
+                )
+                app_archive = args.output / f"{name}-{args.label}-app.zip"
+                write_app_zip(app, app_archive)
+            cli_archive = args.output / f"{name}-{args.label}-cli.tar.gz"
+            write_cli_archive(source, cli_archive, name)
+            write_checksum(app_archive)
+            write_checksum(cli_archive)
             continue
 
         destination = args.output / f"{name}-{args.label}{suffix}"
@@ -44,16 +54,15 @@ def workspace_version() -> str:
         return tomllib.load(handle)["workspace"]["package"]["version"]
 
 
-def write_macos_archive(
+def build_macos_app(
     source: Path,
-    archive_path: Path,
+    directory: Path,
     binary_name: str,
     version: str,
     label: str,
-) -> None:
+) -> Path:
     product_name = "Tally Codex" if binary_name == "tally-codex" else "Tally Claude Code"
     app_name = f"{product_name}.app"
-    executable_path = f"{app_name}/Contents/MacOS/{binary_name}"
     bundle_id = f"com.openorigins.tally.{'codex' if binary_name == 'tally-codex' else 'claude'}"
     minimum_version = "11.0" if label == "macos-arm64" else "10.15"
     plist = plistlib.dumps(
@@ -74,29 +83,41 @@ def write_macos_archive(
         fmt=plistlib.FMT_XML,
         sort_keys=True,
     )
-    executable_mode = source.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH
-    with tarfile.open(str(archive_path), "w:gz") as archive:
-        for directory in (app_name, f"{app_name}/Contents", f"{app_name}/Contents/MacOS"):
-            info = tarfile.TarInfo(directory)
-            info.type = tarfile.DIRTYPE
-            info.mode = 0o755
-            archive.addfile(info)
+    app = directory / app_name
+    contents = app / "Contents"
+    macos = contents / "MacOS"
+    macos.mkdir(parents=True)
+    contents.chmod(0o755)
+    macos.chmod(0o755)
+    (contents / "Info.plist").write_bytes(plist)
+    executable = macos / binary_name
+    shutil.copy2(source, executable)
+    executable.chmod(0o755)
 
-        info = tarfile.TarInfo(f"{app_name}/Contents/Info.plist")
-        info.mode = 0o644
-        info.size = len(plist)
-        archive.addfile(info, io.BytesIO(plist))
+    if sys.platform == "darwin":
+        subprocess.run(
+            ["codesign", "--force", "--sign", "-", "--timestamp=none", str(app)],
+            check=True,
+        )
+        subprocess.run(
+            ["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)],
+            check=True,
+        )
+    return app
 
-        info = archive.gettarinfo(str(source), arcname=executable_path)
-        info.mode = executable_mode & 0o777
+
+def write_app_zip(app: Path, archive_path: Path) -> None:
+    with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+        for path in (app, *sorted(app.rglob("*"))):
+            archive.write(path, path.relative_to(app.parent))
+
+
+def write_cli_archive(source: Path, archive_path: Path, binary_name: str) -> None:
+    with tarfile.open(archive_path, "w:gz") as archive:
+        info = archive.gettarinfo(str(source), arcname=binary_name)
+        info.mode = 0o755
         with source.open("rb") as handle:
             archive.addfile(info, handle)
-
-        link = tarfile.TarInfo(binary_name)
-        link.type = tarfile.SYMTYPE
-        link.mode = 0o755
-        link.linkname = executable_path
-        archive.addfile(link)
 
 
 def write_checksum(path: Path) -> None:
