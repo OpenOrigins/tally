@@ -94,6 +94,7 @@ input:focus { outline: 3px solid rgba(23, 107, 77, 0.2); border-color: var(--acc
 
 details { margin: 0 0 22px; }
 summary { margin-bottom: 12px; color: var(--muted); cursor: pointer; }
+details input + label { margin-top: 14px; }
 
 button {
   width: 100%;

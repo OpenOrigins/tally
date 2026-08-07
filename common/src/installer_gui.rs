@@ -111,31 +111,39 @@ where
     }
 
     if method == Method::Post && path == "/api/install" {
-        let response = match read_json_body(&mut request)
+        let (response, shutdown_after_response) = match read_json_body(&mut request)
             .and_then(parse_options)
             .and_then(install)
         {
-            Ok(report) => json_response(
-                StatusCode(200),
-                json!({
-                    "ok": true,
-                    "connected": report.handshake_error.is_none(),
-                    "warning": report.handshake_error.as_ref().map(|_| "The dashboard could not confirm this client automatically. Local logging is installed and will continue offline. Use \"Mark connected manually\" in the dashboard if needed."),
-                    "configPath": report.config_path,
-                    "keyPath": crate::api_key_path(&report.state_dir),
-                    "logsPath": report.logs_path,
-                    "installedBinaryPath": report.installed_binary_path,
-                    "backupPath": report.backup_path,
-                }),
-            ),
-            Err(error) => json_response(
-                StatusCode(400),
-                json!({"ok": false, "error": error.to_string()}),
+            Ok(report) => {
+                let connected = report.handshake_error.is_none();
+                (
+                    json_response(
+                        StatusCode(200),
+                        json!({
+                            "ok": true,
+                            "connected": connected,
+                            "warning": report.handshake_error.as_ref().map(|_| "The dashboard could not confirm this client automatically. Local logging is installed and will continue offline. Use \"Mark connected manually\" in the dashboard if needed."),
+                            "configPath": report.config_path,
+                            "keyPath": crate::api_key_path(&report.state_dir),
+                            "logsPath": report.logs_path,
+                            "installedBinaryPath": report.installed_binary_path,
+                            "backupPath": report.backup_path,
+                        }),
+                    ),
+                    connected,
+                )
+            }
+            Err(error) => (
+                json_response(
+                    StatusCode(400),
+                    json!({"ok": false, "error": error.to_string()}),
+                ),
+                false,
             ),
         };
-        let successful = response.status_code() == StatusCode(200);
         let _ = request.respond(response);
-        return successful;
+        return shutdown_after_response;
     }
 
     let _ = request.respond(json_response(
@@ -158,7 +166,11 @@ fn parse_options(value: Value) -> Result<InstallOptions> {
         .get("apiUrl")
         .and_then(Value::as_str)
         .map(str::to_string);
-    install_options(api_key, api_url)
+    let config_path = object
+        .get("configPath")
+        .and_then(Value::as_str)
+        .map(str::to_string);
+    install_options(api_key, api_url, config_path)
 }
 
 fn read_json_body(request: &mut Request) -> Result<Value> {

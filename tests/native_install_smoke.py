@@ -13,6 +13,7 @@ import subprocess
 import tempfile
 import threading
 import time
+from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -106,6 +107,10 @@ class CaptureServer(ThreadingHTTPServer):
         with self.lock:
             return [request for request in self.requests if request["path"] == path]
 
+    def set_response_status(self, status: int) -> None:
+        with self.lock:
+            self.response_status = status
+
     def wait_for(self, path: str, count: int = 1, timeout: float = 10) -> list[dict]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -178,6 +183,8 @@ def gui_install(
     api_url: str,
     *,
     expect_connected: bool,
+    config_path: Path | None = None,
+    retry_after_warning: Callable[[], None] | None = None,
 ) -> dict:
     url_file = root / f"{binary.name}-{time.time_ns()}.gui-url"
     gui_env = env.copy()
@@ -213,6 +220,8 @@ def gui_install(
         with urlopen(f"{origin}/", timeout=10) as response:
             html = response.read().decode("utf-8")
             assert "Agent API key" in html
+            assert "Configuration path" in html
+            assert "Try another key" in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
@@ -229,18 +238,28 @@ def gui_install(
 
         status, _ = gui_request(origin, token, "/api/status", {})
         assert status["installed"]
-        result, _ = gui_request(
-            origin,
-            token,
-            "/api/install",
-            {"apiKey": api_key, "apiUrl": api_url},
-        )
+        body = {"apiKey": api_key, "apiUrl": api_url}
+        if config_path is not None:
+            body["configPath"] = str(config_path)
+        result, _ = gui_request(origin, token, "/api/install", body)
         assert result["connected"] is expect_connected
         assert api_key not in json.dumps(result)
+        if config_path is not None:
+            assert result["configPath"] == str(config_path)
         if expect_connected:
             assert result["warning"] is None
         else:
             assert "Mark connected manually" in result["warning"]
+            assert process.poll() is None, "GUI closed before the user could retry"
+
+        if retry_after_warning is not None:
+            retry_after_warning()
+            retry_result, _ = gui_request(origin, token, "/api/install", body)
+            assert retry_result["connected"] is True
+            assert retry_result["warning"] is None
+            result = retry_result
+        elif not expect_connected:
+            gui_request(origin, token, "/api/shutdown", {})
 
         stdout, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
@@ -375,6 +394,92 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         config = json.loads(config_path.read_text(encoding="utf-8"))
         assert len(tally_commands(config)) == 10, "GUI reinstall duplicated hook handlers"
 
+        custom_config_path = (
+            root
+            / agent
+            / "custom config with spaces"
+            / ("hooks.json" if agent == "codex" else "settings.json")
+        )
+        custom_config_path.parent.mkdir(parents=True)
+        custom_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_state_dir = custom_config_path.parent / "tally" / "logs" / ".state"
+        custom_api_key_path = custom_state_dir / "api_key.txt"
+        custom_api_config_path = custom_state_dir / "config.json"
+        custom_installed_binary = (
+            custom_config_path.parent
+            / "tally"
+            / "bin"
+            / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+        )
+        server.expected_files = [
+            custom_config_path,
+            custom_api_key_path,
+            custom_api_config_path,
+            custom_installed_binary,
+        ]
+        custom_installed = run(
+            binary,
+            "install",
+            "--api-key",
+            api_key,
+            "--api-url",
+            server.api_url,
+            "--config-path",
+            str(custom_config_path),
+            env=env,
+        )
+        assert str(custom_config_path) in custom_installed.stdout
+        assert custom_api_key_path.read_text(encoding="utf-8") == api_key
+        assert json.loads(custom_api_config_path.read_text(encoding="utf-8")) == {
+            "apiUrl": server.api_url
+        }
+        if os.name != "nt":
+            assert stat.S_IMODE(custom_api_key_path.stat().st_mode) == 0o600
+            assert stat.S_IMODE(custom_api_config_path.stat().st_mode) == 0o600
+        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        custom_commands = tally_commands(custom_config)
+        assert len(custom_commands) == 10
+        assert all(
+            command_references_path(command, custom_installed_binary)
+            for command in custom_commands
+        )
+        assert all(
+            command_references_path(command, custom_state_dir)
+            for command in custom_commands
+        )
+
+        custom_gui_config_path = (
+            root
+            / agent
+            / "custom gui config with spaces"
+            / ("hooks.json" if agent == "codex" else "settings.json")
+        )
+        custom_gui_config_path.parent.mkdir(parents=True)
+        custom_gui_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_gui_state_dir = custom_gui_config_path.parent / "tally" / "logs" / ".state"
+        custom_gui_installed_binary = (
+            custom_gui_config_path.parent
+            / "tally"
+            / "bin"
+            / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
+        )
+        server.expected_files = [
+            custom_gui_config_path,
+            custom_gui_state_dir / "api_key.txt",
+            custom_gui_state_dir / "config.json",
+            custom_gui_installed_binary,
+        ]
+        gui_result = gui_install(
+            binary,
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+            config_path=custom_gui_config_path,
+        )
+        assert gui_result["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
+
         session_start = next(
             command
             for command in tally_commands(config)
@@ -389,11 +494,36 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert header(forwarded, "x-api-key") == api_key
         assert forwarded["body"]["record_type"] == "SESSION_START"
 
+        custom_session_start = next(
+            command
+            for command in custom_commands
+            if command.endswith("hook SessionStart")
+        )
+        forwarded_count = len(server.recorded("/v1/tally/logs"))
+        run_installed_hook(
+            custom_session_start,
+            env,
+            {"session_id": "native-custom-config-forwarding-session"},
+        )
+        custom_forwarded = server.wait_for(
+            "/v1/tally/logs", count=forwarded_count + 1
+        )[-1]
+        assert header(custom_forwarded, "x-api-key") == api_key
+        assert custom_forwarded["body"]["record_type"] == "SESSION_START"
+
+        run(binary, "uninstall", "--config-path", str(custom_config_path), env=env)
+        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        assert not tally_commands(custom_config)
+        assert not custom_api_key_path.exists()
+        assert not custom_api_config_path.exists()
+        assert not custom_installed_binary.exists()
+
+        server.expected_files = [config_path, api_key_path, api_config_path, installed_binary]
+
         stable_hooks = config_path.read_bytes()
         stable_key = api_key_path.read_bytes()
         stable_api_config = api_config_path.read_bytes()
-        with server.lock:
-            server.response_status = 503
+        server.set_response_status(503)
         gui_install(
             binary,
             env,
@@ -401,11 +531,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             api_key,
             server.api_url,
             expect_connected=False,
+            retry_after_warning=lambda: server.set_response_status(204),
         )
         assert config_path.read_bytes() == stable_hooks
         assert api_key_path.read_bytes() == stable_key
         assert api_config_path.read_bytes() == stable_api_config
 
+        server.set_response_status(503)
         failed_handshake = run(
             binary,
             "install",
