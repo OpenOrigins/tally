@@ -17,8 +17,9 @@ tally-codex install --api-key <agent-api-key>
 tally-claude install --api-key <agent-api-key>
 ```
 
-Add `--api-url <url>` only when using a custom ingest endpoint. On Linux, make
-the downloaded file executable first with `chmod +x <file>`.
+Add `--config-path <path>` when the client uses a non-default config file. Add
+`--api-url <url>` only when using a custom ingest endpoint. On Linux, make the
+downloaded file executable first with `chmod +x <file>`.
 
 To remove the hooks, run the executable with `uninstall`.
 
