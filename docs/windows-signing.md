@@ -1,34 +1,47 @@
 # Windows release signing
 
-Tally's public Windows executables must be Authenticode-signed before release. The release workflow uses Microsoft Azure Artifact Signing with a Public Trust certificate profile and refuses to publish unsigned Windows assets.
+Tally's public Windows executables must be Authenticode-signed before release. The release workflow uses SignPath and refuses to publish unsigned Windows assets. This does not require an Azure or AWS account, and the signing private key never enters GitHub Actions.
 
-## Azure setup
+## SignPath setup
 
-1. Create an Azure Artifact Signing account.
-2. Complete public identity validation for OpenOrigins.
-3. Create a `PublicTrust` certificate profile.
-4. Create a Microsoft Entra application for GitHub Actions.
-5. Add a federated credential restricted to the `OpenOrigins/tally` repository and the release environment or tag policy.
-6. Give that identity the `Artifact Signing Certificate Profile Signer` role on the certificate profile.
+1. Choose and add an OSI-approved license to the repository. SignPath Foundation requires one for its free open-source program; Tally does not currently declare a license.
+2. Publish the code-signing policy required by SignPath Foundation, including project roles and privacy behavior.
+3. [Apply to SignPath Foundation](https://signpath.org/apply.html) for free open-source signing.
+4. Install the SignPath GitHub App for `OpenOrigins/tally` and configure GitHub.com as the trusted build system.
+5. Create a Tally project, release signing policy, and artifact configuration in SignPath.
+6. Configure the artifact as a ZIP containing `tally-codex.exe` and `tally-claude.exe`, with Authenticode signing enabled for both PE files.
+7. Create an API token for a SignPath user with submitter permission for that signing policy.
 
 ## GitHub configuration
 
 Add these Actions secrets:
 
-- `AZURE_CLIENT_ID`: Entra application client ID.
-- `AZURE_TENANT_ID`: Entra directory tenant ID.
-- `AZURE_SUBSCRIPTION_ID`: Azure subscription ID containing Artifact Signing.
+- `SIGNPATH_API_TOKEN`: SignPath API token with submitter permission.
 
 Add these Actions variables:
 
-- `AZURE_ARTIFACT_SIGNING_ENDPOINT`: Regional endpoint such as `https://weu.codesigning.azure.net/`.
-- `AZURE_ARTIFACT_SIGNING_ACCOUNT_NAME`: Artifact Signing account name.
-- `AZURE_ARTIFACT_SIGNING_CERTIFICATE_PROFILE_NAME`: Public Trust certificate profile name.
+- `SIGNPATH_ORGANIZATION_ID`: SignPath organization ID.
+- `SIGNPATH_PROJECT_SLUG`: Tally project slug.
+- `SIGNPATH_SIGNING_POLICY_SLUG`: Release signing policy slug.
+- `SIGNPATH_ARTIFACT_CONFIGURATION_SLUG`: Artifact configuration slug.
 
-No certificate private key or Azure client secret is stored in GitHub. GitHub authenticates to Azure through OpenID Connect.
+The SignPath artifact configuration can use this structure:
+
+```xml
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <zip-file>
+    <pe-file path="tally-codex.exe">
+      <authenticode-sign description="Tally Codex" description-url="https://github.com/OpenOrigins/tally" />
+    </pe-file>
+    <pe-file path="tally-claude.exe">
+      <authenticode-sign description="Tally Claude Code" description-url="https://github.com/OpenOrigins/tally" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>
+```
 
 ## Release verification
 
-The Windows release job signs both executables with SHA-256 and an RFC 3161 timestamp before running the end-user installation test. It then requires `Get-AuthenticodeSignature` to report `Valid` and a timestamp certificate for both files. Only those tested, signed bytes are packaged and published.
+The Windows release job uploads both executables as a temporary GitHub Actions artifact, asks SignPath to sign them, deletes the unsigned artifact, and requires `Get-AuthenticodeSignature` to report `Valid` with a timestamp certificate. The complete end-user installation test then runs against those exact signed bytes. Only tested, signed files are packaged and published.
 
 Signing establishes a stable publisher identity but does not guarantee immediate SmartScreen reputation for a new publisher. Sign every release with the same profile. If Microsoft Defender Antivirus reports a specific detection, submit the signed release file through the [Microsoft Security Intelligence file-submission portal](https://www.microsoft.com/en-us/wdsi/filesubmission) as a software developer and retain the submission result with the release record.
