@@ -85,7 +85,8 @@ fn run() -> Result<i32> {
             Ok(0)
         }
         Some("uninstall-desktop-hooks" | "uninstall") => {
-            uninstall_desktop_hooks()?;
+            let config_path = tally_common::parse_config_path_options(args.collect::<Vec<_>>())?;
+            uninstall_desktop_hooks(config_path)?;
             Ok(0)
         }
         Some("wrap") => wrap_codex(args.collect()),
@@ -114,7 +115,7 @@ fn run() -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>]\n                Install or update Codex hooks\n  uninstall     Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
+        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install or update Codex hooks\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -405,9 +406,9 @@ fn install_desktop_hooks(
 ) -> Result<tally_common::InstallReport> {
     set_runtime_defaults();
 
-    let hooks_path = hooks_path();
-    let state_dir = onboarding_state_dir();
-    let installed_binary_path = installed_binary_path();
+    let hooks_path = effective_hooks_path(options.config_path.as_deref());
+    let state_dir = state_dir_for_hooks_path(&hooks_path);
+    let installed_binary_path = installed_binary_path_for_hooks_path(&hooks_path);
     fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::create_dir_all(log_root())?;
     let source_binary = env::current_exe()?;
@@ -446,7 +447,7 @@ fn install_desktop_hooks(
             .or_insert_with(|| Value::Array(Vec::new()))
             .as_array_mut()
             .ok_or_else(|| format!("refusing to modify hooks.{}: not a list", event.name))?
-            .push(event.to_hook_group(&hook_bin));
+            .push(event.to_hook_group(&hook_bin, &state_dir));
     }
 
     let install_result = (|| -> Result<()> {
@@ -497,11 +498,11 @@ fn install_desktop_hooks(
     })
 }
 
-fn uninstall_desktop_hooks() -> Result<()> {
-    let hooks_path = hooks_path();
+fn uninstall_desktop_hooks(config_path: Option<PathBuf>) -> Result<()> {
+    let hooks_path = effective_hooks_path(config_path.as_deref());
     if !hooks_path.exists() {
         println!("No hooks file found at {}", hooks_path.display());
-        remove_local_credentials()?;
+        remove_local_credentials_for_hooks_path(&hooks_path)?;
         return Ok(());
     }
     let mut config = read_json_file(&hooks_path)?;
@@ -522,7 +523,7 @@ fn uninstall_desktop_hooks() -> Result<()> {
     if let Some(backup) = backup {
         println!("Backed up previous hooks file to {}", backup.display());
     }
-    remove_local_credentials()?;
+    remove_local_credentials_for_hooks_path(&hooks_path)?;
     Ok(())
 }
 
@@ -686,7 +687,7 @@ impl HookEvent {
         }
     }
 
-    fn to_hook_group(self, hook_bin: &str) -> Value {
+    fn to_hook_group(self, hook_bin: &str, state_dir: &Path) -> Value {
         let mut group = serde_json::Map::new();
         if let Some(matcher) = self.matcher {
             group.insert("matcher".to_string(), Value::String(matcher.to_string()));
@@ -695,7 +696,7 @@ impl HookEvent {
             "hooks".to_string(),
             json!([{
                 "type": "command",
-                "command": format!("{} hook {}", shell_quote(hook_bin), shell_quote(self.name)),
+                "command": hook_command(hook_bin, self.name, state_dir),
                 "timeout": 15,
                 "statusMessage": self.status,
             }]),
@@ -1256,6 +1257,26 @@ fn shell_quote(value: &str) -> String {
     }
 }
 
+#[cfg(unix)]
+fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
+    format!(
+        "TALLY_STATE_DIR={} {} hook {}",
+        shell_quote(&state_dir.display().to_string()),
+        shell_quote(hook_bin),
+        shell_quote(event_name)
+    )
+}
+
+#[cfg(windows)]
+fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
+    format!(
+        "set \"TALLY_STATE_DIR={}\" && {} hook {}",
+        state_dir.display(),
+        shell_quote(hook_bin),
+        shell_quote(event_name)
+    )
+}
+
 fn unique_suffix() -> String {
     format!("{}-{}", std::process::id(), random_hex(4))
 }
@@ -1319,12 +1340,21 @@ fn hooks_path() -> PathBuf {
     expand_home(&format!("{codex_home}/hooks.json"))
 }
 
+fn effective_hooks_path(config_path: Option<&Path>) -> PathBuf {
+    config_path
+        .map(Path::to_path_buf)
+        .unwrap_or_else(hooks_path)
+}
+
 fn onboarding_state_dir() -> PathBuf {
     if let Ok(path) = env::var("TALLY_STATE_DIR") {
         return expand_home(&path);
     }
-    hooks_path()
-        .parent()
+    state_dir_for_hooks_path(&hooks_path())
+}
+
+fn state_dir_for_hooks_path(path: &Path) -> PathBuf {
+    path.parent()
         .unwrap_or_else(|| Path::new("."))
         .join("tally")
         .join("logs")
@@ -1332,21 +1362,24 @@ fn onboarding_state_dir() -> PathBuf {
 }
 
 fn installed_binary_path() -> PathBuf {
+    installed_binary_path_for_hooks_path(&hooks_path())
+}
+
+fn installed_binary_path_for_hooks_path(path: &Path) -> PathBuf {
     let suffix = if cfg!(windows) { ".exe" } else { "" };
-    hooks_path()
-        .parent()
+    path.parent()
         .unwrap_or_else(|| Path::new("."))
         .join("tally")
         .join("bin")
         .join(format!("tally-codex{suffix}"))
 }
 
-fn remove_local_credentials() -> Result<()> {
-    let state_dir = onboarding_state_dir();
+fn remove_local_credentials_for_hooks_path(path: &Path) -> Result<()> {
+    let state_dir = state_dir_for_hooks_path(path);
     for path in [
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
-        installed_binary_path(),
+        installed_binary_path_for_hooks_path(path),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}

@@ -30,6 +30,7 @@ async function load() {
   document.title = `Tally for ${status.product}`;
   document.getElementById("title").textContent = `Connect Tally to ${status.product}`;
   document.getElementById("configPath").textContent = status.configPath;
+  document.getElementById("customConfigPath").value = status.configPath;
   document.getElementById("installStatus").textContent = status.installed ? "Installed - refresh available" : "Ready";
   document.getElementById("apiUrl").value = status.defaultApiUrl;
   document.getElementById("status").textContent = status.installed ? "Update" : "Setup";
@@ -45,20 +46,25 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   const apiKeyInput = document.getElementById("apiKey");
   const button = document.getElementById("installButton");
   const error = document.getElementById("error");
+  const warning = document.getElementById("warning");
+  const retryButton = document.getElementById("retryButton");
   error.hidden = true;
+  warning.hidden = true;
+  retryButton.hidden = true;
+  document.getElementById("resultMark").classList.remove("warning-mark");
   button.disabled = true;
   show("installing");
   try {
     const result = await api("/api/install", {
       apiKey: apiKeyInput.value,
       apiUrl: document.getElementById("apiUrl").value,
+      configPath: document.getElementById("customConfigPath").value,
     });
     apiKeyInput.value = "";
-    sessionStorage.removeItem("tallyInstallerToken");
     document.getElementById("doneConfig").textContent = result.configPath;
     document.getElementById("doneKey").textContent = result.keyPath;
-    const warning = document.getElementById("warning");
     if (result.connected) {
+      sessionStorage.removeItem("tallyInstallerToken");
       document.getElementById("doneTitle").textContent = "Tally is connected";
       document.getElementById("doneMessage").textContent = "Hooks are installed and the OpenOrigins dashboard confirmed this client.";
     } else {
@@ -67,6 +73,8 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
       document.getElementById("doneMessage").textContent = "Local logging will continue, but the dashboard could not confirm this client automatically.";
       warning.textContent = result.warning;
       warning.hidden = false;
+      retryButton.hidden = false;
+      button.disabled = false;
     }
     document.getElementById("status").textContent = result.connected ? "Connected" : "Installed with warning";
     show("done");
@@ -78,10 +86,20 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   }
 });
 
-document.getElementById("cancelButton").addEventListener("click", () => {
+document.getElementById("retryButton").addEventListener("click", () => {
+  document.getElementById("status").textContent = "Retry";
+  document.getElementById("error").hidden = true;
+  show("setup");
+  document.getElementById("apiKey").focus();
+});
+
+function shutdown() {
   api("/api/shutdown").catch(() => {});
   window.close();
-});
+}
+
+document.getElementById("cancelButton").addEventListener("click", shutdown);
+document.getElementById("doneCancelButton").addEventListener("click", shutdown);
 
 load().catch((loadError) => {
   document.getElementById("status").textContent = "Unavailable";

@@ -34,6 +34,7 @@ fn executable_is_in_app_bundle(path: &Path) -> bool {
 pub struct InstallOptions {
     pub api_key: String,
     pub api_url: String,
+    pub config_path: Option<PathBuf>,
 }
 
 #[derive(Debug)]
@@ -105,6 +106,7 @@ where
 {
     let mut api_key = None;
     let mut api_url = None;
+    let mut config_path = None;
     let mut args = args.into_iter();
     while let Some(argument) = args.next() {
         match argument.as_str() {
@@ -114,11 +116,17 @@ where
             "--api-url" => {
                 api_url = Some(args.next().ok_or("--api-url requires a value")?);
             }
+            "--config-path" => {
+                config_path = Some(args.next().ok_or("--config-path requires a value")?);
+            }
             _ if argument.starts_with("--api-key=") => {
                 api_key = Some(argument["--api-key=".len()..].to_string());
             }
             _ if argument.starts_with("--api-url=") => {
                 api_url = Some(argument["--api-url=".len()..].to_string());
+            }
+            _ if argument.starts_with("--config-path=") => {
+                config_path = Some(argument["--config-path=".len()..].to_string());
             }
             _ => return Err(format!("unknown install option: {argument}").into()),
         }
@@ -128,10 +136,34 @@ where
         Some(key) if !key.is_empty() => key,
         _ => prompt_api_key(product)?,
     };
-    install_options(api_key, api_url)
+    install_options(api_key, api_url, config_path)
 }
 
-pub fn install_options(api_key: String, api_url: Option<String>) -> Result<InstallOptions> {
+pub fn parse_config_path_options<I>(args: I) -> Result<Option<PathBuf>>
+where
+    I: IntoIterator<Item = String>,
+{
+    let mut config_path = None;
+    let mut args = args.into_iter();
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--config-path" => {
+                config_path = Some(args.next().ok_or("--config-path requires a value")?);
+            }
+            _ if argument.starts_with("--config-path=") => {
+                config_path = Some(argument["--config-path=".len()..].to_string());
+            }
+            _ => return Err(format!("unknown option: {argument}").into()),
+        }
+    }
+    normalize_config_path(config_path)
+}
+
+pub fn install_options(
+    api_key: String,
+    api_url: Option<String>,
+    config_path: Option<String>,
+) -> Result<InstallOptions> {
     let api_key = api_key.trim().to_string();
     if api_key.is_empty() {
         return Err("Agent API key cannot be empty".into());
@@ -147,7 +179,54 @@ pub fn install_options(api_key: String, api_url: Option<String>) -> Result<Insta
         return Err("API URL is too long".into());
     }
     validate_api_url(&api_url)?;
-    Ok(InstallOptions { api_key, api_url })
+    let config_path = normalize_config_path(config_path)?;
+    Ok(InstallOptions {
+        api_key,
+        api_url,
+        config_path,
+    })
+}
+
+fn normalize_config_path(config_path: Option<String>) -> Result<Option<PathBuf>> {
+    let Some(config_path) = config_path
+        .map(|path| path.trim().to_string())
+        .filter(|path| !path.is_empty())
+    else {
+        return Ok(None);
+    };
+    if config_path.len() > 4096 || config_path.chars().any(char::is_control) {
+        return Err("Configuration path has an invalid format".into());
+    }
+    let path = expand_home_path(&config_path);
+    let path = if path.is_absolute() {
+        path
+    } else {
+        env::current_dir()?.join(path)
+    };
+    Ok(Some(path))
+}
+
+fn expand_home_path(value: &str) -> PathBuf {
+    if value == "~" {
+        PathBuf::from(home_dir())
+    } else if let Some(rest) = value.strip_prefix("~/") {
+        PathBuf::from(home_dir()).join(rest)
+    } else {
+        PathBuf::from(value)
+    }
+}
+
+fn home_dir() -> String {
+    env::var("HOME")
+        .or_else(|_| env::var("USERPROFILE"))
+        .or_else(|_| {
+            Ok::<_, env::VarError>(format!(
+                "{}{}",
+                env::var("HOMEDRIVE")?,
+                env::var("HOMEPATH")?
+            ))
+        })
+        .unwrap_or_else(|_| ".".to_string())
 }
 
 fn prompt_api_key(product: &str) -> Result<String> {

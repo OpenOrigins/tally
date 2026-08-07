@@ -28,7 +28,9 @@
         <label class="check"><input id="showKey" type="checkbox"> Show key</label>
 
         <details>
-          <summary>Custom API URL</summary>
+          <summary>Advanced settings</summary>
+          <label for="customConfigPath">Configuration path</label>
+          <input id="customConfigPath" name="configPath" type="text" spellcheck="false">
           <label for="apiUrl">Ingest API URL</label>
           <input id="apiUrl" name="apiUrl" type="url" spellcheck="false">
         </details>
@@ -54,6 +56,8 @@
         <div><dt>Credentials</dt><dd id="doneKey"></dd></div>
       </dl>
       <p class="warning" id="warning" role="status" hidden></p>
+      <button class="secondary" id="retryButton" type="button" hidden>Try another key</button>
+      <button class="secondary" id="doneCancelButton" type="button">Cancel</button>
       <p class="close-note">You can close this window.</p>
     </section>
   </main>
