@@ -80,6 +80,13 @@ def tally_commands(config: dict) -> list[str]:
     return commands
 
 
+def command_references_path(command: str, path: Path) -> bool:
+    """Compare Windows paths independently of slash style and path casing."""
+    normalized_command = command.replace("\\", "/").casefold()
+    normalized_path = str(path).replace("\\", "/").casefold()
+    return normalized_path in normalized_command
+
+
 class CaptureServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -337,7 +344,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert "echo keep" in json.dumps(config)
         assert api_key not in json.dumps(config)
         assert len(tally_commands(config)) == 10
-        assert all(str(installed_binary) in command for command in tally_commands(config))
+        commands = tally_commands(config)
+        assert all(command_references_path(command, installed_binary) for command in commands), (
+            f"hooks do not reference installed binary {installed_binary}: {commands}"
+        )
 
         run(
             binary,

@@ -409,7 +409,7 @@ fn create_private_dir(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
+fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -423,7 +423,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
-        options.mode(mode);
+        options.mode(_mode);
     }
     let mut file = options.open(&tmp)?;
     file.write_all(contents)?;
@@ -431,7 +431,7 @@ fn atomic_write(path: &Path, contents: &[u8], mode: u32) -> io::Result<()> {
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
-        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(_mode))?;
     }
     drop(file);
     #[cfg(windows)]
