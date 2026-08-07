@@ -34,5 +34,6 @@ cargo build --locked --release --workspace
 ```
 
 Windows binaries end in `.exe`. The [specification and examples](docs/) are in `docs/`.
+Windows releases are currently unsigned and may show a Microsoft Defender SmartScreen warning.
 
 Licensed under the [Apache License 2.0](LICENSE).
