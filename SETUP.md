@@ -141,16 +141,11 @@ Copy and save your Agent API key.
 
 ---
 
-## Install a Client
+## Download and Install Tally
 
-Choose one of:
+In the **Download Tally** card, click **Download for your system**. This opens the Tally **releases page**, where you download the Tally build for your application and operating system (Claude Code or OpenAI Codex).
 
-- Claude Code
-- Codex
-
-Click **Open install guide**.
-
-Download the installer for your operating system.
+Prefer to configure it yourself? Use the **Setup guide** card and click **Open the setup guide**.
 
 Run the installer from your terminal.
 
