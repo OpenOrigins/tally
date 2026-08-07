@@ -101,8 +101,8 @@ def write_macos_archive(
 
 def write_checksum(path: Path) -> None:
     digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    path.with_name(f"{path.name}.sha256").write_text(
-        f"{digest}  {path.name}\n", encoding="ascii"
+    path.with_name(f"{path.name}.sha256").write_bytes(
+        f"{digest}  {path.name}\n".encode("ascii")
     )
 
 

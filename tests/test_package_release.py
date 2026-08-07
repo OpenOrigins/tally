@@ -49,8 +49,8 @@ def main() -> None:
             checksum_path = archive_path.with_name(f"{archive_path.name}.sha256")
             assert archive_path.exists()
             expected_checksum = hashlib.sha256(archive_path.read_bytes()).hexdigest()
-            assert checksum_path.read_text(encoding="ascii") == (
-                f"{expected_checksum}  {archive_path.name}\n"
+            assert checksum_path.read_bytes() == (
+                f"{expected_checksum}  {archive_path.name}\n".encode("ascii")
             )
 
             executable = f"{product_name}.app/Contents/MacOS/{binary_name}"
