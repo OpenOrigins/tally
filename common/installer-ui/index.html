@@ -37,14 +37,15 @@
 
         <p class="error" id="error" role="alert" hidden></p>
         <button id="installButton" type="submit">Install Tally</button>
+        <button class="secondary danger" id="uninstallButton" type="button" hidden>Uninstall Tally</button>
         <button class="secondary" id="cancelButton" type="button">Cancel</button>
       </form>
     </section>
 
     <section id="installing" hidden>
-      <h1>Installing Tally</h1>
-      <p class="intro">Writing local credentials and updating hooks.</p>
-      <div class="progress" aria-label="Installation in progress"><span></span></div>
+      <h1 id="progressTitle">Installing Tally</h1>
+      <p class="intro" id="progressMessage">Writing local credentials and updating hooks.</p>
+      <div class="progress" aria-label="Operation in progress"><span></span></div>
     </section>
 
     <section id="done" hidden>

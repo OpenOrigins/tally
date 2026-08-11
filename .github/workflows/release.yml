@@ -70,7 +70,7 @@ jobs:
 
       - name: Verify workspace package version
         if: github.event_name == 'workflow_dispatch'
-        run: python scripts/check_release_tag.py
+        run: python scripts/check_release_tag.py ${{ inputs.release_tag }}
 
       - name: Test release target
         run: cargo test --workspace --all-targets --locked --target ${{ matrix.target }}
@@ -122,6 +122,14 @@ jobs:
       - name: Verify release checksums
         working-directory: dist
         run: sha256sum --check *.sha256
+
+      - name: Generate Homebrew formula
+        if: github.event_name == 'push'
+        run: >-
+          python scripts/generate_homebrew_formula.py
+          --dist dist
+          --output dist/tally.rb
+          --release-tag ${{ github.ref_name }}
 
       - name: Publish tagged GitHub release
         if: github.event_name == 'push'

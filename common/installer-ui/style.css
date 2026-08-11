@@ -114,6 +114,8 @@ button:hover { background: var(--accent-hover); }
 button:disabled { cursor: wait; opacity: 0.65; }
 button.secondary { margin-top: 9px; border-color: transparent; background: transparent; color: var(--muted); font-weight: 500; }
 button.secondary:hover { background: var(--field); color: var(--text); }
+button.danger { color: var(--error-text); font-weight: 600; }
+button.danger:hover { background: var(--error-bg); color: var(--error-text); }
 
 .error, .warning { padding: 12px; border-radius: 6px; overflow-wrap: anywhere; }
 .error { background: var(--error-bg); color: var(--error-text); }

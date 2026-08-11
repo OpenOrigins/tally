@@ -34,6 +34,7 @@ async function load() {
   document.getElementById("installStatus").textContent = status.installed ? "Installed - refresh available" : "Ready";
   document.getElementById("apiUrl").value = status.defaultApiUrl;
   document.getElementById("status").textContent = status.installed ? "Update" : "Setup";
+  document.getElementById("uninstallButton").hidden = !status.installed;
   show("setup");
 }
 
@@ -53,6 +54,8 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   retryButton.hidden = true;
   document.getElementById("resultMark").classList.remove("warning-mark");
   button.disabled = true;
+  document.getElementById("progressTitle").textContent = "Installing Tally";
+  document.getElementById("progressMessage").textContent = "Writing local credentials and updating hooks.";
   show("installing");
   try {
     const result = await api("/api/install", {
@@ -82,6 +85,41 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
     error.textContent = requestError.message;
     error.hidden = false;
     button.disabled = false;
+    show("setup");
+  }
+});
+
+document.getElementById("uninstallButton").addEventListener("click", async () => {
+  const button = document.getElementById("uninstallButton");
+  const installButton = document.getElementById("installButton");
+  const error = document.getElementById("error");
+  error.hidden = true;
+  button.disabled = true;
+  installButton.disabled = true;
+  document.getElementById("resultMark").classList.remove("warning-mark");
+  document.getElementById("progressTitle").textContent = "Uninstalling Tally";
+  document.getElementById("progressMessage").textContent = "Removing local credentials and hooks.";
+  document.getElementById("status").textContent = "Uninstalling";
+  show("installing");
+  try {
+    const result = await api("/api/uninstall", {
+      configPath: document.getElementById("customConfigPath").value,
+    });
+    sessionStorage.removeItem("tallyInstallerToken");
+    document.getElementById("doneTitle").textContent = "Tally is uninstalled";
+    document.getElementById("doneMessage").textContent = "Hooks and local credentials were removed from this machine.";
+    document.getElementById("doneConfig").textContent = result.configPath;
+    document.getElementById("doneKey").textContent = "Removed";
+    document.getElementById("warning").hidden = true;
+    document.getElementById("retryButton").hidden = true;
+    document.getElementById("status").textContent = "Uninstalled";
+    show("done");
+  } catch (requestError) {
+    error.textContent = requestError.message;
+    error.hidden = false;
+    button.disabled = false;
+    installButton.disabled = false;
+    document.getElementById("status").textContent = "Update";
     show("setup");
   }
 });
