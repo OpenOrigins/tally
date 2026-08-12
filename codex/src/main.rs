@@ -129,6 +129,7 @@ fn run_installer_gui() -> Result<()> {
             installed_binary_path: installed_binary_path(),
         },
         install_desktop_hooks,
+        uninstall_desktop_hooks,
     )
 }
 

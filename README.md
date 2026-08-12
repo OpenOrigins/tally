@@ -17,6 +17,19 @@ tally-codex install --api-key <agent-api-key>
 tally-claude install --api-key <agent-api-key>
 ```
 
+On macOS or Linux, Tally can also be installed with Homebrew:
+
+```sh
+brew tap openorigins/tally https://github.com/OpenOrigins/tally
+brew install tally
+tally
+```
+
+The `tally` command detects Codex or Claude Code and opens the installer where
+you paste the Agent API key. Use `tally codex` or `tally claude` to choose a
+client explicitly. After the OpenOrigins tap has been added, upgrades use the
+short package name: `brew upgrade tally`.
+
 Add `--config-path <path>` when the client uses a non-default config file. Add
 `--api-url <url>` only when using a custom ingest endpoint. On Linux, make the
 downloaded file executable first with `chmod +x <file>`.

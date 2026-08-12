@@ -1,0 +1,77 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+usage() {
+  cat <<'EOF'
+Usage:
+  tally codex [COMMAND] [ARGS...]
+  tally claude [COMMAND] [ARGS...]
+
+Run `tally codex` or `tally claude` without a command to open the installer.
+EOF
+}
+
+launcher_dir="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)"
+
+run_client() {
+  local client="$1"
+  shift
+  if [[ "$#" -eq 0 ]]; then
+    set -- gui
+  fi
+  exec "$launcher_dir/tally-$client" "$@"
+}
+
+choose_client() {
+  local has_codex=0
+  local has_claude=0
+  command -v codex >/dev/null 2>&1 && has_codex=1
+  command -v claude >/dev/null 2>&1 && has_claude=1
+
+  if [[ "$has_codex" -eq 1 && "$has_claude" -eq 0 ]]; then
+    run_client codex
+  fi
+  if [[ "$has_claude" -eq 1 && "$has_codex" -eq 0 ]]; then
+    run_client claude
+  fi
+  if [[ ! -t 0 ]]; then
+    usage >&2
+    exit 2
+  fi
+
+  printf 'Set up Tally for:\n  1) Codex\n  2) Claude Code\nChoose 1 or 2: '
+  read -r choice
+  case "$choice" in
+    1 | codex | Codex) run_client codex ;;
+    2 | claude | Claude) run_client claude ;;
+    *)
+      printf 'Unknown choice: %s\n' "$choice" >&2
+      exit 2
+      ;;
+  esac
+}
+
+case "${1:-}" in
+  codex)
+    shift
+    run_client codex "$@"
+    ;;
+  claude)
+    shift
+    run_client claude "$@"
+    ;;
+  --version | version)
+    "$launcher_dir/tally-codex" --version | sed 's/^tally-codex /tally /'
+    ;;
+  --help | -h | help)
+    usage
+    ;;
+  "")
+    choose_client
+    ;;
+  *)
+    printf 'Unknown Tally client: %s\n\n' "$1" >&2
+    usage >&2
+    exit 2
+    ;;
+esac

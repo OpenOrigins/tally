@@ -12,6 +12,7 @@ cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo test --workspace --all-targets --locked
 "$PYTHON" -B tests/test_push_test_logs.py
 "$PYTHON" -B tests/test_package_release.py
+"$PYTHON" -B tests/test_homebrew_formula.py
 cargo build --workspace --release --locked --target "$HOST_TARGET"
 "$PYTHON" -B tests/native_install_smoke.py \
   --codex "target/$HOST_TARGET/release/tally-codex" \

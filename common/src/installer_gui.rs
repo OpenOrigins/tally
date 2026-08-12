@@ -20,9 +20,10 @@ pub struct GuiConfig {
     pub installed_binary_path: PathBuf,
 }
 
-pub fn run_installer_gui<F>(config: GuiConfig, mut install: F) -> Result<()>
+pub fn run_installer_gui<I, U>(config: GuiConfig, mut install: I, mut uninstall: U) -> Result<()>
 where
-    F: FnMut(InstallOptions) -> Result<InstallReport>,
+    I: FnMut(InstallOptions) -> Result<InstallReport>,
+    U: FnMut(Option<PathBuf>) -> Result<()>,
 {
     let server = Server::http(("127.0.0.1", 0))
         .map_err(|error| format!("could not start local installer: {error}"))?;
@@ -51,22 +52,31 @@ where
             continue;
         };
         last_activity = Instant::now();
-        let shutdown = handle_request(request, &origin, &token, &config, &mut install);
+        let shutdown = handle_request(
+            request,
+            &origin,
+            &token,
+            &config,
+            &mut install,
+            &mut uninstall,
+        );
         if shutdown {
             return Ok(());
         }
     }
 }
 
-fn handle_request<F>(
+fn handle_request<I, U>(
     mut request: Request,
     origin: &str,
     token: &str,
     config: &GuiConfig,
-    install: &mut F,
+    install: &mut I,
+    uninstall: &mut U,
 ) -> bool
 where
-    F: FnMut(InstallOptions) -> Result<InstallReport>,
+    I: FnMut(InstallOptions) -> Result<InstallReport>,
+    U: FnMut(Option<PathBuf>) -> Result<()>,
 {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or(request.url());
@@ -108,6 +118,43 @@ where
     if method == Method::Post && path == "/api/shutdown" {
         let _ = request.respond(json_response(StatusCode(200), json!({"ok": true})));
         return true;
+    }
+
+    if method == Method::Post && path == "/api/uninstall" {
+        let config_path = match read_json_body(&mut request).and_then(parse_config_path) {
+            Ok(config_path) => config_path,
+            Err(error) => {
+                let _ = request.respond(json_response(
+                    StatusCode(400),
+                    json!({"ok": false, "error": error.to_string()}),
+                ));
+                return false;
+            }
+        };
+        let response_config_path = config_path
+            .clone()
+            .unwrap_or_else(|| config.config_path.clone());
+        let (response, shutdown_after_response) = match uninstall(config_path) {
+            Ok(()) => (
+                json_response(
+                    StatusCode(200),
+                    json!({
+                        "ok": true,
+                        "configPath": response_config_path,
+                    }),
+                ),
+                true,
+            ),
+            Err(error) => (
+                json_response(
+                    StatusCode(400),
+                    json!({"ok": false, "error": error.to_string()}),
+                ),
+                false,
+            ),
+        };
+        let _ = request.respond(response);
+        return shutdown_after_response;
     }
 
     if method == Method::Post && path == "/api/install" {
@@ -171,6 +218,18 @@ fn parse_options(value: Value) -> Result<InstallOptions> {
         .and_then(Value::as_str)
         .map(str::to_string);
     install_options(api_key, api_url, config_path)
+}
+
+fn parse_config_path(value: Value) -> Result<Option<PathBuf>> {
+    let object = value
+        .as_object()
+        .ok_or("request body must be a JSON object")?;
+    Ok(object
+        .get("configPath")
+        .and_then(Value::as_str)
+        .map(str::trim)
+        .filter(|path| !path.is_empty())
+        .map(PathBuf::from))
 }
 
 fn read_json_body(request: &mut Request) -> Result<Value> {
