@@ -8,8 +8,8 @@ Generate an Agent API key in the OpenOrigins dashboard, then download
 `tally-codex` or `tally-claude` for your operating system from
 [Releases](https://github.com/OpenOrigins/tally/releases). Run the executable for
 the graphical installer, paste the dashboard Agent API key, and select **Install
-Tally**. On macOS, extract the archive and open the included `.app`. Or install
-directly from a terminal:
+Tally**. On macOS, download the signed `.dmg`, drag the included app to
+Applications, and open it. Or install directly from a terminal:
 
 ```sh
 tar -xzf <macos-cli-download>.tar.gz # macOS CLI only

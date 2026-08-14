@@ -17,6 +17,7 @@ permissions:
 jobs:
   build:
     name: Build (${{ matrix.label }})
+    timeout-minutes: 180
     permissions:
       contents: read
     strategy:
@@ -87,11 +88,105 @@ jobs:
       - name: Preserve push-test ingest behavior
         run: python tests/test_push_test_logs.py
 
-      - name: Package executables and checksums
+      - name: Prepare Apple signing and notarization
+        if: startsWith(matrix.label, 'macos-')
+        shell: bash
+        env:
+          APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
+          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_PASSWORD }}
+          APPLE_NOTARY_ISSUER_ID: ${{ secrets.APPLE_NOTARY_ISSUER_ID }}
+          APPLE_NOTARY_KEY: ${{ secrets.APPLE_NOTARY_KEY }}
+          APPLE_NOTARY_KEY_ID: ${{ secrets.APPLE_NOTARY_KEY_ID }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          set -Eeuo pipefail
+          for name in APPLE_CERTIFICATE_BASE64 APPLE_CERTIFICATE_PASSWORD APPLE_NOTARY_ISSUER_ID APPLE_NOTARY_KEY APPLE_NOTARY_KEY_ID APPLE_TEAM_ID; do
+            if [[ -z "${!name:-}" ]]; then
+              echo "::error::Missing required GitHub secret: $name"
+              exit 1
+            fi
+          done
+
+          certificate_path="$RUNNER_TEMP/developer-id-application.p12"
+          keychain_path="$RUNNER_TEMP/tally-signing.keychain-db"
+          notary_key_path="$RUNNER_TEMP/AuthKey_${APPLE_NOTARY_KEY_ID}.p8"
+          original_keychains_path="$RUNNER_TEMP/original-user-keychains.txt"
+          keychain_password="$(openssl rand -hex 32)"
+
+          printf '%s' "$APPLE_CERTIFICATE_BASE64" | base64 -D > "$certificate_path"
+          printf '%s' "$APPLE_NOTARY_KEY" > "$notary_key_path"
+          chmod 600 "$certificate_path" "$notary_key_path"
+
+          security create-keychain -p "$keychain_password" "$keychain_path"
+          security set-keychain-settings -lut 21600 "$keychain_path"
+          security unlock-keychain -p "$keychain_password" "$keychain_path"
+          security import "$certificate_path" \
+            -k "$keychain_path" \
+            -P "$APPLE_CERTIFICATE_PASSWORD" \
+            -T /usr/bin/codesign \
+            -T /usr/bin/security
+          security set-key-partition-list \
+            -S apple-tool:,apple:,codesign: \
+            -s \
+            -k "$keychain_password" \
+            "$keychain_path"
+
+          security list-keychains -d user > "$original_keychains_path"
+          original_keychains=()
+          while IFS= read -r line; do
+            line="${line#*\"}"
+            line="${line%\"}"
+            [[ -n "$line" ]] && original_keychains+=("$line")
+          done < "$original_keychains_path"
+          security list-keychains -d user -s "$keychain_path" "${original_keychains[@]}"
+
+          identity_line="$(security find-identity -v -p codesigning | awk '/Developer ID Application/ { print; exit }')"
+          if [[ -z "$identity_line" || "$identity_line" != *"($APPLE_TEAM_ID)"* ]]; then
+            echo "::error::No Developer ID Application identity for team $APPLE_TEAM_ID"
+            exit 1
+          fi
+          identity="$(awk '{ print $2 }' <<< "$identity_line")"
+
+          {
+            echo "APPLE_DEVELOPER_IDENTITY=$identity"
+            echo "APPLE_ORIGINAL_KEYCHAINS=$original_keychains_path"
+            echo "APPLE_SIGNING_KEYCHAIN=$keychain_path"
+            echo "APPLE_NOTARY_KEY_PATH=$notary_key_path"
+            echo "APPLE_NOTARY_KEY_ID=$APPLE_NOTARY_KEY_ID"
+            echo "APPLE_NOTARY_ISSUER_ID=$APPLE_NOTARY_ISSUER_ID"
+          } >> "$GITHUB_ENV"
+
+      - name: Package signed and notarized macOS installers
+        if: startsWith(matrix.label, 'macos-')
         run: >-
           python scripts/package_release.py
           --target ${{ matrix.target }}
           --label ${{ matrix.label }}
+          --require-macos-notarization
+
+      - name: Package executables and checksums
+        if: ${{ !startsWith(matrix.label, 'macos-') }}
+        run: >-
+          python scripts/package_release.py
+          --target ${{ matrix.target }}
+          --label ${{ matrix.label }}
+
+      - name: Remove temporary Apple signing keychain
+        if: always() && startsWith(matrix.label, 'macos-')
+        shell: bash
+        run: |
+          if [[ -f "${APPLE_ORIGINAL_KEYCHAINS:-}" ]]; then
+            original_keychains=()
+            while IFS= read -r line; do
+              line="${line#*\"}"
+              line="${line%\"}"
+              [[ -n "$line" ]] && original_keychains+=("$line")
+            done < "$APPLE_ORIGINAL_KEYCHAINS"
+            security list-keychains -d user -s "${original_keychains[@]}" || true
+          fi
+          if [[ -n "${APPLE_SIGNING_KEYCHAIN:-}" ]]; then
+            security delete-keychain "$APPLE_SIGNING_KEYCHAIN" || true
+          fi
 
       - name: Upload release assets
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
@@ -108,6 +203,8 @@ jobs:
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: dev
 
       - name: Download tested release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
@@ -121,7 +218,7 @@ jobs:
 
       - name: Verify release checksums
         working-directory: dist
-        run: sha256sum --check *.sha256
+        run: sha256sum --check ./*.sha256
 
       - name: Generate Homebrew formula
         if: github.event_name == 'push'
@@ -138,6 +235,43 @@ jobs:
           files: dist/*
           generate_release_notes: true
           fail_on_unmatched_files: true
+          body: |
+            Tally records Codex and Claude Code activity as structured audit logs.
+
+            ## Install
+
+            Generate an Agent API key in the OpenOrigins dashboard.
+
+            **Homebrew (macOS or Linux):**
+
+            ```sh
+            brew tap openorigins/tally https://github.com/OpenOrigins/tally
+            brew install tally
+            tally
+            ```
+
+            **macOS GUI:** Download the `.dmg` for your client and Mac architecture, open it, drag the app to Applications, then open the app. The apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple.
+
+            **macOS CLI:** Download the `-cli.tar.gz`. **Windows:** Download the relevant `.exe`. **Linux:** Download the relevant Linux executable and make it executable with `chmod +x`.
+
+            The installer asks for the dashboard Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation is available with `install --api-key <agent-api-key>`.
+
+      - name: Promote release formula to the Homebrew tap
+        if: github.event_name == 'push'
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          cp dist/tally.rb Formula/tally.rb
+          if git diff --quiet -- Formula/tally.rb; then
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Formula/tally.rb
+          git commit \
+            -m "Update Homebrew formula for $RELEASE_TAG" \
+            -m "Signed-off-by: Ekaterina Pavlova <ekaterina@openorigins.com>"
+          git push origin HEAD:dev
 
       - name: Refresh existing release assets
         if: github.event_name == 'workflow_dispatch'
@@ -167,11 +301,12 @@ jobs:
 
             Generate an Agent API key in the OpenOrigins dashboard.
 
-            - **macOS:** Download the `-app.zip` for your Mac. It extracts directly to `Tally Codex.app` or `Tally Claude Code.app`; open that app. Terminal users can download the separate `-cli.tar.gz`.
+            - **Homebrew:** Run `brew tap openorigins/tally https://github.com/OpenOrigins/tally`, then `brew install tally` and `tally`.
+            - **macOS:** Download the `.dmg` for your Mac, open it, and drag the app to Applications. Terminal users can download the separate `-cli.tar.gz`.
             - **Windows:** Download and run the `.exe` for Codex or Claude Code. The executables are currently unsigned, so Microsoft Defender SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block them.
             - **Linux:** Make the downloaded file executable and run it from a terminal.
 
             The graphical installer asks for the Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation remains available with `install --api-key <agent-api-key>`.
 
-            macOS applications have a verified ad-hoc bundle signature but are not Apple-notarized, so Gatekeeper may require **Open Anyway**. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
+            macOS apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
         run: gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES" --repo "$GITHUB_REPOSITORY"

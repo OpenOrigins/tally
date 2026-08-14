@@ -21,13 +21,10 @@ existing browser installer for the Agent API key.
 
 ## Publishing a version
 
-A tagged native release still publishes every existing standalone binary and
-macOS app. After all matrix artifacts have been merged and their checksums have
-been verified, the release workflow also generates `tally.rb` and attaches it
-to the GitHub release.
-
-Promote that generated file to `Formula/tally.rb` on the default branch, then
-verify the tap on both supported macOS architectures and Linux:
+A tagged native release publishes the standalone binaries, signed and notarized
+macOS DMGs, and a generated `tally.rb`. After publishing the assets, the release
+workflow promotes that formula to `Formula/tally.rb` on the default branch.
+Verify the tap on both supported macOS architectures and Linux:
 
 ```sh
 brew style openorigins/tally/tally

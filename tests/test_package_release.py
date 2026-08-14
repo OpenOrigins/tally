@@ -6,6 +6,7 @@ from __future__ import annotations
 import hashlib
 import os
 import plistlib
+import shutil
 import stat
 import subprocess
 import sys
@@ -27,7 +28,10 @@ def main() -> None:
         release_dir.mkdir(parents=True)
         for name in ("tally-codex", "tally-claude"):
             binary = release_dir / name
-            binary.write_bytes(f"fake executable: {name}".encode("ascii"))
+            if sys.platform == "darwin":
+                shutil.copyfile("/usr/bin/true", binary)
+            else:
+                binary.write_bytes(f"fake executable: {name}".encode("ascii"))
             binary.chmod(0o755)
 
         subprocess.run(
@@ -49,23 +53,64 @@ def main() -> None:
         ):
             app_name = f"{product_name}.app"
             executable = f"{product_name}.app/Contents/MacOS/{binary_name}"
-            app_archive = root / "dist" / f"{binary_name}-macos-arm64-app.zip"
-            assert_checksum(app_archive)
-            with zipfile.ZipFile(app_archive) as archive:
-                names = archive.namelist()
-                assert executable in names
-                assert f"{app_name}/Contents/Info.plist" in names
-                assert f"{app_name}/Contents/Resources/LICENSE" in names
-                assert {name.split("/", 1)[0] for name in names} == {app_name}
-                mode = archive.getinfo(executable).external_attr >> 16
-                assert stat.S_IMODE(mode) == 0o755
-                plist = plistlib.loads(archive.read(f"{app_name}/Contents/Info.plist"))
-                assert plist["CFBundleExecutable"] == binary_name
-                assert plist["CFBundleIdentifier"] == f"com.openorigins.tally.{bundle_suffix}"
-                assert plist["CFBundleShortVersionString"] == "9.8.7"
-                assert plist["LSMinimumSystemVersion"] == "11.0"
-                assert plist["LSUIElement"] is True
-                assert archive.read(f"{app_name}/Contents/Resources/LICENSE") == b"test license\n"
+            if sys.platform == "darwin":
+                dmg = root / "dist" / f"{binary_name}-macos-arm64.dmg"
+                assert_checksum(dmg)
+                subprocess.run(
+                    ["codesign", "--verify", "--strict", "--verbose=2", str(dmg)],
+                    check=True,
+                )
+                mount = root / f"mount-{bundle_suffix}"
+                mount.mkdir()
+                subprocess.run(
+                    [
+                        "hdiutil",
+                        "attach",
+                        "-readonly",
+                        "-nobrowse",
+                        "-mountpoint",
+                        str(mount),
+                        str(dmg),
+                    ],
+                    check=True,
+                    capture_output=True,
+                )
+                try:
+                    assert (mount / "Applications").is_symlink()
+                    assert_app_layout(
+                        mount / app_name,
+                        binary_name,
+                        bundle_suffix,
+                        product_name,
+                    )
+                finally:
+                    subprocess.run(["hdiutil", "detach", str(mount)], check=True)
+            else:
+                app_archive = root / "dist" / f"{binary_name}-macos-arm64-app.zip"
+                assert_checksum(app_archive)
+                with zipfile.ZipFile(app_archive) as archive:
+                    names = archive.namelist()
+                    assert executable in names
+                    assert f"{app_name}/Contents/Info.plist" in names
+                    assert f"{app_name}/Contents/Resources/LICENSE" in names
+                    assert {name.split("/", 1)[0] for name in names} == {app_name}
+                    mode = archive.getinfo(executable).external_attr >> 16
+                    assert stat.S_IMODE(mode) == 0o755
+                    plist = plistlib.loads(
+                        archive.read(f"{app_name}/Contents/Info.plist")
+                    )
+                    assert plist["CFBundleExecutable"] == binary_name
+                    assert (
+                        plist["CFBundleIdentifier"]
+                        == f"com.openorigins.tally.{bundle_suffix}"
+                    )
+                    assert plist["CFBundleShortVersionString"] == "9.8.7"
+                    assert plist["LSMinimumSystemVersion"] == "11.0"
+                    assert plist["LSUIElement"] is True
+                    assert (
+                        archive.read(f"{app_name}/Contents/Resources/LICENSE")
+                        == b"test license\n"
+                    )
 
             cli_archive = root / "dist" / f"{binary_name}-macos-arm64-cli.tar.gz"
             assert_checksum(cli_archive)
@@ -75,29 +120,34 @@ def main() -> None:
                 assert stat.S_IMODE(archive.getmember("LICENSE").mode) == 0o644
                 assert archive.extractfile("LICENSE").read() == b"test license\n"
 
-            if sys.platform == "darwin":
-                extract_dir = root / f"extract-{bundle_suffix}"
-                subprocess.run(
-                    ["ditto", "-x", "-k", str(app_archive), str(extract_dir)],
-                    check=True,
-                )
-                extracted_app = extract_dir / app_name
-                subprocess.run(
-                    [
-                        "codesign",
-                        "--verify",
-                        "--deep",
-                        "--strict",
-                        "--verbose=2",
-                        str(extracted_app),
-                    ],
-                    check=True,
-                )
-                assert os.access(
-                    extracted_app / "Contents" / "MacOS" / binary_name, os.X_OK
-                )
-
     print("Release packaging tests passed.")
+
+
+def assert_app_layout(
+    app: Path, binary_name: str, bundle_suffix: str, product_name: str
+) -> None:
+    executable = app / "Contents" / "MacOS" / binary_name
+    plist = plistlib.loads((app / "Contents" / "Info.plist").read_bytes())
+    assert app.name == f"{product_name}.app"
+    assert executable.is_file()
+    assert os.access(executable, os.X_OK)
+    assert plist["CFBundleExecutable"] == binary_name
+    assert plist["CFBundleIdentifier"] == f"com.openorigins.tally.{bundle_suffix}"
+    assert plist["CFBundleShortVersionString"] == "9.8.7"
+    assert plist["LSMinimumSystemVersion"] == "11.0"
+    assert plist["LSUIElement"] is True
+    assert (app / "Contents" / "Resources" / "LICENSE").read_bytes() == b"test license\n"
+    subprocess.run(
+        [
+            "codesign",
+            "--verify",
+            "--deep",
+            "--strict",
+            "--verbose=2",
+            str(app),
+        ],
+        check=True,
+    )
 
 
 def assert_checksum(path: Path) -> None:
