@@ -1,13 +1,8 @@
-# Homebrew distribution
+# Homebrew Distribution
 
-The Homebrew formula is an additional release channel. It installs the same
-`tally-codex` and `tally-claude` executables that are published as standalone
-release artifacts, plus the `tally` launcher from `scripts/tally`.
-
-## User flow
-
-The Tally repository can be registered as a tap even though its name does not
-start with `homebrew-` by supplying the repository URL:
+Homebrew installs the same single Tally executable used by the graphical
+installer. It does not install separate Codex, Claude Code, or command-line
+editions.
 
 ```sh
 brew tap openorigins/tally https://github.com/OpenOrigins/tally
@@ -15,27 +10,23 @@ brew install tally
 tally
 ```
 
-The first `tally` run detects an installed Codex or Claude Code client. If the
-choice is ambiguous, it asks the user which client to configure, then opens the
-existing browser installer for the Agent API key.
+Running `tally` opens the installer, where the user chooses Codex, Claude Code,
+or both and pastes the dashboard Agent API key. Upgrade later with:
 
-## Publishing a version
+```sh
+brew upgrade tally
+```
 
-A tagged native release publishes the standalone binaries, signed and notarized
-macOS DMGs, and a generated `tally.rb`. After publishing the assets, the release
-workflow promotes that formula to `Formula/tally.rb` on the default branch.
-Verify the tap on both supported macOS architectures and Linux:
+The release workflow generates `Formula/tally.rb` from the final macOS DMGs and
+Linux installer. Before promotion, verify it with:
 
 ```sh
 brew style openorigins/tally/tally
 brew audit --strict openorigins/tally/tally
+brew fetch openorigins/tally/tally
 brew install openorigins/tally/tally
 brew test openorigins/tally/tally
 ```
 
-Do not replace published release assets after promoting a formula. Homebrew
-pins their SHA-256 checksums, so changing an asset at the same URL breaks fresh
-installs. Publish a new version and update the formula instead.
-
-Installing by the short name on a completely clean machine requires either the
-one-time `brew tap` command above or acceptance into `homebrew/core`.
+The repository URL is required in the one-time `brew tap` command because this
+repository is not named `homebrew-tally` and the formula is not in Homebrew Core.

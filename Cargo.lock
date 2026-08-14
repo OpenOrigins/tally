@@ -632,8 +632,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "tally"
+version = "0.1.3"
+dependencies = [
+ "tally-claude",
+ "tally-codex",
+ "tally-common",
+]
+
+[[package]]
 name = "tally-claude"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "fs2",
@@ -644,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "tally-codex"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "chrono",
  "fs2",
@@ -655,7 +664,7 @@ dependencies = [
 
 [[package]]
 name = "tally-common"
-version = "0.1.2"
+version = "0.1.3"
 dependencies = [
  "fs2",
  "getrandom 0.3.4",

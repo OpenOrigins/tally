@@ -199,6 +199,7 @@ def gui_request(
 
 def gui_install(
     binary: Path,
+    agent: str | list[str],
     env: dict[str, str],
     root: Path,
     api_key: str,
@@ -242,8 +243,9 @@ def gui_install(
         with urlopen(f"{origin}/", timeout=10) as response:
             html = response.read().decode("utf-8")
             assert "Agent API key" in html
-            assert "Configuration path" in html
+            assert "Advanced settings" in html
             assert "Try another key" in html
+            assert "Cancel" in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
@@ -259,15 +261,32 @@ def gui_install(
         assert not unauthorized["ok"]
 
         status, _ = gui_request(origin, token, "/api/status", {})
-        assert status["installed"]
-        body = {"apiKey": api_key, "apiUrl": api_url}
-        if config_path is not None:
-            body["configPath"] = str(config_path)
+        agent_ids = [agent] if isinstance(agent, str) else agent
+        client_status = {
+            client["id"]: client for client in status["clients"] if client["id"] in agent_ids
+        }
+        assert set(client_status) == set(agent_ids)
+        body = {
+            "apiKey": api_key,
+            "apiUrl": api_url,
+            "clients": [
+                {
+                    "id": agent_id,
+                    "configPath": str(
+                        config_path
+                        if config_path is not None and len(agent_ids) == 1
+                        else client_status[agent_id]["configPath"]
+                    ),
+                }
+                for agent_id in agent_ids
+            ],
+        }
         result, _ = gui_request(origin, token, "/api/install", body)
         assert result["connected"] is expect_connected
         assert api_key not in json.dumps(result)
-        if config_path is not None:
-            assert result["configPath"] == str(config_path)
+        assert {client["id"] for client in result["clients"]} == set(agent_ids)
+        if config_path is not None and len(agent_ids) == 1:
+            assert result["clients"][0]["configPath"] == str(config_path)
         if expect_connected:
             assert result["warning"] is None
         else:
@@ -354,13 +373,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        if os.name != "nt":
-            no_args = run(binary, env=env)
-            assert "Commands:" in no_args.stdout
-            assert "Tally installer:" not in no_args.stdout
-
         installed = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -412,6 +427,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
 
         run(
             binary,
+            agent,
             "install",
             f"--api-key={api_key}",
             f"--api-url={server.api_url}",
@@ -422,6 +438,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
 
         gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
@@ -451,6 +468,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         ]
         custom_installed = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -500,6 +518,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         ]
         gui_result = gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
@@ -507,7 +526,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             expect_connected=True,
             config_path=custom_gui_config_path,
         )
-        assert gui_result["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
+        assert gui_result["clients"][0]["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
 
         session_start = next(
             command
@@ -540,7 +559,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert header(custom_forwarded, "x-api-key") == api_key
         assert custom_forwarded["body"]["record_type"] == "SESSION_START"
 
-        run(binary, "uninstall", "--config-path", str(custom_config_path), env=env)
+        run(binary, agent, "uninstall", "--config-path", str(custom_config_path), env=env)
         custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
         assert not tally_commands(custom_config)
         assert not custom_api_key_path.exists()
@@ -555,6 +574,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         server.set_response_status(503)
         gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
@@ -569,6 +589,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         server.set_response_status(503)
         failed_handshake = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -614,7 +635,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     offline_env["TALLY_FORWARDING_ENABLED"] = "0"
     run_installed_hook(session_start, offline_env, payloads["SessionStart"])
     for event in EVENTS[1:]:
-        run(binary, "hook", event, env=offline_env, payload=payloads[event])
+        run(binary, agent, "hook", event, env=offline_env, payload=payloads[event])
 
     record_dir = log_root / "tally" / f"{agent}-hooks"
     records = [json.loads(path.read_text(encoding="utf-8")) for path in record_dir.glob("*.json")]
@@ -627,7 +648,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     }
     assert action_ids["ACTION_TAKEN"] == action_ids["RESULT_RECEIVED"]
 
-    run(binary, "uninstall", env=env)
+    run(binary, agent, "uninstall", env=env)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     assert "echo keep" in json.dumps(config)
     assert not tally_commands(config)
@@ -637,15 +658,65 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     assert not installed_binary.exists()
 
 
+def smoke_combined_install(source_binary: Path, root: Path) -> None:
+    home = root / "combined" / "home"
+    codex_config = home / ".codex" / "hooks.json"
+    claude_config = home / ".claude" / "settings.json"
+    for config in (codex_config, claude_config):
+        config.parent.mkdir(parents=True, exist_ok=True)
+        config.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "TALLY_HOOK_HEARTBEAT_ENABLED": "0",
+        "TALLY_FORWARDING_ENABLED": "0",
+    })
+    if os.name == "nt":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+
+    codex_state = codex_config.parent / "tally" / "logs" / ".state"
+    server = CaptureServer([
+        codex_config,
+        codex_state / "api_key.txt",
+        codex_state / "config.json",
+        installed_binary_path(codex_config, "codex", env),
+    ])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        key = secrets.token_urlsafe(32)
+        gui_install(
+            source_binary,
+            ["codex", "claude"],
+            env,
+            root,
+            key,
+            server.api_url,
+            expect_connected=True,
+        )
+        handshakes = server.wait_for("/v1/tally/onboarding/client-connected", count=2)
+        assert {request["body"]["source"] for request in handshakes[-2:]} == {
+            "codex", "claude-code"
+        }
+        assert len(tally_commands(json.loads(codex_config.read_text(encoding="utf-8")))) == 10
+        assert len(tally_commands(json.loads(claude_config.read_text(encoding="utf-8")))) == 10
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--codex", type=Path, required=True)
-    parser.add_argument("--claude", type=Path, required=True)
+    parser.add_argument("--tally", type=Path, required=True)
     args = parser.parse_args()
     with tempfile.TemporaryDirectory(prefix="tally-native-smoke-") as directory:
         root = Path(directory)
-        smoke(args.codex.resolve(), "codex", root)
-        smoke(args.claude.resolve(), "claude", root)
+        smoke(args.tally.resolve(), "codex", root)
+        smoke(args.tally.resolve(), "claude", root)
+        smoke_combined_install(args.tally.resolve(), root)
     print("Native install smoke tests passed.")
 
 

@@ -11,7 +11,7 @@ use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
+pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const EVENTS: &[HookEvent] = &[
     HookEvent::new(
@@ -42,18 +42,8 @@ const EVENTS: &[HookEvent] = &[
     HookEvent::new("Stop", None, "Tally: recording Codex stop"),
 ];
 
-fn main() {
-    match run() {
-        Ok(code) => std::process::exit(code),
-        Err(error) => {
-            eprintln!("tally-codex: {error}");
-            std::process::exit(1);
-        }
-    }
-}
-
-fn run() -> Result<i32> {
-    let mut args = env::args().skip(1);
+pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
+    let mut args = arguments.into_iter();
     match args.next().as_deref() {
         Some("hook") => {
             let event = args
@@ -69,14 +59,6 @@ fn run() -> Result<i32> {
         }
         Some("forward-pending") => {
             tally_common::forward_pending(&onboarding_state_dir())?;
-            Ok(0)
-        }
-        Some("gui") => {
-            run_installer_gui()?;
-            Ok(0)
-        }
-        Some(argument) if argument.starts_with("-psn_") => {
-            run_installer_gui()?;
             Ok(0)
         }
         Some("install-desktop-hooks" | "install") => {
@@ -102,14 +84,7 @@ fn run() -> Result<i32> {
             record_hook_event(event_name)?;
             Ok(0)
         }
-        None => {
-            if tally_common::should_open_gui_without_args() {
-                run_installer_gui()?;
-            } else {
-                print_help();
-            }
-            Ok(0)
-        }
+        None => Ok(0),
     }
 }
 
@@ -118,19 +93,6 @@ fn print_help() {
         "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install or update Codex hooks\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
         env!("CARGO_PKG_VERSION")
     );
-}
-
-fn run_installer_gui() -> Result<()> {
-    tally_common::run_installer_gui(
-        tally_common::GuiConfig {
-            product: "Codex",
-            config_path: hooks_path(),
-            state_dir: onboarding_state_dir(),
-            installed_binary_path: installed_binary_path(),
-        },
-        install_desktop_hooks,
-        uninstall_desktop_hooks,
-    )
 }
 
 fn record_hook_event(event_type: &str) -> Result<()> {
@@ -321,7 +283,7 @@ fn update_heartbeat_state(
     }
 
     Command::new(env::current_exe()?)
-        .arg("heartbeat-daemon")
+        .args(["codex", "heartbeat-daemon"])
         .env("TALLY_RUN_ID", &sink.run_id)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
@@ -402,7 +364,7 @@ fn run_heartbeat_daemon() -> Result<()> {
     Ok(())
 }
 
-fn install_desktop_hooks(
+pub fn install_desktop_hooks(
     options: tally_common::InstallOptions,
 ) -> Result<tally_common::InstallReport> {
     set_runtime_defaults();
@@ -504,7 +466,7 @@ fn install_desktop_hooks(
     })
 }
 
-fn uninstall_desktop_hooks(config_path: Option<PathBuf>) -> Result<()> {
+pub fn uninstall_desktop_hooks(config_path: Option<PathBuf>) -> Result<()> {
     let hooks_path = effective_hooks_path(config_path.as_deref());
     if !hooks_path.exists() {
         println!("No hooks file found at {}", hooks_path.display());
@@ -859,7 +821,9 @@ fn remove_tally_hooks(config: &mut Value) -> usize {
             let before = handlers.len();
             handlers.retain(|handler| {
                 let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                let is_current_hook = command.contains("tally-codex") && command.contains(" hook ");
+                let is_current_hook = (command.contains("tally-codex")
+                    || command.contains(" codex hook "))
+                    && command.contains(" hook ");
                 let is_legacy_hook =
                     command.contains("tally-host-hook") || command.contains("codex_hook_logger.py");
                 !(is_current_hook || is_legacy_hook)
@@ -1271,7 +1235,7 @@ fn shell_quote(value: &str) -> String {
 #[cfg(unix)]
 fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
     format!(
-        "TALLY_STATE_DIR={} {} hook {}",
+        "TALLY_STATE_DIR={} {} codex hook {}",
         shell_quote(&state_dir.display().to_string()),
         shell_quote(hook_bin),
         shell_quote(event_name)
@@ -1281,7 +1245,7 @@ fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
 #[cfg(windows)]
 fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
     format!(
-        "set \"TALLY_STATE_DIR={}\" && {} hook {}",
+        "set \"TALLY_STATE_DIR={}\" && {} codex hook {}",
         state_dir.display(),
         shell_quote(hook_bin),
         shell_quote(event_name)
@@ -1343,7 +1307,7 @@ fn run_id() -> String {
         })
 }
 
-fn hooks_path() -> PathBuf {
+pub fn default_config_path() -> PathBuf {
     if let Ok(path) = env::var("CODEX_HOOKS_PATH") {
         return expand_home(&path);
     }
@@ -1354,14 +1318,14 @@ fn hooks_path() -> PathBuf {
 fn effective_hooks_path(config_path: Option<&Path>) -> PathBuf {
     config_path
         .map(Path::to_path_buf)
-        .unwrap_or_else(hooks_path)
+        .unwrap_or_else(default_config_path)
 }
 
 fn onboarding_state_dir() -> PathBuf {
     if let Ok(path) = env::var("TALLY_STATE_DIR") {
         return expand_home(&path);
     }
-    state_dir_for_hooks_path(&hooks_path())
+    state_dir_for_hooks_path(&default_config_path())
 }
 
 fn state_dir_for_hooks_path(path: &Path) -> PathBuf {
@@ -1372,8 +1336,12 @@ fn state_dir_for_hooks_path(path: &Path) -> PathBuf {
         .join(".state")
 }
 
-fn installed_binary_path() -> PathBuf {
-    installed_binary_path_for_hooks_path(&hooks_path())
+pub fn default_state_dir() -> PathBuf {
+    state_dir_for_hooks_path(&default_config_path())
+}
+
+pub fn default_installed_binary_path() -> PathBuf {
+    installed_binary_path_for_hooks_path(&default_config_path())
 }
 
 fn installed_binary_path_for_hooks_path(path: &Path) -> PathBuf {

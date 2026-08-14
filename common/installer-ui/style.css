@@ -75,6 +75,16 @@ dd { margin: 0; overflow-wrap: anywhere; font-family: ui-monospace, SFMono-Regul
 
 label { display: block; margin: 0 0 7px; font-weight: 600; }
 
+fieldset { margin: 0 0 22px; padding: 0; border: 0; }
+legend { margin-bottom: 8px; font-weight: 600; }
+.client-choice { display: grid; grid-template-columns: 20px minmax(0, 1fr) auto; align-items: center; gap: 9px; min-height: 44px; margin: 0; padding: 8px 10px; border: 1px solid var(--line); background: var(--field); }
+.client-choice + .client-choice { border-top: 0; }
+.client-choice:first-child { border-radius: 6px 6px 0 0; }
+.client-choice:last-child { border-radius: 0 0 6px 6px; }
+.client-choice input { width: 17px; height: 17px; margin: 0; }
+.client-choice small { color: var(--muted); font-weight: 400; }
+.config-field { margin-bottom: 14px; }
+
 input[type="password"], input[type="text"], input[type="url"] {
   width: 100%;
   min-height: 44px;

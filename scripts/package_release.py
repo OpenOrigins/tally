@@ -1,10 +1,9 @@
 #!/usr/bin/env python3
-"""Create consistently named native release assets and checksums."""
+"""Create the single graphical installer asset for a native release target."""
 
 from __future__ import annotations
 
 import argparse
-import hashlib
 import json
 import os
 import plistlib
@@ -12,7 +11,6 @@ import shutil
 import stat
 import subprocess
 import sys
-import tarfile
 import tempfile
 import tomllib
 import zipfile
@@ -20,16 +18,9 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
-MACOS_PRODUCTS = {
-    "tally-codex": {
-        "product_name": "Tally Codex",
-        "bundle_id": "com.openorigins.tally.codex",
-    },
-    "tally-claude": {
-        "product_name": "Tally Claude Code",
-        "bundle_id": "com.openorigins.tally.claude",
-    },
-}
+BINARY_NAME = "tally"
+PRODUCT_NAME = "Tally"
+BUNDLE_ID = "com.openorigins.tally"
 
 
 def main() -> None:
@@ -54,12 +45,12 @@ def main() -> None:
 
     suffix = ".exe" if "windows" in args.label else ""
     source_dir = Path("target") / args.target / "release"
-    for name in MACOS_PRODUCTS:
-        source = source_dir / f"{name}{suffix}"
-        destination = args.output / f"{name}-{args.label}{suffix}"
-        shutil.copy2(source, destination)
-        destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
-        write_checksum(destination)
+    source = source_dir / f"{BINARY_NAME}{suffix}"
+    if not source.is_file():
+        raise SystemExit(f"missing release binary: {source}")
+    destination = args.output / f"{BINARY_NAME}-{args.label}{suffix}"
+    shutil.copy2(source, destination)
+    destination.chmod(destination.stat().st_mode | stat.S_IXUSR)
 
 
 def package_macos(args: argparse.Namespace) -> None:
@@ -70,43 +61,36 @@ def package_macos(args: argparse.Namespace) -> None:
     source_dir = Path("target") / args.target / "release"
     version = workspace_version()
 
-    for binary_name, metadata in MACOS_PRODUCTS.items():
-        source = source_dir / binary_name
-        if not source.is_file():
-            raise SystemExit(f"missing release binary: {source}")
+    source = source_dir / BINARY_NAME
+    if not source.is_file():
+        raise SystemExit(f"missing release binary: {source}")
 
+    if sys.platform == "darwin":
+        sign_path(source, signing, hardened_runtime=True)
+
+    with tempfile.TemporaryDirectory(prefix="tally-dmg-") as directory:
+        staging = Path(directory)
+        app = build_macos_app(
+            source,
+            staging,
+            BINARY_NAME,
+            version,
+            args.label,
+            PRODUCT_NAME,
+            BUNDLE_ID,
+        )
         if sys.platform == "darwin":
-            sign_path(source, signing, hardened_runtime=True)
-
-        with tempfile.TemporaryDirectory(prefix=f"{binary_name}-dmg-") as directory:
-            staging = Path(directory)
-            app = build_macos_app(
-                source,
-                staging,
-                binary_name,
-                version,
-                args.label,
-                metadata["product_name"],
-                metadata["bundle_id"],
-            )
-            if sys.platform == "darwin":
-                sign_path(app, signing, hardened_runtime=True)
-                verify_signature(app, deep=True)
-                dmg = args.output / f"{binary_name}-{args.label}.dmg"
-                create_dmg(staging, metadata["product_name"], dmg)
-                sign_path(dmg, signing, hardened_runtime=False)
-                verify_signature(dmg)
-                if args.require_macos_notarization:
-                    signing.notarize_and_staple(dmg)
-                write_checksum(dmg)
-            else:
-                app_archive = args.output / f"{binary_name}-{args.label}-app.zip"
-                write_app_zip(app, app_archive)
-                write_checksum(app_archive)
-
-        cli_archive = args.output / f"{binary_name}-{args.label}-cli.tar.gz"
-        write_cli_archive(source, cli_archive, binary_name)
-        write_checksum(cli_archive)
+            sign_path(app, signing, hardened_runtime=True)
+            verify_signature(app, deep=True)
+            dmg = args.output / f"{BINARY_NAME}-{args.label}.dmg"
+            create_dmg(staging, PRODUCT_NAME, dmg)
+            sign_path(dmg, signing, hardened_runtime=False)
+            verify_signature(dmg)
+            if args.require_macos_notarization:
+                signing.notarize_and_staple(dmg)
+        else:
+            app_archive = args.output / f"{BINARY_NAME}-{args.label}-app.zip"
+            write_app_zip(app, app_archive)
 
 
 def workspace_version() -> str:
@@ -302,25 +286,6 @@ def write_app_zip(app: Path, archive_path: Path) -> None:
     with zipfile.ZipFile(archive_path, "w", compression=zipfile.ZIP_DEFLATED) as archive:
         for path in (app, *sorted(app.rglob("*"))):
             archive.write(path, path.relative_to(app.parent))
-
-
-def write_cli_archive(source: Path, archive_path: Path, binary_name: str) -> None:
-    with tarfile.open(archive_path, "w:gz") as archive:
-        info = archive.gettarinfo(str(source), arcname=binary_name)
-        info.mode = 0o755
-        with source.open("rb") as handle:
-            archive.addfile(info, handle)
-        license_info = archive.gettarinfo("LICENSE", arcname="LICENSE")
-        license_info.mode = 0o644
-        with Path("LICENSE").open("rb") as handle:
-            archive.addfile(license_info, handle)
-
-
-def write_checksum(path: Path) -> None:
-    digest = hashlib.sha256(path.read_bytes()).hexdigest()
-    path.with_name(f"{path.name}.sha256").write_bytes(
-        f"{digest}  {path.name}\n".encode("ascii")
-    )
 
 
 def run(command: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:

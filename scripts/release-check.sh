@@ -13,10 +13,9 @@ cargo test --workspace --all-targets --locked
 "$PYTHON" -B tests/test_push_test_logs.py
 "$PYTHON" -B tests/test_package_release.py
 "$PYTHON" -B tests/test_homebrew_formula.py
-cargo build --workspace --release --locked --target "$HOST_TARGET"
+cargo build --package tally --release --locked --target "$HOST_TARGET"
 "$PYTHON" -B tests/native_install_smoke.py \
-  --codex "target/$HOST_TARGET/release/tally-codex" \
-  --claude "target/$HOST_TARGET/release/tally-claude"
+  --tally "target/$HOST_TARGET/release/tally"
 "$PYTHON" -B scripts/package_release.py \
   --target "$HOST_TARGET" \
   --label local-smoke \

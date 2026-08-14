@@ -100,14 +100,13 @@ jobs:
       - name: Test workspace
         run: cargo test --workspace --all-targets --locked --target ${{ matrix.target }}
 
-      - name: Build release executables
-        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Build release installer
+        run: cargo build --package tally --release --locked --target ${{ matrix.target }}
 
       - name: Test installation and records as an end user
         run: >-
           python tests/native_install_smoke.py
-          --codex target/${{ matrix.target }}/release/tally-codex${{ matrix.executable_suffix }}
-          --claude target/${{ matrix.target }}/release/tally-claude${{ matrix.executable_suffix }}
+          --tally target/${{ matrix.target }}/release/tally${{ matrix.executable_suffix }}
 
       - name: Preserve push-test ingest behavior
         run: python tests/test_push_test_logs.py

@@ -76,14 +76,13 @@ jobs:
       - name: Test release target
         run: cargo test --workspace --all-targets --locked --target ${{ matrix.target }}
 
-      - name: Build release executables
-        run: cargo build --workspace --release --locked --target ${{ matrix.target }}
+      - name: Build release installer
+        run: cargo build --package tally --release --locked --target ${{ matrix.target }}
 
       - name: Test installation and records as an end user
         run: >-
           python tests/native_install_smoke.py
-          --codex target/${{ matrix.target }}/release/tally-codex${{ matrix.executable_suffix }}
-          --claude target/${{ matrix.target }}/release/tally-claude${{ matrix.executable_suffix }}
+          --tally target/${{ matrix.target }}/release/tally${{ matrix.executable_suffix }}
 
       - name: Preserve push-test ingest behavior
         run: python tests/test_push_test_logs.py
@@ -164,7 +163,7 @@ jobs:
           --label ${{ matrix.label }}
           --require-macos-notarization
 
-      - name: Package executables and checksums
+      - name: Package graphical installer
         if: ${{ !startsWith(matrix.label, 'macos-') }}
         run: >-
           python scripts/package_release.py
@@ -214,30 +213,32 @@ jobs:
           path: dist
           merge-multiple: true
 
-      - name: Include Apache license
-        run: cp LICENSE dist/LICENSE-Apache-2.0.txt
-
-      - name: Verify release checksums
+      - name: Create one checksum manifest
         working-directory: dist
-        run: sha256sum --check ./*.sha256
+        run: sha256sum tally-* > SHA256SUMS
 
       - name: Generate Homebrew formula
         if: github.event_name == 'push'
         run: >-
           python scripts/generate_homebrew_formula.py
           --dist dist
-          --output dist/tally.rb
+          --output generated/tally.rb
           --release-tag ${{ github.ref_name }}
 
       - name: Publish tagged GitHub release
         if: github.event_name == 'push'
         uses: softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65 # v2
         with:
-          files: dist/*
+          files: |
+            dist/tally-macos-arm64.dmg
+            dist/tally-macos-x86_64.dmg
+            dist/tally-windows-x86_64.exe
+            dist/tally-linux-x86_64
+            dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Tally records Codex and Claude Code activity as structured audit logs.
+            Tally installs audit logging for Codex and Claude Code from one small graphical installer.
 
             ## Install
 
@@ -251,11 +252,13 @@ jobs:
             tally
             ```
 
-            **macOS GUI:** Download the `.dmg` for your client and Mac architecture, open it, drag the app to Applications, then open the app. The apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple.
+            **macOS:** Download the `.dmg` for your Mac architecture, open it, drag Tally to Applications, then open Tally. The app and disk image are signed with OpenOrigins' Apple Developer ID and notarized by Apple.
 
-            **macOS CLI:** Download the `-cli.tar.gz`. **Windows:** Download the relevant `.exe`. **Linux:** Download the relevant Linux executable and make it executable with `chmod +x`.
+            **Windows:** Download and open `tally-windows-x86_64.exe`. Windows signing is not yet available, so SmartScreen may require **More info** > **Run anyway**.
 
-            The installer asks for the dashboard Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation is available with `install --api-key <agent-api-key>`.
+            **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
+
+            Choose Codex, Claude Code, or both in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard.
 
       - name: Open Homebrew formula update pull request
         if: github.event_name == 'push'
@@ -264,7 +267,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          cp dist/tally.rb Formula/tally.rb
+          cp generated/tally.rb Formula/tally.rb
           if git diff --quiet -- Formula/tally.rb; then
             exit 0
           fi
@@ -290,14 +293,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
-          gh release upload "$RELEASE_TAG" dist/* --clobber --repo "$GITHUB_REPOSITORY"
-          for agent in codex claude; do
-            for architecture in arm64 x86_64; do
-              legacy="tally-$agent-macos-$architecture.tar.gz"
-              gh release delete-asset "$RELEASE_TAG" "$legacy" --yes --repo "$GITHUB_REPOSITORY" || true
-              gh release delete-asset "$RELEASE_TAG" "$legacy.sha256" --yes --repo "$GITHUB_REPOSITORY" || true
-            done
-          done
+          gh release upload "$RELEASE_TAG" dist/tally-* dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Update refreshed release instructions
         if: github.event_name == 'workflow_dispatch'
@@ -305,18 +301,18 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_NOTES: |
-            Tally records Codex and Claude Code activity as structured audit logs.
+            Tally installs audit logging for Codex and Claude Code from one graphical installer.
 
             ## Install
 
             Generate an Agent API key in the OpenOrigins dashboard.
 
             - **Homebrew:** Run `brew tap openorigins/tally https://github.com/OpenOrigins/tally`, then `brew install tally` and `tally`.
-            - **macOS:** Download the `.dmg` for your Mac, open it, and drag the app to Applications. Terminal users can download the separate `-cli.tar.gz`.
-            - **Windows:** Download and run the `.exe` for Codex or Claude Code. The executables are currently unsigned, so Microsoft Defender SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block them.
-            - **Linux:** Make the downloaded file executable and run it from a terminal.
+            - **macOS:** Download the `.dmg` for your Mac, open it, drag Tally to Applications, and open Tally.
+            - **Windows:** Download and open `tally-windows-x86_64.exe`. The executable is currently unsigned, so SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block it.
+            - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
 
-            The graphical installer asks for the Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation remains available with `install --api-key <agent-api-key>`.
+            Choose Codex, Claude Code, or both. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard.
 
             macOS apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
         run: gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES" --repo "$GITHUB_REPOSITORY"

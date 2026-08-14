@@ -2,57 +2,44 @@
 
 All notable changes to Tally are documented in this file.
 
-## Unreleased
+## 0.1.3 - 2026-08-14
 
 ### Added
 
-- Restore a shared graphical installer for macOS and Windows with dashboard
-  Agent API key entry, custom ingest URL support, and explicit handshake status.
-- Package Finder-openable macOS app bundles alongside CLI symlinks in each
-  release archive.
+- One graphical installer that configures Codex, Claude Code, or both.
+- Separate editable configuration paths for each selected client.
+- Combined-client end-user tests covering secure key storage, lowercase
+  `x-api-key` handshakes, retry, forwarding, hook deduplication, and uninstall.
 
 ### Changed
 
-- Copy each installer executable into stable local Tally storage before wiring
-  hooks, so removing the downloaded installer does not break logging.
-
-## 0.1.3 - 2026-08-06
-
-### Changed
-
-- Rolled back macOS DMG installer packaging and package macOS downloads as
-  `.tar.gz` archives that preserve executable permissions.
+- Reduced the release to four platform installers and one checksum manifest.
+- Removed separate client downloads and CLI release archives.
+- Updated macOS packaging to one signed and notarized `Tally.app` in each DMG.
+- Simplified Homebrew to install the same unified graphical installer.
+- Reworked installation documentation for users unfamiliar with GitHub.
 
 ## 0.1.2 - 2026-08-06
+
+### Added
+
+- Signed and notarized macOS DMGs for Codex and Claude Code on Apple Silicon and Intel.
+- A shared graphical installer with Agent API key entry, custom configuration
+  paths, retry, cancel, and automatic dashboard handshake status.
+- Native installers for macOS, Windows, and Linux plus Homebrew distribution.
 
 ### Fixed
 
 - Treat successful HTTP responses with Tally API error bodies as forwarding
   failures so local queues are retained and users see retryable ingest errors.
+- Store Windows hook executables outside client configuration directories.
 
 ## 0.1.0 - 2026-08-06
 
 ### Added
 
-- Native Codex and Claude Code executables for macOS arm64/x86_64, Windows
-  x86_64, and Linux x86_64 releases.
-- Cross-platform end-user installation, hook execution, audit-record, removal,
-  and release-packaging tests on every pull request.
-- Regression tests for the Tally API push behavior introduced in `31b44c5`,
-  including exact lowercase `x-api-key` header casing.
+- Native Codex and Claude Code hook handlers and cross-platform installation tests.
+- Regression tests for the API push behavior introduced in `31b44c5`, including
+  exact lowercase `x-api-key` header casing.
 - Dashboard-issued Agent API key onboarding, automatic post-install connection
-  handshake, and retryable background log forwarding for both agent clients.
-
-### Changed
-
-- Running a native executable without arguments now prompts for the dashboard
-  Agent API key and then installs or updates hooks.
-- Consolidated six agent packaging directories into `codex/` and `claude/`.
-- Moved the specification and examples under `docs/` and reduced the root
-  README to release and source-install essentials.
-- Aligned wrapper records with Tally schema version `0.2` and added Windows
-  home-directory, command-quoting, process-liveness, and file-replacement support.
-
-### Removed
-
-- Redundant Docker, host-installer, and agent-specific image release paths.
+  handshake, and retryable background log forwarding.

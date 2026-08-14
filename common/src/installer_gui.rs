@@ -13,18 +13,26 @@ const APP: &str = include_str!("../installer-ui/app.js");
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
-pub struct GuiConfig {
+pub struct GuiClient {
+    pub id: &'static str,
     pub product: &'static str,
     pub config_path: PathBuf,
     pub state_dir: PathBuf,
     pub installed_binary_path: PathBuf,
 }
 
-pub fn run_installer_gui<I, U>(config: GuiConfig, mut install: I, mut uninstall: U) -> Result<()>
+pub fn run_installer_gui<I, U>(
+    clients: Vec<GuiClient>,
+    mut install: I,
+    mut uninstall: U,
+) -> Result<()>
 where
-    I: FnMut(InstallOptions) -> Result<InstallReport>,
-    U: FnMut(Option<PathBuf>) -> Result<()>,
+    I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
+    U: FnMut(&str, Option<PathBuf>) -> Result<()>,
 {
+    if clients.is_empty() {
+        return Err("installer requires at least one client".into());
+    }
     let server = Server::http(("127.0.0.1", 0))
         .map_err(|error| format!("could not start local installer: {error}"))?;
     let address = server
@@ -56,7 +64,7 @@ where
             request,
             &origin,
             &token,
-            &config,
+            &clients,
             &mut install,
             &mut uninstall,
         );
@@ -70,13 +78,13 @@ fn handle_request<I, U>(
     mut request: Request,
     origin: &str,
     token: &str,
-    config: &GuiConfig,
+    clients: &[GuiClient],
     install: &mut I,
     uninstall: &mut U,
 ) -> bool
 where
-    I: FnMut(InstallOptions) -> Result<InstallReport>,
-    U: FnMut(Option<PathBuf>) -> Result<()>,
+    I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
+    U: FnMut(&str, Option<PathBuf>) -> Result<()>,
 {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or(request.url());
@@ -101,15 +109,23 @@ where
     }
 
     if method == Method::Post && path == "/api/status" {
-        let installed = config.installed_binary_path.exists()
-            && crate::api_key_path(&config.state_dir).exists();
+        let client_status = clients
+            .iter()
+            .map(|client| {
+                json!({
+                    "id": client.id,
+                    "product": client.product,
+                    "configPath": client.config_path,
+                    "keyPath": crate::api_key_path(&client.state_dir),
+                    "installed": client.installed_binary_path.exists()
+                        && crate::api_key_path(&client.state_dir).exists(),
+                })
+            })
+            .collect::<Vec<_>>();
         let response = json!({
             "ok": true,
-            "product": config.product,
-            "configPath": config.config_path,
-            "keyPath": crate::api_key_path(&config.state_dir),
+            "clients": client_status,
             "defaultApiUrl": DEFAULT_API_URL,
-            "installed": installed,
         });
         let _ = request.respond(json_response(StatusCode(200), response));
         return false;
@@ -121,8 +137,10 @@ where
     }
 
     if method == Method::Post && path == "/api/uninstall" {
-        let config_path = match read_json_body(&mut request).and_then(parse_config_path) {
-            Ok(config_path) => config_path,
+        let selected = match read_json_body(&mut request)
+            .and_then(|value| parse_client_requests(value, clients))
+        {
+            Ok(selected) => selected,
             Err(error) => {
                 let _ = request.respond(json_response(
                     StatusCode(400),
@@ -131,20 +149,26 @@ where
                 return false;
             }
         };
-        let response_config_path = config_path
-            .clone()
-            .unwrap_or_else(|| config.config_path.clone());
-        let (response, shutdown_after_response) = match uninstall(config_path) {
-            Ok(()) => (
-                json_response(
-                    StatusCode(200),
-                    json!({
-                        "ok": true,
-                        "configPath": response_config_path,
-                    }),
-                ),
-                true,
-            ),
+        let result = selected
+            .iter()
+            .try_for_each(|selection| uninstall(selection.id, selection.config_path.clone()));
+        let (response, shutdown_after_response) = match result {
+            Ok(()) => {
+                let paths = selected
+                    .iter()
+                    .map(|selection| json!({"id": selection.id, "configPath": selection.response_path}))
+                    .collect::<Vec<_>>();
+                (
+                    json_response(
+                        StatusCode(200),
+                        json!({
+                            "ok": true,
+                            "clients": paths,
+                        }),
+                    ),
+                    true,
+                )
+            }
             Err(error) => (
                 json_response(
                     StatusCode(400),
@@ -158,24 +182,52 @@ where
     }
 
     if method == Method::Post && path == "/api/install" {
-        let (response, shutdown_after_response) = match read_json_body(&mut request)
-            .and_then(parse_options)
-            .and_then(install)
-        {
-            Ok(report) => {
-                let connected = report.handshake_error.is_none();
+        let result = read_json_body(&mut request)
+            .and_then(|value| parse_install_request(value, clients))
+            .and_then(|request| {
+                request
+                    .clients
+                    .iter()
+                    .map(|selection| {
+                        let options = install_options(
+                            request.api_key.clone(),
+                            request.api_url.clone(),
+                            selection
+                                .config_path
+                                .as_ref()
+                                .map(|path| path.display().to_string()),
+                        )?;
+                        install(selection.id, options).map(|report| (selection.id, report))
+                    })
+                    .collect::<Result<Vec<_>>>()
+            });
+        let (response, shutdown_after_response) = match result {
+            Ok(reports) => {
+                let connected = reports
+                    .iter()
+                    .all(|(_, report)| report.handshake_error.is_none());
+                let details = reports
+                    .iter()
+                    .map(|(id, report)| {
+                        json!({
+                            "id": id,
+                            "configPath": report.config_path,
+                            "keyPath": crate::api_key_path(&report.state_dir),
+                            "logsPath": report.logs_path,
+                            "installedBinaryPath": report.installed_binary_path,
+                            "backupPath": report.backup_path,
+                            "connected": report.handshake_error.is_none(),
+                        })
+                    })
+                    .collect::<Vec<_>>();
                 (
                     json_response(
                         StatusCode(200),
                         json!({
                             "ok": true,
                             "connected": connected,
-                            "warning": report.handshake_error.as_ref().map(|_| "The dashboard could not confirm this client automatically. Local logging is installed and will continue offline. Use \"Mark connected manually\" in the dashboard if needed."),
-                            "configPath": report.config_path,
-                            "keyPath": crate::api_key_path(&report.state_dir),
-                            "logsPath": report.logs_path,
-                            "installedBinaryPath": report.installed_binary_path,
-                            "backupPath": report.backup_path,
+                            "warning": (!connected).then_some("The dashboard could not confirm every selected client automatically. Local logging is installed and will continue offline. Try the key again, or use \"Mark connected manually\" in the dashboard if needed."),
+                            "clients": details,
                         }),
                     ),
                     connected,
@@ -200,7 +252,19 @@ where
     false
 }
 
-fn parse_options(value: Value) -> Result<InstallOptions> {
+struct InstallRequest {
+    api_key: String,
+    api_url: Option<String>,
+    clients: Vec<ClientRequest>,
+}
+
+struct ClientRequest {
+    id: &'static str,
+    config_path: Option<PathBuf>,
+    response_path: PathBuf,
+}
+
+fn parse_install_request(value: Value, clients: &[GuiClient]) -> Result<InstallRequest> {
     let object = value
         .as_object()
         .ok_or("request body must be a JSON object")?;
@@ -213,23 +277,57 @@ fn parse_options(value: Value) -> Result<InstallOptions> {
         .get("apiUrl")
         .and_then(Value::as_str)
         .map(str::to_string);
-    let config_path = object
-        .get("configPath")
-        .and_then(Value::as_str)
-        .map(str::to_string);
-    install_options(api_key, api_url, config_path)
+    let selected = parse_client_requests(value, clients)?;
+    Ok(InstallRequest {
+        api_key,
+        api_url,
+        clients: selected,
+    })
 }
 
-fn parse_config_path(value: Value) -> Result<Option<PathBuf>> {
+fn parse_client_requests(value: Value, clients: &[GuiClient]) -> Result<Vec<ClientRequest>> {
     let object = value
         .as_object()
         .ok_or("request body must be a JSON object")?;
-    Ok(object
-        .get("configPath")
-        .and_then(Value::as_str)
-        .map(str::trim)
-        .filter(|path| !path.is_empty())
-        .map(PathBuf::from))
+    let requested = object
+        .get("clients")
+        .and_then(Value::as_array)
+        .ok_or("choose at least one client")?;
+    if requested.is_empty() {
+        return Err("choose at least one client".into());
+    }
+    let mut selected = Vec::new();
+    for request in requested {
+        let request = request.as_object().ok_or("invalid client selection")?;
+        let id = request
+            .get("id")
+            .and_then(Value::as_str)
+            .ok_or("client id is required")?;
+        if selected
+            .iter()
+            .any(|selection: &ClientRequest| selection.id == id)
+        {
+            return Err(format!("client {id} was selected more than once").into());
+        }
+        let client = clients
+            .iter()
+            .find(|client| client.id == id)
+            .ok_or_else(|| format!("unknown client: {id}"))?;
+        let config_path = request
+            .get("configPath")
+            .and_then(Value::as_str)
+            .map(str::trim)
+            .filter(|path| !path.is_empty())
+            .map(PathBuf::from);
+        selected.push(ClientRequest {
+            id: client.id,
+            response_path: config_path
+                .clone()
+                .unwrap_or_else(|| client.config_path.clone()),
+            config_path,
+        });
+    }
+    Ok(selected)
 }
 
 fn read_json_body(request: &mut Request) -> Result<Value> {

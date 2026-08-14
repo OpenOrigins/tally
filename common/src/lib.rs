@@ -12,7 +12,7 @@ use url::Url;
 
 mod installer_gui;
 
-pub use installer_gui::{run_installer_gui, GuiConfig};
+pub use installer_gui::{run_installer_gui, GuiClient};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -33,6 +33,7 @@ fn executable_is_in_app_bundle(path: &Path) -> bool {
         .any(|ancestor| ancestor.extension().and_then(|value| value.to_str()) == Some("app"))
 }
 
+#[derive(Clone)]
 pub struct InstallOptions {
     pub api_key: String,
     pub api_url: String,

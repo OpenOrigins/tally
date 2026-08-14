@@ -1,26 +1,32 @@
 # Releasing Tally
 
-Tags matching `v*` build and test native executables on:
+A `v*` tag runs tests and builds the same graphical installer for Codex and
+Claude Code on macOS arm64, macOS Intel, Windows x86_64, and Linux x86_64.
 
-- macOS arm64 (deployment target 11.0)
-- macOS x86_64 (deployment target 10.15)
-- Windows Server 2025 x86_64
-- Linux x86_64 (static musl build)
+Each release contains only:
 
-The workflow publishes macOS `.tar.gz` archives containing a Finder-openable
-`.app` and CLI symlink, Linux/Windows executables, and SHA-256 files for every
-release asset. Windows executables and macOS apps open the graphical installer
-when launched without arguments.
+- `tally-macos-arm64.dmg`
+- `tally-macos-x86_64.dmg`
+- `tally-windows-x86_64.exe`
+- `tally-linux-x86_64`
+- `SHA256SUMS`
+
+The macOS app and DMG are Developer ID signed, hardened, notarized, stapled, and
+assessed by Gatekeeper before upload. Windows is currently unsigned.
 
 ## Checklist
 
-1. Confirm the repository license is appropriate for public binary distribution.
+1. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
 2. Run `./scripts/release-check.sh` from a clean checkout.
-3. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
-4. Merge to `dev` and confirm all required PR checks pass.
-5. Tag the tested commit as `v<version>` and push the tag.
-6. Verify all macOS archives, Linux/Windows executables, and checksum files in the release.
-7. Install each executable on a clean target and run one real agent session.
+3. Merge to `dev` and wait for every CI job to pass.
+4. Tag that exact commit as `v<version>` and push the tag.
+5. Wait for all four native release jobs and the publish job to pass.
+6. Download every asset and verify `sha256sum --check SHA256SUMS`.
+7. Mount both DMGs and verify the app and DMG with `codesign`, `stapler`, and
+   `spctl`. Test installation, retry, hook execution, and uninstall on Windows
+   and Linux as well.
+8. Promote the generated Homebrew formula only after the published bytes and
+   checksums are final.
 
-The workflow produces unsigned binaries. Configure platform signing and macOS
-notarization credentials before treating downloads as a polished public release.
+Never replace an asset after its checksum has been promoted to Homebrew. Publish
+a new version instead.
