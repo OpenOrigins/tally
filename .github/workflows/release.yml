@@ -200,6 +200,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: write
+      pull-requests: write
     steps:
       - name: Check out repository
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -256,22 +257,31 @@ jobs:
 
             The installer asks for the dashboard Agent API key, stores it locally, installs hooks, and confirms the client with the dashboard. CLI installation is available with `install --api-key <agent-api-key>`.
 
-      - name: Promote release formula to the Homebrew tap
+      - name: Open Homebrew formula update pull request
         if: github.event_name == 'push'
+        continue-on-error: true
         env:
+          GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
           cp dist/tally.rb Formula/tally.rb
           if git diff --quiet -- Formula/tally.rb; then
             exit 0
           fi
+          formula_branch="chore/homebrew-${RELEASE_TAG#v}-${GITHUB_RUN_ID}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout -b "$formula_branch"
           git add Formula/tally.rb
           git commit \
             -m "Update Homebrew formula for $RELEASE_TAG" \
             -m "Signed-off-by: Ekaterina Pavlova <ekaterina@openorigins.com>"
-          git push origin HEAD:dev
+          git push --set-upstream origin "$formula_branch"
+          gh pr create \
+            --base dev \
+            --head "$formula_branch" \
+            --title "Update Homebrew formula for $RELEASE_TAG" \
+            --body "Promotes the checksummed Homebrew formula generated from the published $RELEASE_TAG assets."
 
       - name: Refresh existing release assets
         if: github.event_name == 'workflow_dispatch'

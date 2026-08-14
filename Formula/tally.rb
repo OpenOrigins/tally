@@ -1,34 +1,34 @@
 class Tally < Formula
   desc "Record verifiable Codex and Claude Code activity"
   homepage "https://github.com/OpenOrigins/tally"
-  version "0.1.3"
+
   license "Apache-2.0"
 
   if OS.mac? && Hardware::CPU.arm?
-    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-codex-macos-arm64-cli.tar.gz"
-    sha256 "b3486272a778197ad73ae9b8b08c47f0c9ebf2e055f7f263e79095268ece49f0"
+    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-codex-macos-arm64-cli.tar.gz"
+    sha256 "83b69e228c2a94d5b4b4290e67c38b1b55555bde836a594378725fea6404f23f"
 
     resource "tally-claude" do
-      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-claude-macos-arm64-cli.tar.gz"
-      sha256 "0a5a43cdfd425bf17402cba9d88e79ed9189009f4e7aef6ba19d7d1b4014d597"
+      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-claude-macos-arm64-cli.tar.gz"
+      sha256 "bccaf1ac8a514269b470e0244aec0b5edb1c9e4a2079671c61d861e83a58cca3"
     end
   end
   if OS.mac? && Hardware::CPU.intel?
-    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-codex-macos-x86_64-cli.tar.gz"
-    sha256 "5e096d0569f25c20fe1c8cdd89d77f052328d3ef9d216bf0a4ad037692f2e42f"
+    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-codex-macos-x86_64-cli.tar.gz"
+    sha256 "624554f51c40024c95b18df66fbedc602c64918d9646ed7c7ad1b6650111c2f1"
 
     resource "tally-claude" do
-      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-claude-macos-x86_64-cli.tar.gz"
-      sha256 "3be9dc7c73675459bd3143a85e4af3e2f049a241ad87a2c046d1e9c7a911b8b6"
+      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-claude-macos-x86_64-cli.tar.gz"
+      sha256 "91a451b34d18b4afb70ca4987109f493b302ad60db069d898b84dc167a631823"
     end
   end
   if OS.linux? && Hardware::CPU.intel?
-    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-codex-linux-x86_64", using: :nounzip
-    sha256 "6efbbb2538d215482c27f7fd9c7470d791fbf5fdfd8d86372ef397e4b13d22ff"
+    url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-codex-linux-x86_64", using: :nounzip
+    sha256 "1a9174ef07bdbfd6648a2967e6fbc815489957caa5bd3e124d52da1ddfb7f281"
 
     resource "tally-claude" do
-      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.0/tally-claude-linux-x86_64", using: :nounzip
-      sha256 "5a0bbf69d29102861e39354cac805e0a3297bf7d065fdeedc6122aec93a95f5e"
+      url "https://github.com/OpenOrigins/tally/releases/download/v0.1.2/tally-claude-linux-x86_64", using: :nounzip
+      sha256 "8272e04c0f96b77ca6465f7a9226a7943cc8af7809db7db9646ec09f05da0c2a"
     end
   end
 
