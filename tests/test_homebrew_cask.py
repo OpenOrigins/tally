@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Regression tests for the single-installer Homebrew formula."""
+"""Regression tests for the single-installer Homebrew cask."""
 
 from __future__ import annotations
 
@@ -13,7 +13,6 @@ from pathlib import Path
 ASSETS = (
     "tally-macos-arm64.dmg",
     "tally-macos-x86_64.dmg",
-    "tally-linux-x86_64",
 )
 
 
@@ -26,26 +25,30 @@ def main() -> None:
         for name in ASSETS:
             (dist / name).write_bytes(f"test artifact: {name}\n".encode("ascii"))
 
-        formula = root / "Formula" / "tally.rb"
+        cask = root / "Casks" / "tally.rb"
         subprocess.run(
-            [sys.executable, str(repo / "scripts" / "generate_homebrew_formula.py"),
-             "--dist", str(dist), "--output", str(formula),
+            [sys.executable, str(repo / "scripts" / "generate_homebrew_cask.py"),
+             "--dist", str(dist), "--output", str(cask),
              "--version", "9.8.7", "--release-tag", "v9.8.6"],
             cwd=repo,
             check=True,
         )
-        rendered = formula.read_text(encoding="ascii")
+        rendered = cask.read_text(encoding="ascii")
         assert 'version "9.8.7"' in rendered
         assert "/releases/download/v9.8.6/" in rendered
+        assert 'cask "tally" do' in rendered
+        assert 'arch arm: "arm64", intel: "x86_64"' in rendered
+        assert "depends_on :macos" in rendered
+        assert 'app "Tally.app"' in rendered
         assert "resource" not in rendered
         assert "-cli" not in rendered
         assert "tally-codex" not in rendered
         assert "tally-claude" not in rendered
-        assert '"Tally.app/Contents/MacOS/tally"' in rendered
+        assert "tally-linux" not in rendered
         for name in ASSETS:
             assert hashlib.sha256((dist / name).read_bytes()).hexdigest() in rendered
 
-    print("Homebrew formula tests passed.")
+    print("Homebrew cask tests passed.")
 
 
 if __name__ == "__main__":

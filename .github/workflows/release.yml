@@ -217,10 +217,10 @@ jobs:
         working-directory: dist
         run: sha256sum tally-* > SHA256SUMS
 
-      - name: Generate Homebrew formula
+      - name: Generate Homebrew cask
         if: github.event_name == 'push'
         run: >-
-          python scripts/generate_homebrew_formula.py
+          python scripts/generate_homebrew_cask.py
           --dist dist
           --output generated/tally.rb
           --release-tag ${{ github.ref_name }}
@@ -244,12 +244,11 @@ jobs:
 
             Generate an Agent API key in the OpenOrigins dashboard.
 
-            **Homebrew (macOS or Linux):**
+            **Homebrew (macOS):**
 
             ```sh
             brew tap openorigins/tally https://github.com/OpenOrigins/tally
-            brew install tally
-            tally
+            brew install --cask tally
             ```
 
             **macOS:** Download the `.dmg` for your Mac architecture, open it, drag Tally to Applications, then open Tally. The app and disk image are signed with OpenOrigins' Apple Developer ID and notarized by Apple.
@@ -260,31 +259,32 @@ jobs:
 
             Choose Codex, Claude Code, or both in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard.
 
-      - name: Open Homebrew formula update pull request
+      - name: Open Homebrew cask update pull request
         if: github.event_name == 'push'
         continue-on-error: true
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
         run: |
-          cp generated/tally.rb Formula/tally.rb
-          if git diff --quiet -- Formula/tally.rb; then
+          mkdir -p Casks
+          cp generated/tally.rb Casks/tally.rb
+          if git diff --quiet -- Casks/tally.rb; then
             exit 0
           fi
-          formula_branch="chore/homebrew-${RELEASE_TAG#v}-${GITHUB_RUN_ID}"
+          cask_branch="chore/homebrew-${RELEASE_TAG#v}-${GITHUB_RUN_ID}"
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git checkout -b "$formula_branch"
-          git add Formula/tally.rb
+          git checkout -b "$cask_branch"
+          git add Casks/tally.rb
           git commit \
-            -m "Update Homebrew formula for $RELEASE_TAG" \
+            -m "Update Homebrew cask for $RELEASE_TAG" \
             -m "Signed-off-by: Ekaterina Pavlova <ekaterina@openorigins.com>"
-          git push --set-upstream origin "$formula_branch"
+          git push --set-upstream origin "$cask_branch"
           gh pr create \
             --base dev \
-            --head "$formula_branch" \
-            --title "Update Homebrew formula for $RELEASE_TAG" \
-            --body "Promotes the checksummed Homebrew formula generated from the published $RELEASE_TAG assets."
+            --head "$cask_branch" \
+            --title "Update Homebrew cask for $RELEASE_TAG" \
+            --body "Promotes the checksummed Homebrew cask generated from the published $RELEASE_TAG assets."
 
       - name: Refresh existing release assets
         if: github.event_name == 'workflow_dispatch'
@@ -307,7 +307,7 @@ jobs:
 
             Generate an Agent API key in the OpenOrigins dashboard.
 
-            - **Homebrew:** Run `brew tap openorigins/tally https://github.com/OpenOrigins/tally`, then `brew install tally` and `tally`.
+            - **Homebrew (macOS):** Run `brew tap openorigins/tally https://github.com/OpenOrigins/tally`, then `brew install --cask tally`. Open Tally from Applications.
             - **macOS:** Download the `.dmg` for your Mac, open it, drag Tally to Applications, and open Tally.
             - **Windows:** Download and open `tally-windows-x86_64.exe`. The executable is currently unsigned, so SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block it.
             - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.

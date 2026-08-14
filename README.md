@@ -32,15 +32,16 @@ The Windows installer is not yet publisher-signed. SmartScreen may show
 **Windows protected your PC**; select **More info**, then **Run anyway**. A
 work-managed computer may require approval from its administrator.
 
-### Homebrew
+### Homebrew (macOS)
 
-On macOS or Linux:
+Homebrew installs the same signed and notarized `Tally.app` as the DMG:
 
 ```sh
 brew tap openorigins/tally https://github.com/OpenOrigins/tally
-brew install tally
-tally
+brew install --cask tally
 ```
+
+Open **Tally** from Applications after installation.
 
 ### Linux download
 

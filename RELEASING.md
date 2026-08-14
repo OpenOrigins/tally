@@ -25,7 +25,7 @@ assessed by Gatekeeper before upload. Windows is currently unsigned.
 7. Mount both DMGs and verify the app and DMG with `codesign`, `stapler`, and
    `spctl`. Test installation, retry, hook execution, and uninstall on Windows
    and Linux as well.
-8. Promote the generated Homebrew formula only after the published bytes and
+8. Promote the generated Homebrew cask only after the published bytes and
    checksums are final.
 
 Never replace an asset after its checksum has been promoted to Homebrew. Publish

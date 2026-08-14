@@ -16,7 +16,7 @@ All notable changes to Tally are documented in this file.
 - Reduced the release to four platform installers and one checksum manifest.
 - Removed separate client downloads and CLI release archives.
 - Updated macOS packaging to one signed and notarized `Tally.app` in each DMG.
-- Simplified Homebrew to install the same unified graphical installer.
+- Added a Homebrew Cask for the same signed, notarized graphical installer.
 - Reworked installation documentation for users unfamiliar with GitHub.
 
 ## 0.1.2 - 2026-08-06
