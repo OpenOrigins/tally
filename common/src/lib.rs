@@ -333,7 +333,10 @@ pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<(
 }
 
 pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
-    verify_macos_code_signature(source)?;
+    let verify_signature = is_bundled_macos_hook_helper(source);
+    if verify_signature {
+        verify_macos_code_signature(source)?;
+    }
     if destination.exists() && fs::canonicalize(source).ok() == fs::canonicalize(destination).ok() {
         return Ok(());
     }
@@ -341,8 +344,23 @@ pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
         create_private_dir(parent)?;
     }
     atomic_write(destination, &fs::read(source)?, 0o755)?;
-    verify_macos_code_signature(destination)?;
+    if verify_signature {
+        verify_macos_code_signature(destination)?;
+    }
     Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn is_bundled_macos_hook_helper(path: &Path) -> bool {
+    path.file_name().and_then(|value| value.to_str()) == Some(MACOS_HOOK_HELPER)
+        && path
+            .ancestors()
+            .any(|parent| parent.extension().and_then(|value| value.to_str()) == Some("app"))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn is_bundled_macos_hook_helper(_path: &Path) -> bool {
+    false
 }
 
 #[cfg(target_os = "macos")]
