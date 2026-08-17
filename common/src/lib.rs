@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const DEFAULT_API_URL: &str = "https://api.dev2.openorigins.com/v1/tally/logs";
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
+#[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
 
 pub fn should_open_gui_without_args() -> bool {
@@ -642,7 +643,7 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_is_in_app_bundle, response_body_error, MACOS_HOOK_HELPER};
+    use super::{executable_is_in_app_bundle, response_body_error};
     use std::path::Path;
 
     #[test]
@@ -653,7 +654,6 @@ mod tests {
         assert!(!executable_is_in_app_bundle(Path::new(
             "/usr/local/bin/tally-codex"
         )));
-        assert_eq!(MACOS_HOOK_HELPER, "tally-hook");
     }
 
     #[test]
