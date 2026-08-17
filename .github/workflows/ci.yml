@@ -116,3 +116,9 @@ jobs:
           python scripts/package_release.py
           --target ${{ matrix.target }}
           --label ${{ matrix.label }}
+
+      - name: Test hooks from packaged macOS app
+        if: startsWith(matrix.label, 'macos-')
+        run: >-
+          python tests/macos_dmg_install_smoke.py
+          --dmg dist/tally-${{ matrix.label }}.dmg

@@ -19,6 +19,7 @@ from pathlib import Path
 
 
 BINARY_NAME = "tally"
+HOOK_HELPER_NAME = "tally-hook"
 PRODUCT_NAME = "Tally"
 BUNDLE_ID = "com.openorigins.tally"
 
@@ -65,9 +66,6 @@ def package_macos(args: argparse.Namespace) -> None:
     if not source.is_file():
         raise SystemExit(f"missing release binary: {source}")
 
-    if sys.platform == "darwin":
-        sign_path(source, signing, hardened_runtime=True)
-
     with tempfile.TemporaryDirectory(prefix="tally-dmg-") as directory:
         staging = Path(directory)
         app = build_macos_app(
@@ -80,8 +78,18 @@ def package_macos(args: argparse.Namespace) -> None:
             BUNDLE_ID,
         )
         if sys.platform == "darwin":
+            helper = app / "Contents" / "Helpers" / HOOK_HELPER_NAME
+            sign_path(
+                helper,
+                signing,
+                hardened_runtime=True,
+                identifier=f"{BUNDLE_ID}.hook",
+            )
+            verify_signature(helper)
             sign_path(app, signing, hardened_runtime=True)
             verify_signature(app, deep=True)
+            verify_signature(helper)
+            verify_standalone_hook(helper)
             dmg = args.output / f"{BINARY_NAME}-{args.label}.dmg"
             create_dmg(staging, PRODUCT_NAME, dmg)
             sign_path(dmg, signing, hardened_runtime=False)
@@ -110,11 +118,14 @@ def build_macos_app(
     app = directory / f"{product_name}.app"
     contents = app / "Contents"
     macos = contents / "MacOS"
+    helpers = contents / "Helpers"
     resources = contents / "Resources"
     macos.mkdir(parents=True)
+    helpers.mkdir()
     resources.mkdir()
     contents.chmod(0o755)
     macos.chmod(0o755)
+    helpers.chmod(0o755)
     resources.chmod(0o755)
 
     minimum_version = "11.0" if label == "macos-arm64" else "10.15"
@@ -141,6 +152,9 @@ def build_macos_app(
     executable = macos / binary_name
     shutil.copy2(source, executable)
     executable.chmod(0o755)
+    helper = helpers / HOOK_HELPER_NAME
+    shutil.copy2(source, helper)
+    helper.chmod(0o755)
     return app
 
 
@@ -234,7 +248,12 @@ class MacSigning:
         )
 
 
-def sign_path(path: Path, signing: MacSigning, hardened_runtime: bool) -> None:
+def sign_path(
+    path: Path,
+    signing: MacSigning,
+    hardened_runtime: bool,
+    identifier: str | None = None,
+) -> None:
     command = ["codesign", "--force"]
     if signing.identity == "-":
         command.append("--timestamp=none")
@@ -244,6 +263,8 @@ def sign_path(path: Path, signing: MacSigning, hardened_runtime: bool) -> None:
         command.extend(["--options", "runtime"])
     if signing.keychain:
         command.extend(["--keychain", signing.keychain])
+    if identifier:
+        command.extend(["--identifier", identifier])
     command.extend(["--sign", signing.identity, str(path)])
     run(command)
 
@@ -254,6 +275,15 @@ def verify_signature(path: Path, deep: bool = False) -> None:
         command.append("--deep")
     command.append(str(path))
     run(command)
+
+
+def verify_standalone_hook(helper: Path) -> None:
+    with tempfile.TemporaryDirectory(prefix="tally-hook-check-") as directory:
+        installed = Path(directory) / "tally-codex"
+        shutil.copy2(helper, installed)
+        installed.chmod(0o755)
+        verify_signature(installed)
+        run([str(installed), "--version"])
 
 
 def create_dmg(source_folder: Path, volume_name: str, destination: Path) -> None:

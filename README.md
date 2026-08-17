@@ -68,6 +68,10 @@ Open Tally again to update settings or uninstall selected integrations. Advanced
 settings allow each client's configuration path and the ingest API URL to be
 changed.
 
+After upgrading from Tally 0.1.3 on macOS, open Tally and select **Install
+Tally** once. This replaces the older hook copies with independently signed
+helpers while preserving the selected configuration paths.
+
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).
 

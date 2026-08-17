@@ -374,7 +374,7 @@ pub fn install_desktop_hooks(
     let installed_binary_path = installed_binary_path_for_hooks_path(&hooks_path);
     fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
     fs::create_dir_all(log_root())?;
-    let source_binary = env::current_exe()?;
+    let source_binary = tally_common::installation_source_executable()?;
     let hook_bin = installed_binary_path.display().to_string();
 
     let mut config = if hooks_path.exists() {
