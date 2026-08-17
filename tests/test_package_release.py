@@ -54,8 +54,11 @@ def main() -> None:
             archive_path = root / "dist" / "tally-macos-arm64-app.zip"
             with zipfile.ZipFile(archive_path) as archive:
                 executable = "Tally.app/Contents/MacOS/tally"
+                helper = "Tally.app/Contents/Helpers/tally-hook"
                 assert executable in archive.namelist()
+                assert helper in archive.namelist()
                 assert stat.S_IMODE(archive.getinfo(executable).external_attr >> 16) == 0o755
+                assert stat.S_IMODE(archive.getinfo(helper).external_attr >> 16) == 0o755
                 plist = plistlib.loads(archive.read("Tally.app/Contents/Info.plist"))
                 assert_plist(plist)
 
@@ -68,10 +71,22 @@ def main() -> None:
 
 def assert_app_layout(app: Path) -> None:
     executable = app / "Contents" / "MacOS" / "tally"
+    helper = app / "Contents" / "Helpers" / "tally-hook"
     assert executable.is_file() and os.access(executable, os.X_OK)
+    assert helper.is_file() and os.access(helper, os.X_OK)
     assert_plist(plistlib.loads((app / "Contents" / "Info.plist").read_bytes()))
     assert (app / "Contents" / "Resources" / "LICENSE").read_bytes() == b"test license\n"
     subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True)
+    subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(helper)], check=True)
+    with tempfile.TemporaryDirectory(prefix="tally-standalone-hook-") as directory:
+        installed_hook = Path(directory) / "tally-codex"
+        shutil.copy2(helper, installed_hook)
+        installed_hook.chmod(0o755)
+        subprocess.run(
+            ["codesign", "--verify", "--strict", "--verbose=2", str(installed_hook)],
+            check=True,
+        )
+        subprocess.run([str(installed_hook)], check=True)
 
 
 def assert_plist(plist: dict) -> None:

@@ -18,6 +18,7 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const DEFAULT_API_URL: &str = "https://api.dev2.openorigins.com/v1/tally/logs";
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
+const MACOS_HOOK_HELPER: &str = "tally-hook";
 
 pub fn should_open_gui_without_args() -> bool {
     if cfg!(windows) {
@@ -31,6 +32,22 @@ pub fn should_open_gui_without_args() -> bool {
 fn executable_is_in_app_bundle(path: &Path) -> bool {
     path.ancestors()
         .any(|ancestor| ancestor.extension().and_then(|value| value.to_str()) == Some("app"))
+}
+
+pub fn installation_source_executable() -> Result<PathBuf> {
+    let executable = env::current_exe()?;
+    #[cfg(target_os = "macos")]
+    if let Some(app) = executable
+        .ancestors()
+        .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
+    {
+        let helper = app.join("Contents").join("Helpers").join(MACOS_HOOK_HELPER);
+        if !helper.is_file() {
+            return Err(format!("signed hook helper is missing from {}", helper.display()).into());
+        }
+        return Ok(helper);
+    }
+    Ok(executable)
 }
 
 #[derive(Clone)]
@@ -315,6 +332,7 @@ pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<(
 }
 
 pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
+    verify_macos_code_signature(source)?;
     if destination.exists() && fs::canonicalize(source).ok() == fs::canonicalize(destination).ok() {
         return Ok(());
     }
@@ -322,6 +340,34 @@ pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
         create_private_dir(parent)?;
     }
     atomic_write(destination, &fs::read(source)?, 0o755)?;
+    verify_macos_code_signature(destination)?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn verify_macos_code_signature(path: &Path) -> Result<()> {
+    let output = Command::new("/usr/bin/codesign")
+        .args(["--verify", "--strict", "--verbose=2"])
+        .arg(path)
+        .output()?;
+    if output.status.success() {
+        return Ok(());
+    }
+    let detail = String::from_utf8_lossy(&output.stderr).trim().to_string();
+    Err(format!(
+        "macOS rejected the hook code signature at {}{}",
+        path.display(),
+        if detail.is_empty() {
+            String::new()
+        } else {
+            format!(": {detail}")
+        }
+    )
+    .into())
+}
+
+#[cfg(not(target_os = "macos"))]
+fn verify_macos_code_signature(_path: &Path) -> Result<()> {
     Ok(())
 }
 
@@ -596,7 +642,7 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_is_in_app_bundle, response_body_error};
+    use super::{executable_is_in_app_bundle, response_body_error, MACOS_HOOK_HELPER};
     use std::path::Path;
 
     #[test]
@@ -607,6 +653,7 @@ mod tests {
         assert!(!executable_is_in_app_bundle(Path::new(
             "/usr/local/bin/tally-codex"
         )));
+        assert_eq!(MACOS_HOOK_HELPER, "tally-hook");
     }
 
     #[test]

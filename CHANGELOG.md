@@ -2,6 +2,17 @@
 
 All notable changes to Tally are documented in this file.
 
+## 0.1.4 - 2026-08-17
+
+### Fixed
+
+- Added an independently signed macOS hook helper so installed hooks remain
+  valid after being copied outside `Tally.app`.
+- Verify macOS hook signatures during installation and roll back cleanly if
+  verification fails.
+- Added native DMG tests that install and execute Codex and Claude Code hooks
+  from the packaged app on every pull request and release.
+
 ## 0.1.3 - 2026-08-14
 
 ### Added

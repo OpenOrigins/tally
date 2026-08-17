@@ -11,6 +11,7 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -108,6 +109,13 @@ def installed_binary_path(config_path: Path, agent: str, env: dict[str, str]) ->
         / config_id
         / name
     )
+
+
+def expected_hook_source(binary: Path) -> Path:
+    app = next((path for path in binary.parents if path.suffix == ".app"), None)
+    if app is None or sys.platform != "darwin":
+        return binary
+    return app / "Contents" / "Helpers" / "tally-hook"
 
 
 class CaptureServer(ThreadingHTTPServer):
@@ -314,11 +322,14 @@ def gui_install(
 
 
 def smoke(source_binary: Path, agent: str, root: Path) -> None:
-    binary_dir = root / f"{agent} binary with spaces"
-    binary_dir.mkdir(parents=True)
-    binary = binary_dir / source_binary.name
-    shutil.copy2(source_binary, binary)
-    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    if expected_hook_source(source_binary) != source_binary:
+        binary = source_binary
+    else:
+        binary_dir = root / f"{agent} binary with spaces"
+        binary_dir.mkdir(parents=True)
+        binary = binary_dir / source_binary.name
+        shutil.copy2(source_binary, binary)
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
     home = root / agent / "home with spaces"
     config_path = home / (".codex/hooks.json" if agent == "codex" else ".claude/settings.json")
@@ -398,7 +409,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert api_key_path.read_text(encoding="utf-8") == api_key
         assert api_key.encode("utf-8") not in binary.read_bytes()
         assert installed_binary.exists()
-        assert installed_binary.read_bytes() == binary.read_bytes()
+        hook_source = expected_hook_source(binary)
+        assert hook_source.is_file()
+        assert installed_binary.read_bytes() == hook_source.read_bytes()
         if os.name == "nt":
             assert config_path.parent not in installed_binary.parents
             assert "Programs" in installed_binary.parts
