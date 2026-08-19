@@ -66,7 +66,8 @@ manually** in the dashboard.
 
 Open Tally again to update settings or uninstall selected integrations. Advanced
 settings allow each client's configuration path and the ingest API URL to be
-changed.
+changed. New installations default to the OpenOrigins Production ingest API;
+development endpoints are used only when explicitly entered.
 
 After upgrading from Tally 0.1.3 on macOS, open Tally and select **Install
 Tally** once. This replaces the older hook copies with independently signed

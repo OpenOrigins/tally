@@ -2,6 +2,17 @@
 
 All notable changes to Tally are documented in this file.
 
+## 0.1.5 - 2026-08-19
+
+### Fixed
+
+- Changed the public installer default from Dev2 to the Production ingest API.
+- Stopped emitting a synthetic heartbeat for every Claude Code hook event.
+- Emit periodic Claude Code heartbeats only after a quiet interval and prevent
+  concurrent heartbeat daemons for the same session.
+- Added end-user regression coverage that asserts one Claude hook forwards one
+  audit record and no immediate heartbeat.
+
 ## 0.1.4 - 2026-08-17
 
 ### Fixed
