@@ -2,6 +2,15 @@
 
 All notable changes to Tally are documented in this file.
 
+## 0.1.6 - 2026-08-19
+
+### Fixed
+
+- Stopped emitting a synthetic heartbeat for every Codex hook event.
+- Emit Codex heartbeats only after a quiet interval and prevent concurrent
+  heartbeat daemons for the same session.
+- Added end-user heartbeat regression coverage for both supported clients.
+
 ## 0.1.5 - 2026-08-19
 
 ### Fixed
