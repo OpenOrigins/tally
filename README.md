@@ -69,9 +69,10 @@ settings allow each client's configuration path and the ingest API URL to be
 changed. New installations default to the OpenOrigins Production ingest API;
 development endpoints are used only when explicitly entered.
 
-After upgrading from Tally 0.1.3 on macOS, open Tally and select **Install
-Tally** once. This replaces the older hook copies with independently signed
-helpers while preserving the selected configuration paths.
+After upgrading from Tally 0.1.3 or 0.1.4, open Tally, choose the clients again,
+paste the Agent API key, and select **Install Tally** once. This refreshes the
+installed hook helpers and updates 0.1.4's former Dev2 default to Production.
+Re-enter an intentional custom API URL under **Advanced settings**.
 
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).
