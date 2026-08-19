@@ -354,21 +354,37 @@ fn claim_heartbeat_daemon(path: &Path) -> io::Result<Option<fs::File>> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let mut file = OpenOptions::new()
+    let mut file = match OpenOptions::new()
         .create(true)
         .read(true)
         .write(true)
         .truncate(false)
-        .open(path)?;
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
     match file.try_lock_exclusive() {
         Ok(()) => {}
-        Err(error) if error.kind() == io::ErrorKind::WouldBlock => return Ok(None),
+        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
         Err(error) => return Err(error),
     }
     file.set_len(0)?;
     file.write_all(std::process::id().to_string().as_bytes())?;
     file.sync_all()?;
     Ok(Some(file))
+}
+
+fn heartbeat_lock_is_contended(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(32) | Some(33)) {
+        return true;
+    }
+    false
 }
 
 fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
