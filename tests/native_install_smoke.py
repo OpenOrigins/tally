@@ -577,35 +577,35 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert header(custom_forwarded, "x-api-key") == api_key
         assert custom_forwarded["body"]["record_type"] == "SESSION_START"
 
-        if agent == "claude":
-            heartbeat_env = env.copy()
-            heartbeat_env["TALLY_HOOK_HEARTBEAT_ENABLED"] = "1"
-            heartbeat_env["TALLY_RUN_ID"] = "native-heartbeat-volume"
-            forwarded_count = len(server.recorded("/v1/tally/logs"))
-            user_prompt = next(
-                command
-                for command in tally_commands(config)
-                if command.endswith("hook UserPromptSubmit")
-            )
-            run_installed_hook(
-                user_prompt,
-                heartbeat_env,
-                {
-                    "session_id": "native-heartbeat-volume",
-                    "prompt": "one hook must produce one record",
-                },
-            )
-            server.wait_for("/v1/tally/logs", count=forwarded_count + 1)
-            time.sleep(0.5)
-            emitted = server.recorded("/v1/tally/logs")[forwarded_count:]
-            assert len(emitted) == 1, (
-                f"one Claude hook produced {len(emitted)} forwarded records"
-            )
-            assert emitted[0]["body"]["record_type"] == "INSTRUCTION_RECEIVED"
-            heartbeat_records = log_root / "tally" / "hook-heartbeat"
-            assert not list(heartbeat_records.glob("*.json")), (
-                "Claude hook emitted an immediate heartbeat"
-            )
+        heartbeat_env = env.copy()
+        heartbeat_env["TALLY_HOOK_HEARTBEAT_ENABLED"] = "1"
+        heartbeat_run_id = f"native-heartbeat-volume-{agent}"
+        heartbeat_env["TALLY_RUN_ID"] = heartbeat_run_id
+        forwarded_count = len(server.recorded("/v1/tally/logs"))
+        user_prompt = next(
+            command
+            for command in tally_commands(config)
+            if command.endswith("hook UserPromptSubmit")
+        )
+        run_installed_hook(
+            user_prompt,
+            heartbeat_env,
+            {
+                "session_id": heartbeat_run_id,
+                "prompt": "one hook must produce one record",
+            },
+        )
+        server.wait_for("/v1/tally/logs", count=forwarded_count + 1)
+        time.sleep(0.5)
+        emitted = server.recorded("/v1/tally/logs")[forwarded_count:]
+        assert len(emitted) == 1, (
+            f"one {agent} hook produced {len(emitted)} forwarded records"
+        )
+        assert emitted[0]["body"]["record_type"] == "INSTRUCTION_RECEIVED"
+        heartbeat_records = log_root / "tally" / "hook-heartbeat"
+        assert not list(heartbeat_records.glob("*.json")), (
+            f"{agent} hook emitted an immediate heartbeat"
+        )
 
         run(binary, agent, "uninstall", "--config-path", str(custom_config_path), env=env)
         custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
@@ -756,28 +756,30 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
         thread.join(timeout=5)
 
 
-def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
+def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
     interval_seconds = 1
-    home = root / "heartbeat-daemon" / "home"
-    log_root = root / "heartbeat-daemon" / "logs"
+    daemon_root = root / f"heartbeat-daemon-{agent}"
+    home = daemon_root / "home"
+    log_root = daemon_root / "logs"
+    run_id = f"native-heartbeat-daemon-{agent}"
     env = os.environ.copy()
     env.update(
         {
             "HOME": str(home),
             "USERPROFILE": str(home),
             "TALLY_LOG_ROOT": str(log_root),
-            "TALLY_RUN_ID": "native-heartbeat-daemon",
+            "TALLY_RUN_ID": run_id,
             "TALLY_FORWARDING_ENABLED": "0",
             "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
             "TALLY_HOOK_HEARTBEAT_SECONDS": str(interval_seconds),
             "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "5",
         }
     )
-    payload = {"session_id": "native-heartbeat-daemon"}
+    payload = {"session_id": run_id}
     heartbeat_dir = log_root / "tally" / "hook-heartbeat"
     state_dir = log_root / "state"
 
-    run(binary, "claude", "hook", "SessionStart", env=env, payload=payload)
+    run(binary, agent, "hook", "SessionStart", env=env, payload=payload)
     deadline = time.monotonic() + 5
     while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -786,7 +788,7 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
         "heartbeat daemon did not emit after a quiet interval"
     )
     state = json.loads(
-        (state_dir / "hook-heartbeat.native-heartbeat-daemon.json").read_text(
+        (state_dir / f"hook-heartbeat.{run_id}.json").read_text(
             encoding="utf-8"
         )
     )
@@ -805,7 +807,7 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
         "heartbeat daemon emitted before the first quiet interval"
     )
 
-    run(binary, "claude", "hook", "Stop", env=env, payload=payload)
+    run(binary, agent, "hook", "Stop", env=env, payload=payload)
     deadline = time.monotonic() + 5
     while list(state_dir.glob("hook-heartbeat.*.pid")) and time.monotonic() < deadline:
         time.sleep(0.1)
@@ -828,7 +830,8 @@ def main() -> None:
         smoke(args.tally.resolve(), "codex", root)
         smoke(args.tally.resolve(), "claude", root)
         smoke_combined_install(args.tally.resolve(), root)
-        smoke_heartbeat_daemon(args.tally.resolve(), root)
+        smoke_heartbeat_daemon(args.tally.resolve(), root, "codex")
+        smoke_heartbeat_daemon(args.tally.resolve(), root, "claude")
     print("Native install smoke tests passed.")
 
 
