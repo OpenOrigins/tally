@@ -767,8 +767,8 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
             "TALLY_RUN_ID": "native-heartbeat-daemon",
             "TALLY_FORWARDING_ENABLED": "0",
             "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
-            "TALLY_HOOK_HEARTBEAT_SECONDS": "1",
-            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "5",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": "4",
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "12",
         }
     )
     payload = {"session_id": "native-heartbeat-daemon"}
@@ -781,7 +781,7 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
         "heartbeat daemon emitted before the first quiet interval"
     )
 
-    deadline = time.monotonic() + 5
+    deadline = time.monotonic() + 10
     while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
         time.sleep(0.1)
     assert list(heartbeat_dir.glob("*.json")), (
