@@ -16,6 +16,7 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
+from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -756,6 +757,7 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
 
 
 def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
+    interval_seconds = 1
     home = root / "heartbeat-daemon" / "home"
     log_root = root / "heartbeat-daemon" / "logs"
     env = os.environ.copy()
@@ -767,8 +769,8 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
             "TALLY_RUN_ID": "native-heartbeat-daemon",
             "TALLY_FORWARDING_ENABLED": "0",
             "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
-            "TALLY_HOOK_HEARTBEAT_SECONDS": "4",
-            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "12",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": str(interval_seconds),
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "5",
         }
     )
     payload = {"session_id": "native-heartbeat-daemon"}
@@ -776,16 +778,31 @@ def smoke_heartbeat_daemon(binary: Path, root: Path) -> None:
     state_dir = log_root / "state"
 
     run(binary, "claude", "hook", "SessionStart", env=env, payload=payload)
-    time.sleep(0.25)
-    assert not list(heartbeat_dir.glob("*.json")), (
-        "heartbeat daemon emitted before the first quiet interval"
-    )
-
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + 5
     while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
         time.sleep(0.1)
-    assert list(heartbeat_dir.glob("*.json")), (
+    heartbeat_paths = list(heartbeat_dir.glob("*.json"))
+    assert heartbeat_paths, (
         "heartbeat daemon did not emit after a quiet interval"
+    )
+    state = json.loads(
+        (state_dir / "hook-heartbeat.native-heartbeat-daemon.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    first_heartbeat = min(
+        (
+            json.loads(path.read_text(encoding="utf-8"))
+            for path in heartbeat_paths
+        ),
+        key=lambda record: record["timestamp"],
+    )
+    state_time = datetime.fromisoformat(state["updated_at"].replace("Z", "+00:00"))
+    heartbeat_time = datetime.fromisoformat(
+        first_heartbeat["timestamp"].replace("Z", "+00:00")
+    )
+    assert (heartbeat_time - state_time).total_seconds() >= interval_seconds, (
+        "heartbeat daemon emitted before the first quiet interval"
     )
 
     run(binary, "claude", "hook", "Stop", env=env, payload=payload)
