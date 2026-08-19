@@ -16,7 +16,7 @@ pub use installer_gui::{run_installer_gui, GuiClient};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub const DEFAULT_API_URL: &str = "https://api.dev2.openorigins.com/v1/tally/logs";
+pub const DEFAULT_API_URL: &str = "https://api.prod.openorigins.com/v1/tally/logs";
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 #[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
@@ -661,7 +661,9 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{executable_is_in_app_bundle, response_body_error};
+    use super::{
+        executable_is_in_app_bundle, install_options, response_body_error, DEFAULT_API_URL,
+    };
     use std::path::Path;
 
     #[test]
@@ -672,6 +674,17 @@ mod tests {
         assert!(!executable_is_in_app_bundle(Path::new(
             "/usr/local/bin/tally-codex"
         )));
+    }
+
+    #[test]
+    fn installer_defaults_to_production_ingest() {
+        let options = install_options("test-agent-key".to_string(), None, None).unwrap();
+        assert_eq!(options.api_url, DEFAULT_API_URL);
+        assert_eq!(
+            options.api_url,
+            "https://api.prod.openorigins.com/v1/tally/logs"
+        );
+        assert!(!options.api_url.contains("dev2"));
     }
 
     #[test]

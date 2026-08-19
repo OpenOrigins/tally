@@ -249,12 +249,6 @@ fn update_heartbeat_state(
         }),
     )?;
 
-    AuditSink::new("hook-heartbeat")?.emit_heartbeat(
-        &[session_id],
-        "hook-heartbeat",
-        json!({"heartbeat_kind": "hook-event", "hook_event": event_type}),
-    )?;
-
     if event_type != "SessionStart" {
         return Ok(());
     }
@@ -282,7 +276,9 @@ fn run_heartbeat_daemon() -> Result<()> {
     let sink = AuditSink::new("hook-heartbeat")?;
     let state_path = heartbeat_state_path(&sink.run_id);
     let pid_path = heartbeat_pid_path(&sink.run_id);
-    fs::write(&pid_path, std::process::id().to_string())?;
+    let Some(pid_file) = claim_heartbeat_daemon(&pid_path)? else {
+        return Ok(());
+    };
     write_json_atomic(
         &heartbeat_daemon_status_path(&sink.run_id),
         &json!({
@@ -296,16 +292,19 @@ fn run_heartbeat_daemon() -> Result<()> {
     let interval = env_u64(
         "TALLY_HOOK_HEARTBEAT_SECONDS",
         env_u64("TALLY_HEARTBEAT_SECONDS", 60),
-    );
+    )
+    .max(1);
     let idle_timeout = env_u64("TALLY_HOOK_HEARTBEAT_IDLE_SECONDS", 300) as i64;
 
     loop {
+        thread::sleep(Duration::from_secs(interval));
         let state = read_json_file(&state_path).unwrap_or_else(|_| json!({}));
         if state["stop_requested"].as_bool().unwrap_or(false) {
             break;
         }
         let last_update = state["updated_at"].as_str().unwrap_or("");
-        if seconds_since(last_update) > idle_timeout {
+        let quiet_seconds = seconds_since(last_update);
+        if quiet_seconds > idle_timeout {
             sink.emit_heartbeat(
                 &[state["session_id"]
                     .as_str()
@@ -320,6 +319,9 @@ fn run_heartbeat_daemon() -> Result<()> {
             )?;
             break;
         }
+        if !heartbeat_due(quiet_seconds, interval) {
+            continue;
+        }
         sink.emit_heartbeat(
             &[state["session_id"]
                 .as_str()
@@ -332,7 +334,6 @@ fn run_heartbeat_daemon() -> Result<()> {
                 "last_hook_observed_at": state["updated_at"],
             }),
         )?;
-        thread::sleep(Duration::from_secs(interval));
     }
 
     write_json_atomic(
@@ -344,8 +345,50 @@ fn run_heartbeat_daemon() -> Result<()> {
             "state_path": state_path,
         }),
     )?;
+    FileExt::unlock(&pid_file)?;
     let _ = fs::remove_file(pid_path);
     Ok(())
+}
+
+fn claim_heartbeat_daemon(path: &Path) -> io::Result<Option<fs::File>> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    let mut file = match OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(path)
+    {
+        Ok(file) => file,
+        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    };
+    match file.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
+        Err(error) => return Err(error),
+    }
+    file.set_len(0)?;
+    file.write_all(std::process::id().to_string().as_bytes())?;
+    file.sync_all()?;
+    Ok(Some(file))
+}
+
+fn heartbeat_lock_is_contended(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(32) | Some(33)) {
+        return true;
+    }
+    false
+}
+
+fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
+    quiet_seconds >= 0 && quiet_seconds as u64 >= interval_seconds
 }
 
 pub fn install_desktop_hooks(
@@ -1441,6 +1484,28 @@ mod tests {
         assert_eq!(record_type_for_hook("PostToolUse"), "RESULT_RECEIVED");
         assert_eq!(record_type_for_hook("Stop"), "SESSION_END");
         assert_eq!(record_type_for_hook("Other"), "CLAUDE_LIFECYCLE");
+    }
+
+    #[test]
+    fn emits_heartbeat_only_after_a_quiet_interval() {
+        assert!(!heartbeat_due(0, 60));
+        assert!(!heartbeat_due(59, 60));
+        assert!(heartbeat_due(60, 60));
+        assert!(heartbeat_due(120, 60));
+    }
+
+    #[test]
+    fn allows_only_one_heartbeat_daemon_lock() {
+        let directory = env::temp_dir().join(format!("tally-heartbeat-{}", unique_suffix()));
+        let path = directory.join("session.pid");
+        let first = claim_heartbeat_daemon(&path).unwrap().unwrap();
+        assert!(claim_heartbeat_daemon(&path).unwrap().is_none());
+        FileExt::unlock(&first).unwrap();
+        drop(first);
+        let second = claim_heartbeat_daemon(&path).unwrap().unwrap();
+        FileExt::unlock(&second).unwrap();
+        drop(second);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
