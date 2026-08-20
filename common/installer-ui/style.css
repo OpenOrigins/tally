@@ -102,6 +102,24 @@ input:focus { outline: 3px solid rgba(23, 107, 77, 0.2); border-color: var(--acc
 .check { display: flex; align-items: center; gap: 8px; margin: 9px 0 20px; color: var(--muted); font-size: 13px; font-weight: 400; }
 .check input { width: 16px; height: 16px; margin: 0; }
 
+.removal-option {
+  display: grid;
+  grid-template-columns: 20px minmax(0, 1fr);
+  gap: 10px;
+  align-items: start;
+  margin: 0 0 12px;
+  padding: 12px;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--field);
+  cursor: pointer;
+}
+.removal-option input { width: 17px; height: 17px; margin: 2px 0 0; }
+.removal-option strong, .removal-option small { display: block; }
+.removal-option small { margin-top: 3px; color: var(--muted); font-weight: 400; }
+.notice { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+.compact-details { margin-bottom: 18px; }
+
 details { margin: 0 0 22px; }
 summary { margin-bottom: 12px; color: var(--muted); cursor: pointer; }
 details input + label { margin-top: 14px; }
@@ -126,6 +144,8 @@ button.secondary { margin-top: 9px; border-color: transparent; background: trans
 button.secondary:hover { background: var(--field); color: var(--text); }
 button.danger { color: var(--error-text); font-weight: 600; }
 button.danger:hover { background: var(--error-bg); color: var(--error-text); }
+button.danger-action { border-color: var(--error-text); background: var(--error-text); color: #ffffff; }
+button.danger-action:hover { filter: brightness(0.88); }
 
 .error, .warning { padding: 12px; border-radius: 6px; overflow-wrap: anywhere; }
 .error { background: var(--error-bg); color: var(--error-text); }

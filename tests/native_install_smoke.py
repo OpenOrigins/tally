@@ -16,7 +16,6 @@ import tempfile
 import threading
 import time
 from collections.abc import Callable
-from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.error import HTTPError
@@ -255,6 +254,8 @@ def gui_install(
             assert "Advanced settings" in html
             assert "Try another key" in html
             assert "Cancel" in html
+            assert "Close" in html
+            assert "Delete queued records and local logs" in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
@@ -319,6 +320,67 @@ def gui_install(
         assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
         assert api_key not in stdout
         assert api_key not in stderr
+        return result
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=5)
+
+
+def gui_uninstall(
+    binary: Path,
+    agent: str,
+    env: dict[str, str],
+    root: Path,
+    config_path: Path,
+    *,
+    remove_data: bool,
+) -> dict:
+    url_file = root / f"{binary.name}-{time.time_ns()}.uninstall-gui-url"
+    gui_env = env.copy()
+    gui_env.update(
+        {
+            "TALLY_GUI_NO_OPEN": "1",
+            "TALLY_GUI_URL_FILE": str(url_file),
+        }
+    )
+    process = subprocess.Popen(
+        [str(binary), "gui"],
+        text=True,
+        env=gui_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not url_file.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"GUI exited before startup\n{stdout}\n{stderr}")
+            time.sleep(0.05)
+        assert url_file.exists(), "GUI did not publish its local URL"
+
+        split = urlsplit(url_file.read_text(encoding="utf-8"))
+        token = parse_qs(split.fragment).get("token", [""])[0]
+        origin = f"{split.scheme}://{split.netloc}"
+        result, _ = gui_request(
+            origin,
+            token,
+            "/api/uninstall",
+            {
+                "clients": [{"id": agent, "configPath": str(config_path)}],
+                "removeData": remove_data,
+            },
+        )
+        assert result["dataRemoved"] is remove_data
+        assert len(result["clients"]) == 1
+        detail = result["clients"][0]
+        assert detail["id"] == agent
+        assert detail["configPath"] == str(config_path)
+        assert detail["dataRemoved"] is remove_data
+
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
         return result
     finally:
         if process.poll() is None:
@@ -546,6 +608,62 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         )
         assert gui_result["clients"][0]["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
 
+        custom_gui_queue = custom_gui_state_dir / "forward-queue"
+        custom_gui_queue.mkdir(parents=True)
+        queued_record = custom_gui_queue / "queued-record.json"
+        queued_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        retained_log = log_root / "retained-during-uninstall.txt"
+        retained_log.parent.mkdir(parents=True, exist_ok=True)
+        retained_log.write_text("retained\n", encoding="utf-8")
+        retained_result = gui_uninstall(
+            binary,
+            agent,
+            env,
+            root,
+            custom_gui_config_path,
+            remove_data=False,
+        )
+        retained_detail = retained_result["clients"][0]
+        assert retained_detail["queuePath"] == str(custom_gui_queue)
+        assert retained_detail["logsPath"] == str(log_root)
+        assert queued_record.exists(), "normal uninstall deleted a queued record"
+        assert retained_log.exists(), "normal uninstall deleted local logs"
+        assert not custom_gui_installed_binary.exists()
+        assert not (custom_gui_state_dir / "api_key.txt").exists()
+        assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
+
+        server.expected_files = [
+            custom_gui_config_path,
+            custom_gui_state_dir / "api_key.txt",
+            custom_gui_state_dir / "config.json",
+            custom_gui_installed_binary,
+        ]
+        gui_install(
+            binary,
+            agent,
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+            config_path=custom_gui_config_path,
+        )
+        queued_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        retained_log.write_text("delete me\n", encoding="utf-8")
+        removed_result = gui_uninstall(
+            binary,
+            agent,
+            env,
+            root,
+            custom_gui_config_path,
+            remove_data=True,
+        )
+        assert removed_result["clients"][0]["queuePath"] == str(custom_gui_queue)
+        assert not custom_gui_state_dir.exists(), "full uninstall retained queued state"
+        assert not log_root.exists(), "full uninstall retained local logs"
+        assert custom_gui_config_path.exists(), "full uninstall deleted the client settings file"
+        assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
+
         session_start = next(
             command
             for command in tally_commands(config)
@@ -757,68 +875,133 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
 
 
 def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
-    interval_seconds = 1
     daemon_root = root / f"heartbeat-daemon-{agent}"
     home = daemon_root / "home"
     log_root = daemon_root / "logs"
-    run_id = f"native-heartbeat-daemon-{agent}"
-    env = os.environ.copy()
-    env.update(
+    forwarding_state_dir = daemon_root / "forwarding-state"
+    forwarding_state_dir.mkdir(parents=True)
+    api_key = secrets.token_urlsafe(32)
+    api_key_path = forwarding_state_dir / "api_key.txt"
+    api_config_path = forwarding_state_dir / "config.json"
+    marker_path = daemon_root / "installed.marker"
+    api_key_path.write_text(api_key, encoding="utf-8")
+    marker_path.write_text("tally-hook", encoding="utf-8")
+    run_ids = [
+        f"native-heartbeat-daemon-{agent}-one",
+        f"native-heartbeat-daemon-{agent}-two",
+    ]
+    server = CaptureServer([marker_path])
+    api_config_path.write_text(json.dumps({"apiUrl": server.api_url}), encoding="utf-8")
+    if os.name != "nt":
+        api_key_path.chmod(0o600)
+        api_config_path.chmod(0o600)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    base_env = os.environ.copy()
+    base_env.update(
         {
             "HOME": str(home),
             "USERPROFILE": str(home),
             "TALLY_LOG_ROOT": str(log_root),
-            "TALLY_RUN_ID": run_id,
-            "TALLY_FORWARDING_ENABLED": "0",
+            "TALLY_STATE_DIR": str(forwarding_state_dir),
+            "TALLY_AGENT_ID": f"native-agent-{agent}",
+            "TALLY_FORWARDING_ENABLED": "1",
             "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
-            "TALLY_HOOK_HEARTBEAT_SECONDS": str(interval_seconds),
-            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "5",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_POLL_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "600",
         }
     )
-    payload = {"session_id": run_id}
     heartbeat_dir = log_root / "tally" / "hook-heartbeat"
     state_dir = log_root / "state"
 
-    run(binary, agent, "hook", "SessionStart", env=env, payload=payload)
-    deadline = time.monotonic() + 5
-    while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    heartbeat_paths = list(heartbeat_dir.glob("*.json"))
-    assert heartbeat_paths, (
-        "heartbeat daemon did not emit after a quiet interval"
-    )
-    state = json.loads(
-        (state_dir / f"hook-heartbeat.{run_id}.json").read_text(
-            encoding="utf-8"
-        )
-    )
-    first_heartbeat = min(
-        (
-            json.loads(path.read_text(encoding="utf-8"))
-            for path in heartbeat_paths
-        ),
-        key=lambda record: record["timestamp"],
-    )
-    state_time = datetime.fromisoformat(state["updated_at"].replace("Z", "+00:00"))
-    heartbeat_time = datetime.fromisoformat(
-        first_heartbeat["timestamp"].replace("Z", "+00:00")
-    )
-    assert (heartbeat_time - state_time).total_seconds() >= interval_seconds, (
-        "heartbeat daemon emitted before the first quiet interval"
-    )
+    try:
+        for run_id in run_ids:
+            env = base_env.copy()
+            env["TALLY_RUN_ID"] = run_id
+            run(
+                binary,
+                agent,
+                "hook",
+                "SessionStart",
+                env=env,
+                payload={"session_id": run_id},
+            )
 
-    run(binary, agent, "hook", "Stop", env=env, payload=payload)
-    deadline = time.monotonic() + 5
-    while list(state_dir.glob("hook-heartbeat.*.pid")) and time.monotonic() < deadline:
-        time.sleep(0.1)
-    assert not list(state_dir.glob("hook-heartbeat.*.pid")), (
-        "heartbeat daemon did not stop after the Stop hook"
-    )
-    heartbeat_count = len(list(heartbeat_dir.glob("*.json")))
-    time.sleep(1.25)
-    assert len(list(heartbeat_dir.glob("*.json"))) == heartbeat_count, (
-        "heartbeat daemon emitted after the Stop hook"
-    )
+        limiter_paths = list(state_dir.glob("agent-heartbeat.*.json"))
+        assert len(limiter_paths) == 1, "expected one agent-wide heartbeat state file"
+        limiter_state = json.loads(limiter_paths[0].read_text(encoding="utf-8"))
+        limiter_state["last_activity_unix_millis"] = 0
+        limiter_state["last_heartbeat_unix_millis"] = 0
+        limiter_paths[0].write_text(json.dumps(limiter_state), encoding="utf-8")
+
+        for run_id in run_ids:
+            path = state_dir / f"hook-heartbeat.{run_id}.json"
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["updated_at"] = "2000-01-01T00:00:00.000Z"
+            path.write_text(json.dumps(state), encoding="utf-8")
+
+        deadline = time.monotonic() + 8
+        while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        heartbeat_paths = list(heartbeat_dir.glob("*.json"))
+        assert len(heartbeat_paths) == 1, (
+            f"{agent} emitted {len(heartbeat_paths)} heartbeats for two active sessions"
+        )
+        heartbeat = json.loads(heartbeat_paths[0].read_text(encoding="utf-8"))
+        assert heartbeat["record_type"] == "HEARTBEAT"
+        assert heartbeat["record_id"].startswith("heartbeat_")
+        assert heartbeat["agent_id"] == f"native-agent-{agent}"
+        assert heartbeat["metadata"]["rate_limit_seconds"] == 600, (
+            "heartbeat interval override bypassed the ten-minute minimum"
+        )
+
+        deadline = time.monotonic() + 8
+        forwarded_heartbeats: list[dict] = []
+        while time.monotonic() < deadline:
+            forwarded_heartbeats = [
+                request
+                for request in server.recorded("/v1/tally/logs")
+                if request["body"].get("record_type") == "HEARTBEAT"
+            ]
+            if forwarded_heartbeats:
+                break
+            time.sleep(0.1)
+        assert len(forwarded_heartbeats) == 1, (
+            f"{agent} forwarded {len(forwarded_heartbeats)} competing heartbeats"
+        )
+        forwarded = forwarded_heartbeats[0]
+        assert header(forwarded, "x-api-key") == api_key
+        assert forwarded["body"]["record_id"] == heartbeat["record_id"]
+
+        time.sleep(2.25)
+        assert len(list(heartbeat_dir.glob("*.json"))) == 1, (
+            f"{agent} heartbeat limiter did not suppress the competing daemon"
+        )
+        assert len(
+            [
+                request
+                for request in server.recorded("/v1/tally/logs")
+                if request["body"].get("record_type") == "HEARTBEAT"
+            ]
+        ) == 1, f"{agent} forwarded a duplicate heartbeat"
+
+        deadline = time.monotonic() + 8
+        while list(state_dir.glob("hook-heartbeat.*.pid")) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not list(state_dir.glob("hook-heartbeat.*.pid")), (
+            "heartbeat daemons did not stop after their idle timeout"
+        )
+
+        queue_dir = forwarding_state_dir / "forward-queue"
+        deadline = time.monotonic() + 8
+        while list(queue_dir.glob("*")) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not list(queue_dir.glob("*")), "forwarding queue was not drained"
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
 
 
 def main() -> None:

@@ -2,6 +2,24 @@
 
 All notable changes to Tally are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Limit heartbeats to one per agent every 10 minutes across concurrent Codex
+  and Claude Code sessions.
+- Suppress heartbeats until the agent has been quiet for 10 minutes and add a
+  stable record ID so forwarding retries can be deduplicated.
+- Added an end-user regression test that races two sessions for each client and
+  asserts that only one heartbeat is written.
+- Replaced the misleading post-uninstall Cancel action with Close and report
+  retained queued records and local logs explicitly.
+
+### Added
+
+- Added a confirmed full-removal option that deletes queued records and local
+  Tally logs while preserving unrelated client settings.
+
 ## 0.1.6 - 2026-08-19
 
 ### Fixed

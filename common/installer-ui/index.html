@@ -36,9 +36,28 @@
 
         <p class="error" id="error" role="alert" hidden></p>
         <button id="installButton" type="submit">Install Tally</button>
-        <button class="secondary danger" id="uninstallButton" type="button" hidden>Uninstall Tally</button>
+        <button class="secondary danger" id="uninstallButton" type="button" hidden>Remove Tally</button>
         <button class="secondary" id="cancelButton" type="button">Cancel</button>
       </form>
+    </section>
+
+    <section id="remove" hidden>
+      <h1>Remove Tally</h1>
+      <p class="intro">Close the selected clients first. Their Tally hooks, credentials, and installed hook helpers will be removed.</p>
+      <dl class="details compact-details">
+        <div><dt>Clients</dt><dd id="removeClients"></dd></div>
+      </dl>
+      <label class="removal-option" for="removeData">
+        <input id="removeData" type="checkbox">
+        <span>
+          <strong>Delete queued records and local logs</strong>
+          <small>Permanent. Leave this off to retain offline records for a later reinstall.</small>
+        </span>
+      </label>
+      <p class="notice">Without this option, queued records and local logs remain on this device.</p>
+      <p class="error" id="removeError" role="alert" hidden></p>
+      <button class="danger-action" id="confirmUninstallButton" type="button">Remove integrations</button>
+      <button class="secondary" id="backButton" type="button">Back</button>
     </section>
 
     <section id="installing" hidden>
@@ -55,10 +74,11 @@
         <div><dt>Clients</dt><dd id="doneClients"></dd></div>
         <div><dt>Hooks</dt><dd id="doneConfig"></dd></div>
         <div><dt>Credentials</dt><dd id="doneKey"></dd></div>
+        <div id="doneDataRow" hidden><dt>Local data</dt><dd id="doneData"></dd></div>
       </dl>
       <p class="warning" id="warning" role="status" hidden></p>
       <button class="secondary" id="retryButton" type="button" hidden>Try another key</button>
-      <button class="secondary" id="doneCancelButton" type="button">Cancel</button>
+      <button class="secondary" id="doneCloseButton" type="button">Close</button>
       <p class="close-note">You can close this window.</p>
     </section>
   </main>

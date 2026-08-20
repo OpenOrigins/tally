@@ -1,4 +1,4 @@
-const sections = ["setup", "installing", "done"];
+const sections = ["setup", "remove", "installing", "done"];
 const tokenFromHash = new URLSearchParams(window.location.hash.slice(1)).get("token");
 if (tokenFromHash) {
   sessionStorage.setItem("tallyInstallerToken", tokenFromHash);
@@ -6,6 +6,7 @@ if (tokenFromHash) {
 }
 const token = sessionStorage.getItem("tallyInstallerToken") || "";
 let clients = [];
+let pendingRemovalClients = [];
 
 function show(name) {
   sections.forEach((id) => { document.getElementById(id).hidden = id !== name; });
@@ -78,11 +79,19 @@ function selectedClients() {
     }));
 }
 
-function showResultDetails(resultClients) {
+function showResultDetails(resultClients, removal = null) {
   const names = resultClients.map((result) => clients.find((client) => client.id === result.id).product);
   document.getElementById("doneClients").textContent = names.join(", ");
   document.getElementById("doneConfig").textContent = resultClients.map((result) => result.configPath).join("; ");
   document.getElementById("doneKey").textContent = resultClients.map((result) => result.keyPath).filter(Boolean).join("; ") || "Removed";
+  const dataRow = document.getElementById("doneDataRow");
+  dataRow.hidden = removal === null;
+  if (removal !== null) {
+    const paths = [...new Set(resultClients.flatMap((result) => [result.queuePath, result.logsPath]).filter(Boolean))];
+    document.getElementById("doneData").textContent = removal
+      ? "Deleted"
+      : `Retained at ${paths.join("; ")}`;
+  }
 }
 
 document.getElementById("showKey").addEventListener("change", (event) => {
@@ -137,38 +146,80 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   }
 });
 
-document.getElementById("uninstallButton").addEventListener("click", async () => {
-  const button = document.getElementById("uninstallButton");
-  const installButton = document.getElementById("installButton");
+document.getElementById("uninstallButton").addEventListener("click", () => {
   const error = document.getElementById("error");
   error.hidden = true;
+  pendingRemovalClients = selectedClients();
+  if (pendingRemovalClients.length === 0) {
+    error.textContent = "Choose Codex, Claude Code, or both.";
+    error.hidden = false;
+    return;
+  }
+  const names = pendingRemovalClients.map((selection) => clients.find((client) => client.id === selection.id).product);
+  document.getElementById("removeClients").textContent = names.join(", ");
+  document.getElementById("removeData").checked = false;
+  document.getElementById("confirmUninstallButton").textContent = "Remove integrations";
+  document.getElementById("removeError").hidden = true;
+  document.getElementById("status").textContent = "Remove";
+  show("remove");
+});
+
+document.getElementById("removeData").addEventListener("change", (event) => {
+  document.getElementById("confirmUninstallButton").textContent = event.target.checked
+    ? "Remove integrations and data"
+    : "Remove integrations";
+});
+
+document.getElementById("confirmUninstallButton").addEventListener("click", async () => {
+  const button = document.getElementById("uninstallButton");
+  const confirmButton = document.getElementById("confirmUninstallButton");
+  const installButton = document.getElementById("installButton");
+  const error = document.getElementById("removeError");
+  const removeData = document.getElementById("removeData").checked;
+  error.hidden = true;
   button.disabled = true;
+  confirmButton.disabled = true;
   installButton.disabled = true;
   document.getElementById("resultMark").classList.remove("warning-mark");
-  document.getElementById("progressTitle").textContent = "Uninstalling Tally";
-  document.getElementById("progressMessage").textContent = "Removing local credentials and hooks.";
-  document.getElementById("status").textContent = "Uninstalling";
+  document.getElementById("progressTitle").textContent = "Removing Tally";
+  document.getElementById("progressMessage").textContent = removeData
+    ? "Removing hooks, credentials, queued records, and local logs."
+    : "Removing hooks and local credentials while retaining queued records and logs.";
+  document.getElementById("status").textContent = "Removing";
   show("installing");
   try {
     const result = await api("/api/uninstall", {
-      clients: selectedClients(),
+      clients: pendingRemovalClients,
+      removeData,
     });
     sessionStorage.removeItem("tallyInstallerToken");
-    document.getElementById("doneTitle").textContent = "Tally is uninstalled";
-    document.getElementById("doneMessage").textContent = "Hooks and local credentials were removed from this machine.";
-    showResultDetails(result.clients);
+    document.getElementById("doneTitle").textContent = result.dataRemoved
+      ? "Tally integrations and data are removed"
+      : "Tally integrations are removed";
+    document.getElementById("doneMessage").textContent = result.dataRemoved
+      ? "Hooks, local credentials, installed hook helpers, queued records, and local logs were removed."
+      : "Hooks, local credentials, and installed hook helpers were removed. Queued records and local logs were retained.";
+    showResultDetails(result.clients, result.dataRemoved);
     document.getElementById("warning").hidden = true;
     document.getElementById("retryButton").hidden = true;
-    document.getElementById("status").textContent = "Uninstalled";
+    document.querySelector(".close-note").textContent = "The installer file remains. Close this window, then delete it or uninstall the Homebrew cask if you no longer need it.";
+    document.getElementById("status").textContent = "Removed";
     show("done");
   } catch (requestError) {
     error.textContent = requestError.message;
     error.hidden = false;
     button.disabled = false;
+    confirmButton.disabled = false;
     installButton.disabled = false;
-    document.getElementById("status").textContent = "Update";
-    show("setup");
+    document.getElementById("status").textContent = "Remove";
+    show("remove");
   }
+});
+
+document.getElementById("backButton").addEventListener("click", () => {
+  pendingRemovalClients = [];
+  document.getElementById("status").textContent = "Update";
+  show("setup");
 });
 
 document.getElementById("retryButton").addEventListener("click", () => {
@@ -184,7 +235,7 @@ function shutdown() {
 }
 
 document.getElementById("cancelButton").addEventListener("click", shutdown);
-document.getElementById("doneCancelButton").addEventListener("click", shutdown);
+document.getElementById("doneCloseButton").addEventListener("click", shutdown);
 
 load().catch((loadError) => {
   document.getElementById("status").textContent = "Unavailable";

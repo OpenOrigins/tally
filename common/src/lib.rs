@@ -1,6 +1,5 @@
 use fs2::FileExt;
 use serde_json::{json, Value};
-#[cfg(windows)]
 use sha2::{Digest, Sha256};
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -17,7 +16,9 @@ pub use installer_gui::{run_installer_gui, GuiClient};
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const DEFAULT_API_URL: &str = "https://api.prod.openorigins.com/v1/tally/logs";
+pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 600;
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
+const TALLY_DATA_MARKER: &str = ".openorigins-tally-data";
 #[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
 
@@ -66,6 +67,74 @@ pub struct InstallReport {
     pub installed_binary_path: PathBuf,
     pub backup_path: Option<PathBuf>,
     pub handshake_error: Option<String>,
+}
+
+#[derive(Debug)]
+pub struct UninstallReport {
+    pub config_path: PathBuf,
+    pub state_dir: PathBuf,
+    pub logs_path: PathBuf,
+    pub queue_path: PathBuf,
+    pub data_removed: bool,
+}
+
+pub fn mark_tally_data_directory(path: &Path) -> Result<()> {
+    create_private_dir(path)?;
+    let marker = path.join(TALLY_DATA_MARKER);
+    if !marker.is_file() {
+        atomic_write(&marker, b"Owned by OpenOrigins Tally.\n", 0o600)?;
+    }
+    Ok(())
+}
+
+pub fn remove_tally_data(state_dir: &Path, logs_path: &Path) -> Result<()> {
+    if state_dir.exists() {
+        let valid_state_path = state_dir.file_name().and_then(|name| name.to_str())
+            == Some(".state")
+            && state_dir
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("logs")
+            && state_dir
+                .parent()
+                .and_then(Path::parent)
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                == Some("tally");
+        if !valid_state_path {
+            return Err(format!(
+                "refusing to delete unexpected Tally state path {}",
+                state_dir.display()
+            )
+            .into());
+        }
+    }
+
+    if logs_path.exists() {
+        let is_default_layout = logs_path.file_name().and_then(|name| name.to_str())
+            == Some("logs")
+            && logs_path
+                .parent()
+                .and_then(Path::file_name)
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.starts_with(".tally-"));
+        if !is_default_layout && !logs_path.join(TALLY_DATA_MARKER).is_file() {
+            return Err(format!(
+                "refusing to delete unmarked log directory {}; remove it manually if this path is intentional",
+                logs_path.display()
+            )
+            .into());
+        }
+    }
+
+    if state_dir.exists() {
+        fs::remove_dir_all(state_dir)?;
+    }
+    if logs_path.exists() {
+        fs::remove_dir_all(logs_path)?;
+    }
+    Ok(())
 }
 
 pub struct FileSnapshot {
@@ -537,6 +606,111 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
+pub fn heartbeat_interval_seconds(requested_seconds: u64) -> u64 {
+    requested_seconds.max(DEFAULT_HEARTBEAT_INTERVAL_SECONDS)
+}
+
+pub fn record_agent_activity(
+    state_dir: &Path,
+    agent_id: &str,
+    observed_at_unix_millis: u64,
+) -> Result<()> {
+    let (state_path, lock_path) = heartbeat_limiter_paths(state_dir, agent_id);
+    create_private_dir(state_dir)?;
+    let lock = open_private_lock(&lock_path)?;
+    lock.lock_exclusive()?;
+
+    let mut state = read_heartbeat_limiter_state(&state_path)?;
+    let previous = state["last_activity_unix_millis"]
+        .as_u64()
+        .unwrap_or_default();
+    state["last_activity_unix_millis"] = Value::from(previous.max(observed_at_unix_millis));
+    write_heartbeat_limiter_state(&state_path, &state)?;
+    FileExt::unlock(&lock)?;
+    Ok(())
+}
+
+pub fn claim_agent_heartbeat(
+    state_dir: &Path,
+    agent_id: &str,
+    now_unix_millis: u64,
+    requested_interval_seconds: u64,
+) -> Result<Option<u64>> {
+    let interval_seconds = heartbeat_interval_seconds(requested_interval_seconds);
+    let interval_millis = interval_seconds.saturating_mul(1_000);
+    let (state_path, lock_path) = heartbeat_limiter_paths(state_dir, agent_id);
+    create_private_dir(state_dir)?;
+    let lock = open_private_lock(&lock_path)?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if lock_is_contended(&error) => return Ok(None),
+        Err(error) => return Err(error.into()),
+    }
+
+    let mut state = read_heartbeat_limiter_state(&state_path)?;
+    let last_activity = state["last_activity_unix_millis"]
+        .as_u64()
+        .unwrap_or_default();
+    let last_heartbeat = state["last_heartbeat_unix_millis"]
+        .as_u64()
+        .unwrap_or_default();
+    let last_signal = last_activity.max(last_heartbeat);
+    if last_signal > 0 && now_unix_millis.saturating_sub(last_signal) < interval_millis {
+        FileExt::unlock(&lock)?;
+        return Ok(None);
+    }
+
+    state["last_heartbeat_unix_millis"] = Value::from(now_unix_millis);
+    write_heartbeat_limiter_state(&state_path, &state)?;
+    FileExt::unlock(&lock)?;
+    Ok(Some(interval_seconds))
+}
+
+fn heartbeat_limiter_paths(state_dir: &Path, agent_id: &str) -> (PathBuf, PathBuf) {
+    let digest = format!("{:x}", Sha256::digest(agent_id.as_bytes()));
+    let stem = format!("agent-heartbeat.{}", &digest[..16]);
+    (
+        state_dir.join(format!("{stem}.json")),
+        state_dir.join(format!("{stem}.lock")),
+    )
+}
+
+fn open_private_lock(path: &Path) -> io::Result<fs::File> {
+    let mut options = OpenOptions::new();
+    options.create(true).read(true).write(true).truncate(false);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.mode(0o600);
+    }
+    options.open(path)
+}
+
+fn lock_is_contended(error: &io::Error) -> bool {
+    if error.kind() == io::ErrorKind::WouldBlock {
+        return true;
+    }
+    #[cfg(windows)]
+    if matches!(error.raw_os_error(), Some(32) | Some(33)) {
+        return true;
+    }
+    false
+}
+
+fn read_heartbeat_limiter_state(path: &Path) -> Result<Value> {
+    match fs::read_to_string(path) {
+        Ok(contents) => Ok(serde_json::from_str(&contents)?),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(json!({})),
+        Err(error) => Err(error.into()),
+    }
+}
+
+fn write_heartbeat_limiter_state(path: &Path, state: &Value) -> Result<()> {
+    let contents = format!("{}\n", serde_json::to_string_pretty(state)?);
+    atomic_write(path, contents.as_bytes(), 0o600)?;
+    Ok(())
+}
+
 fn endpoint_for(api_url: &str, path: &str) -> Result<String> {
     let mut url = Url::parse(api_url)?;
     url.set_path(path);
@@ -662,9 +836,24 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 #[cfg(test)]
 mod tests {
     use super::{
-        executable_is_in_app_bundle, install_options, response_body_error, DEFAULT_API_URL,
+        claim_agent_heartbeat, executable_is_in_app_bundle, heartbeat_interval_seconds,
+        install_options, mark_tally_data_directory, record_agent_activity, remove_tally_data,
+        response_body_error, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     };
-    use std::path::Path;
+    use std::fs;
+    use std::path::{Path, PathBuf};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    fn test_directory(label: &str) -> PathBuf {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        std::env::temp_dir().join(format!(
+            "tally-common-{label}-{}-{suffix}",
+            std::process::id()
+        ))
+    }
 
     #[test]
     fn identifies_app_bundle_executables() {
@@ -685,6 +874,87 @@ mod tests {
             "https://api.prod.openorigins.com/v1/tally/logs"
         );
         assert!(!options.api_url.contains("dev2"));
+    }
+
+    #[test]
+    fn heartbeat_interval_has_a_ten_minute_minimum() {
+        assert_eq!(heartbeat_interval_seconds(0), 600);
+        assert_eq!(heartbeat_interval_seconds(60), 600);
+        assert_eq!(heartbeat_interval_seconds(600), 600);
+        assert_eq!(heartbeat_interval_seconds(900), 900);
+        assert_eq!(DEFAULT_HEARTBEAT_INTERVAL_SECONDS, 600);
+    }
+
+    #[test]
+    fn heartbeat_rate_limit_is_shared_by_agent() {
+        let directory = test_directory("heartbeat-rate");
+        record_agent_activity(&directory, "agent-a", 1_000).unwrap();
+
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-a", 600_999, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-a", 601_000, 1).unwrap(),
+            Some(600)
+        );
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-a", 1_200_999, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-a", 1_201_000, 1).unwrap(),
+            Some(600)
+        );
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-a", 500, 1).unwrap(),
+            None
+        );
+        assert_eq!(
+            claim_agent_heartbeat(&directory, "agent-b", 500, 1).unwrap(),
+            Some(600)
+        );
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            for entry in fs::read_dir(&directory).unwrap() {
+                let path = entry.unwrap().path();
+                assert_eq!(
+                    fs::metadata(path).unwrap().permissions().mode() & 0o777,
+                    0o600
+                );
+            }
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn full_removal_requires_and_accepts_tally_owned_paths() {
+        let directory = test_directory("full-removal");
+        let state_dir = directory.join("config/tally/logs/.state");
+        let logs_dir = directory.join("custom-logs");
+        fs::create_dir_all(state_dir.join("forward-queue")).unwrap();
+        fs::write(state_dir.join("forward-queue/record.json"), b"{}\n").unwrap();
+        fs::create_dir_all(&logs_dir).unwrap();
+        fs::write(logs_dir.join("record.json"), b"{}\n").unwrap();
+
+        let error = remove_tally_data(&state_dir, &logs_dir).unwrap_err();
+        assert!(error.to_string().contains("unmarked log directory"));
+        assert!(
+            state_dir.exists(),
+            "validation failure partially removed state"
+        );
+        assert!(
+            logs_dir.exists(),
+            "validation failure partially removed logs"
+        );
+
+        mark_tally_data_directory(&logs_dir).unwrap();
+        remove_tally_data(&state_dir, &logs_dir).unwrap();
+        assert!(!state_dir.exists());
+        assert!(!logs_dir.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

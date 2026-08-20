@@ -1,4 +1,6 @@
-use crate::{install_options, InstallOptions, InstallReport, Result, DEFAULT_API_URL};
+use crate::{
+    install_options, InstallOptions, InstallReport, Result, UninstallReport, DEFAULT_API_URL,
+};
 use serde_json::{json, Value};
 use std::env;
 use std::io::Read;
@@ -28,7 +30,7 @@ pub fn run_installer_gui<I, U>(
 ) -> Result<()>
 where
     I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
-    U: FnMut(&str, Option<PathBuf>) -> Result<()>,
+    U: FnMut(&str, Option<PathBuf>, bool) -> Result<UninstallReport>,
 {
     if clients.is_empty() {
         return Err("installer requires at least one client".into());
@@ -84,7 +86,7 @@ fn handle_request<I, U>(
 ) -> bool
 where
     I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
-    U: FnMut(&str, Option<PathBuf>) -> Result<()>,
+    U: FnMut(&str, Option<PathBuf>, bool) -> Result<UninstallReport>,
 {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or(request.url());
@@ -137,10 +139,14 @@ where
     }
 
     if method == Method::Post && path == "/api/uninstall" {
-        let selected = match read_json_body(&mut request)
-            .and_then(|value| parse_client_requests(value, clients))
-        {
-            Ok(selected) => selected,
+        let (selected, remove_data) = match read_json_body(&mut request).and_then(|value| {
+            let remove_data = value
+                .get("removeData")
+                .and_then(Value::as_bool)
+                .unwrap_or(false);
+            parse_client_requests(value, clients).map(|selected| (selected, remove_data))
+        }) {
+            Ok(parsed) => parsed,
             Err(error) => {
                 let _ = request.respond(json_response(
                     StatusCode(400),
@@ -151,19 +157,30 @@ where
         };
         let result = selected
             .iter()
-            .try_for_each(|selection| uninstall(selection.id, selection.config_path.clone()));
+            .map(|selection| uninstall(selection.id, selection.config_path.clone(), remove_data))
+            .collect::<Result<Vec<_>>>();
         let (response, shutdown_after_response) = match result {
-            Ok(()) => {
-                let paths = selected
+            Ok(reports) => {
+                let details = reports
                     .iter()
-                    .map(|selection| json!({"id": selection.id, "configPath": selection.response_path}))
+                    .zip(selected.iter())
+                    .map(|(report, selection)| {
+                        json!({
+                            "id": selection.id,
+                            "configPath": report.config_path,
+                            "queuePath": report.queue_path,
+                            "logsPath": report.logs_path,
+                            "dataRemoved": report.data_removed,
+                        })
+                    })
                     .collect::<Vec<_>>();
                 (
                     json_response(
                         StatusCode(200),
                         json!({
                             "ok": true,
-                            "clients": paths,
+                            "dataRemoved": remove_data,
+                            "clients": details,
                         }),
                     ),
                     true,
@@ -261,7 +278,6 @@ struct InstallRequest {
 struct ClientRequest {
     id: &'static str,
     config_path: Option<PathBuf>,
-    response_path: PathBuf,
 }
 
 fn parse_install_request(value: Value, clients: &[GuiClient]) -> Result<InstallRequest> {
@@ -321,9 +337,6 @@ fn parse_client_requests(value: Value, clients: &[GuiClient]) -> Result<Vec<Clie
             .map(PathBuf::from);
         selected.push(ClientRequest {
             id: client.id,
-            response_path: config_path
-                .clone()
-                .unwrap_or_else(|| client.config_path.clone()),
             config_path,
         });
     }
