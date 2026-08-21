@@ -38,6 +38,7 @@ def run(
     env: dict[str, str],
     payload: dict | None = None,
     expected_code: int = 0,
+    timeout_seconds: float = 30,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         [str(binary), *args],
@@ -45,7 +46,7 @@ def run(
         text=True,
         env=env,
         capture_output=True,
-        timeout=30,
+        timeout=timeout_seconds,
     )
     if completed.returncode != expected_code:
         raise AssertionError(
@@ -926,6 +927,7 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
                 "SessionStart",
                 env=env,
                 payload={"session_id": run_id},
+                timeout_seconds=10,
             )
 
         limiter_paths = list(state_dir.glob("agent-heartbeat.*.json"))

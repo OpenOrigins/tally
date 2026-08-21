@@ -545,19 +545,118 @@ pub fn enqueue_record(state_dir: &Path, record_path: &Path, executable: &Path) -
     let queued = queue_dir.join(format!("{suffix}-{}-{name}", std::process::id()));
     atomic_write(&queued, &fs::read(record_path)?, 0o600)?;
 
-    let mut command = Command::new(executable);
-    command
-        .arg("forward-pending")
+    spawn_background(executable, &["forward-pending"])
+}
+
+pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
+    #[cfg(windows)]
+    spawn_background_windows(executable, args)?;
+
+    #[cfg(not(windows))]
+    Command::new(executable)
+        .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
-        .stderr(Stdio::null());
-    #[cfg(windows)]
-    {
-        use std::os::windows::process::CommandExt;
-        command.creation_flags(0x08000000);
-    }
-    command.spawn()?;
+        .stderr(Stdio::null())
+        .spawn()?;
+
     Ok(())
+}
+
+#[cfg(windows)]
+fn spawn_background_windows(executable: &Path, args: &[&str]) -> io::Result<()> {
+    use std::iter;
+    use std::mem::{size_of, zeroed};
+    use std::os::windows::ffi::OsStrExt;
+    use std::ptr;
+    use windows_sys::Win32::Foundation::CloseHandle;
+    use windows_sys::Win32::System::Threading::{
+        CreateProcessW, CREATE_NO_WINDOW, PROCESS_INFORMATION, STARTUPINFOW,
+    };
+
+    let application = executable
+        .as_os_str()
+        .encode_wide()
+        .chain(iter::once(0))
+        .collect::<Vec<_>>();
+    let mut command_line = windows_command_line(executable, args);
+    let mut startup_info: STARTUPINFOW = unsafe { zeroed() };
+    startup_info.cb = size_of::<STARTUPINFOW>() as u32;
+    let mut process_info: PROCESS_INFORMATION = unsafe { zeroed() };
+
+    let created = unsafe {
+        CreateProcessW(
+            application.as_ptr(),
+            command_line.as_mut_ptr(),
+            ptr::null(),
+            ptr::null(),
+            0,
+            CREATE_NO_WINDOW,
+            ptr::null(),
+            ptr::null(),
+            &startup_info,
+            &mut process_info,
+        )
+    };
+    if created == 0 {
+        return Err(io::Error::last_os_error());
+    }
+
+    unsafe {
+        CloseHandle(process_info.hThread);
+        CloseHandle(process_info.hProcess);
+    }
+    Ok(())
+}
+
+#[cfg(windows)]
+fn windows_command_line(executable: &Path, args: &[&str]) -> Vec<u16> {
+    use std::os::windows::ffi::OsStrExt;
+
+    let mut command_line = Vec::new();
+    append_windows_argument(
+        &mut command_line,
+        &executable.as_os_str().encode_wide().collect::<Vec<_>>(),
+    );
+    for arg in args {
+        command_line.push(b' ' as u16);
+        append_windows_argument(&mut command_line, &arg.encode_utf16().collect::<Vec<_>>());
+    }
+    command_line.push(0);
+    command_line
+}
+
+#[cfg(windows)]
+fn append_windows_argument(command_line: &mut Vec<u16>, argument: &[u16]) {
+    const BACKSLASH: u16 = b'\\' as u16;
+    const QUOTE: u16 = b'"' as u16;
+
+    let needs_quotes = argument.is_empty()
+        || argument
+            .iter()
+            .any(|character| matches!(*character, 0x09 | 0x20 | QUOTE));
+    if !needs_quotes {
+        command_line.extend_from_slice(argument);
+        return;
+    }
+
+    command_line.push(QUOTE);
+    let mut backslashes = 0;
+    for character in argument {
+        if *character == BACKSLASH {
+            backslashes += 1;
+            continue;
+        }
+        if *character == QUOTE {
+            command_line.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2 + 1));
+        } else {
+            command_line.extend(std::iter::repeat_n(BACKSLASH, backslashes));
+        }
+        backslashes = 0;
+        command_line.push(*character);
+    }
+    command_line.extend(std::iter::repeat_n(BACKSLASH, backslashes * 2));
+    command_line.push(QUOTE);
 }
 
 pub fn forward_pending(state_dir: &Path) -> Result<()> {
@@ -863,6 +962,20 @@ mod tests {
         assert!(!executable_is_in_app_bundle(Path::new(
             "/usr/local/bin/tally-codex"
         )));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn quotes_background_process_command_line() {
+        let command_line = super::windows_command_line(
+            Path::new(r"C:\Program Files\Tally\tally.exe"),
+            &["codex", "heartbeat-daemon", "session with spaces"],
+        );
+        assert_eq!(
+            String::from_utf16(&command_line[..command_line.len() - 1]).unwrap(),
+            r#""C:\Program Files\Tally\tally.exe" codex heartbeat-daemon "session with spaces""#
+        );
+        assert_eq!(command_line.last(), Some(&0));
     }
 
     #[test]

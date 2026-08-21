@@ -75,7 +75,7 @@ after a reinstall. Select **Delete queued records and local logs** on the
 confirmation screen for permanent local-data removal. The installer app/file is
 separate; delete it afterward, or run `brew uninstall --cask tally` for Homebrew.
 
-After upgrading from Tally 0.1.3, 0.1.4, or 0.1.5, open Tally, choose the clients
+After upgrading from Tally 0.1.3 through 0.1.6, open Tally, choose the clients
 again, paste the Agent API key, and select **Install Tally** once. This refreshes
 the installed hook helpers; it also updates 0.1.4's former Dev2 default to
 Production. Re-enter an intentional custom API URL under **Advanced settings**.

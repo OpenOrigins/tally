@@ -2,7 +2,7 @@
 
 All notable changes to Tally are documented in this file.
 
-## Unreleased
+## 0.1.7 - 2026-08-21
 
 ### Fixed
 
@@ -14,6 +14,10 @@ All notable changes to Tally are documented in this file.
   asserts that only one heartbeat is written.
 - Replaced the misleading post-uninstall Cancel action with Close and report
   retained queued records and local logs explicitly.
+- Prevented Windows heartbeat daemons and forwarding workers from inheriting
+  hook-runner handles, which could make a completed hook appear to hang.
+- Added a Windows regression check requiring the hook process to return while
+  its ten-minute heartbeat daemon remains active.
 
 ### Added
 

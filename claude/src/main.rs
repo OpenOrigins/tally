@@ -261,13 +261,7 @@ fn update_heartbeat_state(
         let _ = fs::remove_file(&pid_path);
     }
 
-    Command::new(env::current_exe()?)
-        .args(["claude", "heartbeat-daemon"])
-        .env("TALLY_RUN_ID", &sink.run_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    tally_common::spawn_background(&env::current_exe()?, &["claude", "heartbeat-daemon"])?;
     Ok(())
 }
 
