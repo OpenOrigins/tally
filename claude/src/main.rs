@@ -248,6 +248,7 @@ fn update_heartbeat_state(
             "stop_requested": event_type == "Stop",
         }),
     )?;
+    tally_common::record_agent_activity(&sink.state_dir, &agent_id(), unix_now_millis())?;
 
     if event_type != "SessionStart" {
         return Ok(());
@@ -260,13 +261,7 @@ fn update_heartbeat_state(
         let _ = fs::remove_file(&pid_path);
     }
 
-    Command::new(env::current_exe()?)
-        .args(["claude", "heartbeat-daemon"])
-        .env("TALLY_RUN_ID", &sink.run_id)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    tally_common::spawn_background(&env::current_exe()?, &["claude", "heartbeat-daemon"])?;
     Ok(())
 }
 
@@ -289,15 +284,18 @@ fn run_heartbeat_daemon() -> Result<()> {
         }),
     )?;
 
-    let interval = env_u64(
-        "TALLY_HOOK_HEARTBEAT_SECONDS",
-        env_u64("TALLY_HEARTBEAT_SECONDS", 60),
+    let interval = configured_heartbeat_interval();
+    let poll_interval =
+        env_u64("TALLY_HOOK_HEARTBEAT_POLL_SECONDS", interval.min(30)).clamp(1, interval);
+    let idle_timeout = env_u64(
+        "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS",
+        interval.saturating_mul(3),
     )
-    .max(1);
-    let idle_timeout = env_u64("TALLY_HOOK_HEARTBEAT_IDLE_SECONDS", 300) as i64;
+    .max(interval)
+    .min(i64::MAX as u64) as i64;
 
     loop {
-        thread::sleep(Duration::from_secs(interval));
+        thread::sleep(Duration::from_secs(poll_interval));
         let state = read_json_file(&state_path).unwrap_or_else(|_| json!({}));
         if state["stop_requested"].as_bool().unwrap_or(false) {
             break;
@@ -316,6 +314,7 @@ fn run_heartbeat_daemon() -> Result<()> {
                     "last_hook_event": state["last_hook_event"],
                     "last_hook_observed_at": state["updated_at"],
                 }),
+                interval,
             )?;
             break;
         }
@@ -333,6 +332,7 @@ fn run_heartbeat_daemon() -> Result<()> {
                 "last_hook_event": state["last_hook_event"],
                 "last_hook_observed_at": state["updated_at"],
             }),
+            interval,
         )?;
     }
 
@@ -391,6 +391,16 @@ fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
     quiet_seconds >= 0 && quiet_seconds as u64 >= interval_seconds
 }
 
+fn configured_heartbeat_interval() -> u64 {
+    tally_common::heartbeat_interval_seconds(env_u64(
+        "TALLY_HOOK_HEARTBEAT_SECONDS",
+        env_u64(
+            "TALLY_HEARTBEAT_SECONDS",
+            tally_common::DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        ),
+    ))
+}
+
 pub fn install_desktop_hooks(
     options: tally_common::InstallOptions,
 ) -> Result<tally_common::InstallReport> {
@@ -400,7 +410,7 @@ pub fn install_desktop_hooks(
     let state_dir = state_dir_for_settings_path(&settings_path);
     let installed_binary_path = installed_binary_path_for_settings_path(&settings_path);
     fs::create_dir_all(settings_path.parent().unwrap_or_else(|| Path::new(".")))?;
-    fs::create_dir_all(log_root())?;
+    tally_common::mark_tally_data_directory(&log_root())?;
     let source_binary = tally_common::installation_source_executable()?;
     let hook_bin = installed_binary_path.display().to_string();
 
@@ -497,33 +507,50 @@ pub fn install_desktop_hooks(
 }
 
 pub fn uninstall_desktop_hooks(config_path: Option<PathBuf>) -> Result<()> {
+    uninstall_desktop_hooks_with_options(config_path, false).map(|_| ())
+}
+
+pub fn uninstall_desktop_hooks_with_options(
+    config_path: Option<PathBuf>,
+    remove_data: bool,
+) -> Result<tally_common::UninstallReport> {
+    set_runtime_defaults();
     let settings_path = effective_settings_path(config_path.as_deref());
-    if !settings_path.exists() {
+    let state_dir = state_dir_for_settings_path(&settings_path);
+    let logs_path = log_root();
+    if settings_path.exists() {
+        let mut config = read_json_file(&settings_path)?;
+        if !config.is_object() || !config.get("hooks").map(Value::is_object).unwrap_or(false) {
+            println!(
+                "No Tally hooks found in {} (no hooks key present)",
+                settings_path.display()
+            );
+        } else {
+            let backup = backup_if_exists(&settings_path)?;
+            let removed = remove_tally_hooks(&mut config);
+            write_json_atomic(&settings_path, &config)?;
+            println!(
+                "Removed {removed} Tally hook handler(s) from {}",
+                settings_path.display()
+            );
+            if let Some(backup) = backup {
+                println!("Backed up previous settings file to {}", backup.display());
+            }
+        }
+    } else {
         println!("No settings file found at {}", settings_path.display());
-        remove_local_credentials_for_settings_path(&settings_path)?;
-        return Ok(());
-    }
-    let mut config = read_json_file(&settings_path)?;
-    if !config.is_object() || !config.get("hooks").map(Value::is_object).unwrap_or(false) {
-        println!(
-            "No Tally hooks found in {} (no hooks key present)",
-            settings_path.display()
-        );
-        remove_local_credentials_for_settings_path(&settings_path)?;
-        return Ok(());
-    }
-    let backup = backup_if_exists(&settings_path)?;
-    let removed = remove_tally_hooks(&mut config);
-    write_json_atomic(&settings_path, &config)?;
-    println!(
-        "Removed {removed} Tally hook handler(s) from {}",
-        settings_path.display()
-    );
-    if let Some(backup) = backup {
-        println!("Backed up previous settings file to {}", backup.display());
     }
     remove_local_credentials_for_settings_path(&settings_path)?;
-    Ok(())
+    if remove_data {
+        tally_common::remove_tally_data(&state_dir, &logs_path)?;
+    }
+    Ok(tally_common::UninstallReport {
+        config_path: settings_path,
+        queue_path: state_dir.join("forward-queue"),
+        state_dir,
+        logs_path,
+        data_removed: remove_data,
+    })
 }
 
 fn build_tally_record(
@@ -721,6 +748,7 @@ impl AuditSink {
     fn new(source: &str) -> Result<Self> {
         let source = safe_slug(source, "source");
         let root = log_root();
+        tally_common::mark_tally_data_directory(&root)?;
         let run_id = run_id();
         let workspace = workspace_path();
         let jsonl_dir = root.join("jsonl");
@@ -805,28 +833,54 @@ impl AuditSink {
         &self,
         active_sessions: &[String],
         stream_name: &str,
-        extra: Value,
+        mut metadata: Value,
+        requested_interval_seconds: u64,
     ) -> Result<()> {
+        let agent_id = agent_id();
+        let emitted_at_unix_millis = unix_now_millis();
+        let Some(rate_limit_seconds) = tally_common::claim_agent_heartbeat(
+            &self.state_dir,
+            &agent_id,
+            emitted_at_unix_millis,
+            requested_interval_seconds,
+        )?
+        else {
+            return Ok(());
+        };
+        merge_object(
+            &mut metadata,
+            json!({"rate_limit_seconds": rate_limit_seconds}),
+        );
         let timestamp = utc_now();
+        let record_id = stable_id(
+            "heartbeat",
+            &json!({
+                "agent_id": agent_id,
+                "client": "claude-code",
+                "emitted_at_unix_millis": emitted_at_unix_millis,
+            }),
+        );
         let mut event = json!({
             "schema_version": "tally-claude.v1",
+            "record_id": record_id,
             "run_id": self.run_id,
             "source": self.source,
             "event_type": "heartbeat",
             "observed_at": timestamp,
             "workspace": self.workspace.display().to_string(),
         });
-        merge_object(&mut event, extra.clone());
+        merge_object(&mut event, metadata.clone());
         self.append_jsonl(stream_name, &event)?;
         self.write_tally_record(&json!({
             "record_type": "HEARTBEAT",
+            "record_id": record_id,
             "schema_version": "0.2",
             "session_id": self.run_id,
-            "agent_id": agent_id(),
+            "agent_id": agent_id,
             "active_sessions": active_sessions,
             "timestamp": timestamp,
             "source": self.source,
-            "metadata": extra,
+            "metadata": metadata,
         }))?;
         Ok(())
     }
@@ -879,7 +933,10 @@ fn set_runtime_defaults() {
     );
     set_default("TALLY_AGENT_ID", "claude-desktop");
     set_default("TALLY_AGENT_VERSION", "claude-code");
-    set_default("TALLY_HOOK_HEARTBEAT_SECONDS", "60");
+    set_default(
+        "TALLY_HOOK_HEARTBEAT_SECONDS",
+        &tally_common::DEFAULT_HEARTBEAT_INTERVAL_SECONDS.to_string(),
+    );
 }
 
 fn set_default(key: &str, value: &str) {
@@ -1180,6 +1237,14 @@ fn safe_slug(value: &str, default: &str) -> String {
 
 fn utc_now() -> String {
     Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
+}
+
+fn unix_now_millis() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis()
+        .min(u64::MAX as u128) as u64
 }
 
 fn backup_stamp() -> String {
@@ -1488,10 +1553,10 @@ mod tests {
 
     #[test]
     fn emits_heartbeat_only_after_a_quiet_interval() {
-        assert!(!heartbeat_due(0, 60));
-        assert!(!heartbeat_due(59, 60));
-        assert!(heartbeat_due(60, 60));
-        assert!(heartbeat_due(120, 60));
+        assert!(!heartbeat_due(0, 600));
+        assert!(!heartbeat_due(599, 600));
+        assert!(heartbeat_due(600, 600));
+        assert!(heartbeat_due(1_200, 600));
     }
 
     #[test]

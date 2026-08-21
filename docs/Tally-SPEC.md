@@ -67,7 +67,7 @@ Anchor attaches an OpenOrigins receipt to each transmitted record, carrying an e
 No record may be modified or deleted after being written. Corrections are made by appending a new record referencing the corrected one.
 
 **7. Heartbeat ensures gap detection.**  
-Anchor emits a `HEARTBEAT` record every 60 seconds when no other records are being written.
+Anchor emits one agent-scoped `HEARTBEAT` record every 10 minutes (600 seconds) whenever no other records are being written for that agent. Concurrent sessions share the same heartbeat window.
 
 ---
 
@@ -328,7 +328,7 @@ Emitted once when the agent's task session concludes.
 
 ### 7. `HEARTBEAT`
 
-Emitted by Anchor every 60 seconds when no other records are being written. Allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance.
+Emitted by Anchor every 10 minutes (600 seconds) whenever no other records are being written for the same agent. Concurrent sessions share one heartbeat window. This allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance without multiplying records by session count.
 
 ```json
 {

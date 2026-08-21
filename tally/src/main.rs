@@ -70,9 +70,11 @@ fn run_gui() -> Result<()> {
             "claude" => tally_claude::install_desktop_hooks(options),
             _ => Err(format!("unknown client: {client}").into()),
         },
-        |client, config_path| match client {
-            "codex" => tally_codex::uninstall_desktop_hooks(config_path),
-            "claude" => tally_claude::uninstall_desktop_hooks(config_path),
+        |client, config_path, remove_data| match client {
+            "codex" => tally_codex::uninstall_desktop_hooks_with_options(config_path, remove_data),
+            "claude" => {
+                tally_claude::uninstall_desktop_hooks_with_options(config_path, remove_data)
+            }
             _ => Err(format!("unknown client: {client}").into()),
         },
     )

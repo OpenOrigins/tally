@@ -3,7 +3,7 @@ members = ["claude", "common", "codex", "tally"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.6"
+version = "0.1.7"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -20,6 +20,7 @@ tally-common = { path = "common" }
 tiny_http = "0.12"
 ureq = { version = "2.12.1", default-features = false, features = ["tls"] }
 url = "2"
+windows-sys = "0.61"
 
 [profile.release]
 codegen-units = 1

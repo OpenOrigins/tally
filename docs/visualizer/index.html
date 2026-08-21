@@ -221,6 +221,7 @@ body { background:var(--bg); color:var(--text); font-family:-apple-system,BlinkM
 
 <script>
 // ─── STATE ───────────────────────────────────────────────────────────────────
+const HEARTBEAT_INTERVAL_MS = 10 * 60_000;
 let logs = { a: null, b: null };   // parsed JSON
 let step = 0;
 let stepEls = [];
@@ -363,8 +364,8 @@ function findGaps(records) {
   const gaps = [];
   for (let i = 1; i < hbs.length; i++) {
     const diff = hbs[i].t - hbs[i - 1].t;
-    if (diff > 90_000) {  // more than 1.5 × 60s — at least one missed slot
-      const missed = Math.max(1, Math.round(diff / 60_000) - 1);
+    if (diff > HEARTBEAT_INTERVAL_MS * 1.5) {
+      const missed = Math.max(1, Math.ceil(diff / HEARTBEAT_INTERVAL_MS) - 1);
       gaps.push({ fromTs: hbs[i - 1].ts, toTs: hbs[i].ts, diffMs: diff, missed });
     }
   }
@@ -490,7 +491,7 @@ function buildGapEl(s) {
   const from = fmtTime(g.fromTs), to = fmtTime(g.toTs);
   const slots = [];
   for (let i = 1; i <= Math.min(g.missed, 5); i++) {
-    const t = new Date(new Date(g.fromTs).getTime() + i * 60_000);
+    const t = new Date(new Date(g.fromTs).getTime() + i * HEARTBEAT_INTERVAL_MS);
     slots.push(`<div class="gap-slot">${fmtTime(t.toISOString())}<br>MISSING</div>`);
   }
   if (g.missed > 5) slots.push(`<div class="gap-slot">+${g.missed-5} more<br>MISSING</div>`);
@@ -704,7 +705,7 @@ function buildFindings(an, infoA, infoB) {
   an.gapsA.forEach(g => {
     items.push({ kind:'finding', cls:'red', icon:'⚠',
       title: `Heartbeat gap in ${infoA.name}'s log — ${g.missed} slot${g.missed>1?'s':''} missing`,
-      body: `Anchor emits HEARTBEAT every 60 seconds during inactivity. A gap of ${Math.round(g.diffMs/1000)}s was detected between ${fmtTime(g.fromTs)} and ${fmtTime(g.toTs)} — ${g.missed} expected heartbeat${g.missed>1?' slots were':' slot was'} absent. This is detectable from PUBLIC-tier fields alone without reading any content. Silence is distinguishable from absence.`
+      body: `Anchor emits one agent-scoped HEARTBEAT every 10 minutes during inactivity. A gap of ${Math.round(g.diffMs/1000)}s was detected between ${fmtTime(g.fromTs)} and ${fmtTime(g.toTs)} — ${g.missed} expected heartbeat${g.missed>1?' slots were':' slot was'} absent. This is detectable from PUBLIC-tier fields alone without reading any content. Silence is distinguishable from absence.`
     });
   });
 

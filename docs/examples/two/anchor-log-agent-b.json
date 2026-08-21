@@ -1,10 +1,10 @@
 {
   "_meta": {
-    "description": "Anchor log emitted by the settlement agent (Agent B), running on ClearPath Exchange infrastructure. Agent B receives a handoff of six trade routing confirmations from Nexus Capital's Agent A and initiates settlement for those orders. Agent B is fully compliant and records its session faithfully. The dispute in this example is not surfaced by a hash mismatch between the two parties' HANDOFF records — both parties agree on what the handoff contained. Instead, ClearPath's settlement system subsequently receives an unexpected seventh settlement instruction for ORD-NEXUS-007 ($2,100,000) that did not originate from this session and was not in the handoff payload. ClearPath raises a dispute with OpenOrigins. On examining Agent A's independently anchored log, OpenOrigins finds: (1) a three-minute heartbeat gap in Agent A's stream, and (2) a pre_state_hash on Agent A's HANDOFF decision that cannot be reconciled with the post_state_hash of its last RESULT_RECEIVED. Neither finding requires any content to be unsealed — both are detectable from PUBLIC-tier fields alone.",
+    "description": "Anchor log emitted by the settlement agent (Agent B), running on ClearPath Exchange infrastructure. Agent B receives a handoff of six trade routing confirmations from Nexus Capital's Agent A and initiates settlement for those orders. Agent B is fully compliant and records its session faithfully. The dispute in this example is not surfaced by a hash mismatch between the two parties' HANDOFF records — both parties agree on what the handoff contained. Instead, ClearPath's settlement system subsequently receives an unexpected seventh settlement instruction for ORD-NEXUS-007 ($2,100,000) that did not originate from this session and was not in the handoff payload. ClearPath raises a dispute with OpenOrigins. On examining Agent A's independently anchored log, OpenOrigins finds: (1) a 2,000-second heartbeat gap in Agent A's stream, and (2) a pre_state_hash on Agent A's HANDOFF decision that cannot be reconciled with the post_state_hash of its last RESULT_RECEIVED. Neither finding requires any content to be unsealed — both are detectable from PUBLIC-tier fields alone.",
     "anchor_instance_id": "anchor_inst_CLEARPATH_SETTLE_07",
     "agent_id": "did:key:z6MkuQWvRxSyTzUaVbWcXdYeZfAgBhCiDjEkFlGmHnIoJpKq",
     "visibility_note": "Fields marked [PUB] are transmitted as plaintext to OpenOrigins. Fields marked [ARB] are transmitted encrypted and unsealed only on formal dispute. Fields marked [PRV] are hashes and URIs only — plaintext stays on ClearPath infra.",
-    "dispute_note": "ClearPath raised a dispute after its settlement system received ORD-NEXUS-007 — a $2,100,000 order with no corresponding entry in the handoff payload from this session (payload_hash sha256:c3d4e5f6...). OpenOrigins compared the two independently anchored logs. Agent B's log is internally consistent. Agent A's log shows a 200-second heartbeat gap and a state hash discontinuity. These are the material findings. No arbitrator-tier fields needed to be unsealed to reach this conclusion."
+    "dispute_note": "ClearPath raised a dispute after its settlement system received ORD-NEXUS-007 — a $2,100,000 order with no corresponding entry in the handoff payload from this session (payload_hash sha256:c3d4e5f6...). OpenOrigins compared the two independently anchored logs. Agent B's log is internally consistent. Agent A's log shows a 2,000-second heartbeat gap and a state hash discontinuity. These are the material findings. No arbitrator-tier fields needed to be unsealed to reach this conclusion."
   },
 
   "records": [
@@ -34,7 +34,7 @@
         "chain_uri":  "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/delegation-chain.json"
       },
 
-      "session_started_at": "2026-05-01T10:25:26Z",
+      "session_started_at": "2026-05-01T11:41:10Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB2CLRPT00001"
     },
 
@@ -45,7 +45,7 @@
       "agent_id":           "did:key:z6MkuQWvRxSyTzUaVbWcXdYeZfAgBhCiDjEkFlGmHnIoJpKq",
       "anchor_instance_id": "anchor_inst_CLEARPATH_SETTLE_07",
       "active_sessions":    ["sess_02PQ9RSMN5YZBC07IFMV2WZXE"],
-      "timestamp":          "2026-05-01T10:25:26Z",
+      "timestamp":          "2026-05-01T11:41:10Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB2CLRPT00002"
     },
 
@@ -67,12 +67,12 @@
         "agent_id":        "did:key:z6MkuQWvRxSyTzUaVbWcXdYeZfAgBhCiDjEkFlGmHnIoJpKq",
         "org_id":          "[ARB] org:clearpath-exchange",
         "signature":       "sig:3044022079e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0022046a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1",
-        "acknowledged_at": "2026-05-01T10:25:29Z"
+        "acknowledged_at": "2026-05-01T11:41:13Z"
       },
 
       "payload_hash":           "sha256:c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
       "payload_uri":            "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/received-handoff-payload-005.json",
-      "handoff_timestamp":      "2026-05-01T10:25:24Z",
+      "handoff_timestamp":      "2026-05-01T11:41:08Z",
       "acknowledgement_status": "acknowledged",
 
       "anchor_receipt": "rcpt_02PQ9RSAB2CLRPT00003"
@@ -92,7 +92,7 @@
 
       "instruction_hash":        "sha256:f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9",
       "instruction_uri":         "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/instruction-001.json",
-      "instruction_received_at": "2026-05-01T10:25:29Z",
+      "instruction_received_at": "2026-05-01T11:41:13Z",
 
       "context_snapshot_hash": "sha256:a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0",
       "context_snapshot_uri":  "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/context-snap-001.json",
@@ -128,7 +128,7 @@
       "post_state_hash": "sha256:e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4",
       "post_state_uri":  "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/state-post-act-002.json",
 
-      "action_timestamp": "2026-05-01T10:25:33Z",
+      "action_timestamp": "2026-05-01T11:41:17Z",
       "anchor_receipt":   "rcpt_02PQ9RSAB2CLRPT00005",
 
       "deviance_flag": {
@@ -148,7 +148,7 @@
 
       "result_hash":        "sha256:f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5",
       "result_uri":         "[PRV] s3://clearpath-agent-logs/sess_02PQ9RSMN5YZBC07IFMV2WZXE/result-act-002.json",
-      "result_received_at": "2026-05-01T10:25:41Z",
+      "result_received_at": "2026-05-01T11:41:25Z",
 
       "result_interpretation": {
         "summary":     "[ARB] Settlement initiated for all 6 orders in the received payload. Settlement IDs STL-001 through STL-006 confirmed by ClearPath core system.",
@@ -181,7 +181,7 @@
         "approval_hash": null
       },
 
-      "session_ended_at": "2026-05-01T10:25:43Z",
+      "session_ended_at": "2026-05-01T11:41:27Z",
       "anchor_receipt":   "rcpt_02PQ9RSAB2CLRPT00006"
     }
 
