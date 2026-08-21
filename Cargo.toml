@@ -3,7 +3,7 @@ members = ["claude", "common", "codex", "tally"]
 resolver = "2"
 
 [workspace.package]
-version = "0.1.7"
+version = "0.1.8"
 edition = "2021"
 rust-version = "1.89"
 publish = false
@@ -13,6 +13,7 @@ license = "Apache-2.0"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fs2 = "0.4"
 getrandom = "0.3"
+libc = "0.2"
 rpassword = "7"
 serde_json = "1"
 sha2 = "0.10"

@@ -35,6 +35,7 @@ RECORD_TYPES = [
     "ACTION_TAKEN",
     "RESULT_RECEIVED",
     "HANDOFF",
+    "TURN_END",
     "SESSION_END",
     "HEARTBEAT",
 ]
@@ -198,6 +199,16 @@ def build_record(
                 "anchor_receipt": receipt,
             }
         )
+    elif record_type == "TURN_END":
+        base.update(
+            {
+                "turn_id": _id("turn"),
+                "outcome": random.choice(["completed", "failed", "interrupted"]),
+                "outcome_hash": _sha256(f"turn-outcome-{session_id}"),
+                "outcome_uri": f"private://{run_id}/{session_id}/turn-outcome.json",
+                "turn_ended_at": _iso(ts),
+            }
+        )
     elif record_type == "SESSION_END":
         base.update(
             {
@@ -261,6 +272,7 @@ def generate_records(count: int, include_invalid: bool) -> list[dict[str, Any]]:
         "ACTION_TAKEN",
         "RESULT_RECEIVED",
         "HANDOFF",
+        "TURN_END",
         "SESSION_END",
     ]
     types: list[str] = []

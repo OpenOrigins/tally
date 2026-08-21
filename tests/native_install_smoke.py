@@ -22,13 +22,22 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
-EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+EVENTS = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd",
+]
+INSTALLED_EVENT_COUNT = 11
 EXPECTED_TYPES = [
     "ACTION_TAKEN",
     "INSTRUCTION_RECEIVED",
     "RESULT_RECEIVED",
     "SESSION_END",
     "SESSION_START",
+    "TURN_END",
 ]
 
 
@@ -495,7 +504,14 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert config["theme"] == "dark"
         assert "echo keep" in json.dumps(config)
         assert api_key not in json.dumps(config)
-        assert len(tally_commands(config)) == 10
+        assert len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        session_end_handlers = [
+            handler
+            for handler in tally_handlers(config)
+            if handler["command"].endswith("hook SessionEnd")
+        ]
+        assert len(session_end_handlers) == 1
+        assert session_end_handlers[0]["timeout"] == 3
         commands = tally_commands(config)
         assert all(command_references_path(command, installed_binary) for command in commands), (
             f"hooks do not reference installed binary {installed_binary}: {commands}"
@@ -515,7 +531,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             env=env,
         )
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert len(tally_commands(config)) == 10, "reinstall duplicated hook handlers"
+        assert (
+            len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        ), "reinstall duplicated hook handlers"
 
         gui_install(
             binary,
@@ -527,7 +545,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             expect_connected=True,
         )
         config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert len(tally_commands(config)) == 10, "GUI reinstall duplicated hook handlers"
+        assert (
+            len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        ), "GUI reinstall duplicated hook handlers"
 
         custom_config_path = (
             root
@@ -569,7 +589,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             assert stat.S_IMODE(custom_api_config_path.stat().st_mode) == 0o600
         custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
         custom_commands = tally_commands(custom_config)
-        assert len(custom_commands) == 10
+        assert len(custom_commands) == INSTALLED_EVENT_COUNT
         assert all(
             command_references_path(command, custom_installed_binary)
             for command in custom_commands
@@ -769,7 +789,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert config_path.read_bytes() == stable_hooks
         assert api_key_path.read_bytes() == stable_key
         assert api_config_path.read_bytes() == stable_api_config
-        assert len(tally_commands(json.loads(stable_hooks))) == 10
+        assert len(tally_commands(json.loads(stable_hooks))) == INSTALLED_EVENT_COUNT
     finally:
         server.shutdown()
         server.server_close()
@@ -794,6 +814,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             "tool_response": {"stdout": ""},
         },
         "Stop": {"session_id": "native-smoke-session"},
+        "SessionEnd": {
+            "session_id": "native-smoke-session",
+            "reason": "prompt_input_exit",
+        },
     }
     session_start = next(
         command for command in tally_commands(config) if command.endswith("hook SessionStart")
@@ -867,12 +891,90 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
         assert {request["body"]["source"] for request in handshakes[-2:]} == {
             "codex", "claude-code"
         }
-        assert len(tally_commands(json.loads(codex_config.read_text(encoding="utf-8")))) == 10
-        assert len(tally_commands(json.loads(claude_config.read_text(encoding="utf-8")))) == 10
+        assert (
+            len(tally_commands(json.loads(codex_config.read_text(encoding="utf-8"))))
+            == INSTALLED_EVENT_COUNT
+        )
+        assert (
+            len(tally_commands(json.loads(claude_config.read_text(encoding="utf-8"))))
+            == INSTALLED_EVENT_COUNT
+        )
     finally:
         server.shutdown()
         server.server_close()
         thread.join(timeout=5)
+
+
+def smoke_heartbeat_session_lifecycle(binary: Path, root: Path, agent: str) -> None:
+    lifecycle_root = root / f"heartbeat-lifecycle-{agent}"
+    home = lifecycle_root / "home"
+    log_root = lifecycle_root / "logs"
+    run_id = f"native-heartbeat-lifecycle-{agent}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TALLY_LOG_ROOT": str(log_root),
+            "TALLY_RUN_ID": run_id,
+            "TALLY_FORWARDING_ENABLED": "0",
+            "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": "600",
+            "TALLY_HOOK_HEARTBEAT_POLL_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "1800",
+        }
+    )
+    state_dir = log_root / "state"
+    state_path = state_dir / f"hook-heartbeat.{run_id}.json"
+    pid_path = state_dir / f"hook-heartbeat.{run_id}.pid"
+    payload = {"session_id": run_id}
+
+    run(binary, agent, "hook", "SessionStart", env=env, payload=payload)
+    deadline = time.monotonic() + 8
+    while not pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert pid_path.exists(), f"{agent} heartbeat daemon did not start"
+
+    try:
+        run(binary, agent, "hook", "Stop", env=env, payload=payload)
+        time.sleep(1.25)
+        assert pid_path.exists(), f"{agent} Stop ended the session heartbeat"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_hook_event"] == "Stop"
+        assert state["stop_requested"] is False
+
+        run(
+            binary,
+            agent,
+            "hook",
+            "SessionEnd",
+            env=env,
+            payload={**payload, "reason": "prompt_input_exit"},
+        )
+        deadline = time.monotonic() + 8
+        while pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not pid_path.exists(), f"{agent} SessionEnd left heartbeat daemon running"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_hook_event"] == "SessionEnd"
+        assert state["stop_requested"] is True
+
+        record_dir = log_root / "tally" / f"{agent}-hooks"
+        record_types = {
+            json.loads(path.read_text(encoding="utf-8"))["record_type"]
+            for path in record_dir.glob("*.json")
+        }
+        assert {"SESSION_START", "TURN_END", "SESSION_END"} <= record_types
+    finally:
+        if pid_path.exists():
+            run(
+                binary,
+                agent,
+                "hook",
+                "SessionEnd",
+                env=env,
+                payload={**payload, "reason": "test_cleanup"},
+            )
 
 
 def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
@@ -1015,6 +1117,8 @@ def main() -> None:
         smoke(args.tally.resolve(), "codex", root)
         smoke(args.tally.resolve(), "claude", root)
         smoke_combined_install(args.tally.resolve(), root)
+        smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "codex")
+        smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "claude")
         smoke_heartbeat_daemon(args.tally.resolve(), root, "codex")
         smoke_heartbeat_daemon(args.tally.resolve(), root, "claude")
     print("Native install smoke tests passed.")

@@ -38,6 +38,7 @@ Each organisation runs its own Anchor instance independently. This means:
 |---|---|
 | **Agent** | Any automated system acting on behalf of a principal |
 | **Principal** | The human, organisation, or upstream agent that authorised this agent to act |
+| **Turn** | One user instruction and the agent response produced for it within a session |
 | **Action** | A single atomic operation performed by an agent |
 | **Handoff** | The transfer of a task or result from one agent to another |
 | **Anchor** | The OpenOrigins local daemon that scans, hashes, and transmits log records |
@@ -105,7 +106,7 @@ Arbitrator-tier fields are sealed by default. The process for unsealing them is:
 
 ## Record Types
 
-The spec defines seven record types. A compliant implementation must be capable of emitting all seven. Field definitions include their visibility tier in brackets.
+The spec defines eight record types. A compliant implementation must be capable of emitting all eight. Field definitions include their visibility tier in brackets.
 
 ---
 
@@ -297,7 +298,31 @@ Emitted when an agent transfers a task or result to another agent.
 
 ---
 
-### 6. `SESSION_END`
+### 6. `TURN_END`
+
+Emitted when the agent finishes one response. A session can contain many turns;
+this record does not conclude the session.
+
+```json
+{
+  "record_type": "TURN_END",
+  "schema_version": "0.2",
+
+  "session_id": "<uuid>",                                       // [PUB]
+  "turn_id":    "<uuid>",                                       // [PUB]
+
+  "outcome":      "completed | failed | interrupted",           // [PUB]
+  "outcome_hash": "<SHA-256>",                                  // [PUB]
+  "outcome_uri":  "<URI>",                                     // [PRV]
+
+  "turn_ended_at":  "<ISO 8601>",                              // [PUB]
+  "anchor_receipt": "<receipt ID>"                              // [PUB]
+}
+```
+
+---
+
+### 7. `SESSION_END`
 
 Emitted once when the agent's task session concludes.
 
@@ -326,7 +351,7 @@ Emitted once when the agent's task session concludes.
 
 ---
 
-### 7. `HEARTBEAT`
+### 8. `HEARTBEAT`
 
 Emitted by Anchor every 10 minutes (600 seconds) whenever no other records are being written for the same agent. Concurrent sessions share one heartbeat window. This allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance without multiplying records by session count.
 
@@ -364,7 +389,8 @@ These record types must each receive an individual Anchor receipt (not batched):
 - `SESSION_END`
 - Every `HEARTBEAT`
 
-`INSTRUCTION_RECEIVED`, `ACTION_TAKEN`, and `RESULT_RECEIVED` records may be batched into a Merkle root and anchored together.
+`INSTRUCTION_RECEIVED`, `ACTION_TAKEN`, `RESULT_RECEIVED`, and `TURN_END`
+records may be batched into a Merkle root and anchored together.
 
 ---
 
@@ -381,7 +407,7 @@ These record types must each receive an individual Anchor receipt (not batched):
 
 | Level | Requirement |
 |---|---|
-| **Level 1 — Basic** | Emits all seven record types. Runs Anchor locally. Anchors SESSION_START, HANDOFF, SESSION_END, and HEARTBEAT individually. |
+| **Level 1 — Basic** | Emits all eight record types. Runs Anchor locally. Anchors SESSION_START, HANDOFF, SESSION_END, and HEARTBEAT individually. |
 | **Level 2 — Standard** | Level 1 plus: all three visibility tiers correctly implemented; private-field URIs resolvable on request during dispute; Data Processing Agreement with OpenOrigins signed. |
 | **Level 3 — Full** | Level 2 plus: Cambium proof required before each cross-agent handoff; real-time streaming to Anchor rather than batch submission. |
 
