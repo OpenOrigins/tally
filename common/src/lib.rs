@@ -1013,7 +1013,7 @@ mod tests {
             &[
                 "python3",
                 "-c",
-                "import os, sys; open(sys.argv[1], 'w').write(f'{os.getpid()} {os.getsid(0)}\\n')",
+                "import os, sys; tmp = sys.argv[1] + '.tmp'; open(tmp, 'w').write(f'{os.getpid()} {os.getsid(0)}\\n'); os.replace(tmp, sys.argv[1])",
                 &output,
             ],
         )
