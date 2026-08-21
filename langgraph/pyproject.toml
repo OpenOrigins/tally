@@ -1,0 +1,22 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anchor-hooks"
+version = "0.1.0"
+description = "Tally Anchor-style audit logging for LangGraph agents: initial server handshake, session/heartbeat/action records, and API-key log forwarding."
+readme = "anchor_hooks/README.md"
+requires-python = ">=3.10"
+dependencies = [
+    "requests>=2.32.0",
+    "pyyaml>=6.0",
+    "python-dotenv>=1.0.1",
+    "langchain-core>=0.3.0",
+]
+
+[project.scripts]
+anchor-hooks = "anchor_hooks.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["anchor_hooks*"]
