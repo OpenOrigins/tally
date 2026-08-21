@@ -39,7 +39,12 @@ const EVENTS: &[HookEvent] = &[
         "Tally: recording subagent start",
     ),
     HookEvent::new("SubagentStop", Some("*"), "Tally: recording subagent stop"),
-    HookEvent::new("Stop", None, "Tally: recording Claude Code stop"),
+    HookEvent::new("Stop", None, "Tally: recording Claude Code turn end"),
+    HookEvent::new(
+        "SessionEnd",
+        None,
+        "Tally: recording Claude Code session end",
+    ),
 ];
 
 pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
@@ -245,7 +250,7 @@ fn update_heartbeat_state(
             "session_id": session_id,
             "updated_at": observed_at,
             "last_hook_event": event_type,
-            "stop_requested": event_type == "Stop",
+            "stop_requested": heartbeat_stop_requested(event_type),
         }),
     )?;
     tally_common::record_agent_activity(&sink.state_dir, &agent_id(), unix_now_millis())?;
@@ -389,6 +394,10 @@ fn heartbeat_lock_is_contended(error: &io::Error) -> bool {
 
 fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
     quiet_seconds >= 0 && quiet_seconds as u64 >= interval_seconds
+}
+
+fn heartbeat_stop_requested(event_type: &str) -> bool {
+    event_type == "SessionEnd"
 }
 
 fn configured_heartbeat_interval() -> u64 {
@@ -666,13 +675,25 @@ fn build_tally_record(
             })
         }
         "Stop" => json!({
+            "record_type": "TURN_END",
+            "schema_version": "0.2",
+            "session_id": session_id,
+            "turn_id": turn_id(payload),
+            "outcome": "completed",
+            "outcome_hash": raw_ref["hash"],
+            "outcome_uri": raw_ref["uri"],
+            "turn_ended_at": observed_at,
+            "claude_hook_event": event_type,
+        }),
+        "SessionEnd" => json!({
             "record_type": "SESSION_END",
             "schema_version": "0.2",
             "session_id": session_id,
-            "outcome": "claude_turn_stopped",
+            "outcome": "partial",
             "outcome_hash": raw_ref["hash"],
             "outcome_uri": raw_ref["uri"],
             "session_ended_at": observed_at,
+            "session_end_reason": first_string_by_key(payload, &["reason"]),
             "claude_hook_event": event_type,
         }),
         _ => json!({
@@ -695,7 +716,8 @@ fn record_type_for_hook(event_type: &str) -> &'static str {
         "UserPromptSubmit" => "INSTRUCTION_RECEIVED",
         "PreToolUse" | "PermissionRequest" => "ACTION_TAKEN",
         "PostToolUse" => "RESULT_RECEIVED",
-        "Stop" => "SESSION_END",
+        "Stop" => "TURN_END",
+        "SessionEnd" => "SESSION_END",
         _ => "CLAUDE_LIFECYCLE",
     }
 }
@@ -726,7 +748,7 @@ impl HookEvent {
             json!([{
                 "type": "command",
                 "command": hook_command(hook_bin, self.name, state_dir),
-                "timeout": 15,
+                "timeout": if self.name == "SessionEnd" { 3 } else { 15 },
                 "statusMessage": self.status,
             }]),
         );
@@ -1045,6 +1067,11 @@ fn action_id(payload: &Value) -> String {
         }
     })
     .unwrap_or_else(|| stable_id("act", payload))
+}
+
+fn turn_id(payload: &Value) -> String {
+    first_string_by_key(payload, &["turn_id", "turnId"])
+        .unwrap_or_else(|| stable_id("turn", payload))
 }
 
 fn scrub_environment() -> Value {
@@ -1547,8 +1574,21 @@ mod tests {
         );
         assert_eq!(record_type_for_hook("PreToolUse"), "ACTION_TAKEN");
         assert_eq!(record_type_for_hook("PostToolUse"), "RESULT_RECEIVED");
-        assert_eq!(record_type_for_hook("Stop"), "SESSION_END");
+        assert_eq!(record_type_for_hook("Stop"), "TURN_END");
+        assert_eq!(record_type_for_hook("SessionEnd"), "SESSION_END");
         assert_eq!(record_type_for_hook("Other"), "CLAUDE_LIFECYCLE");
+    }
+
+    #[test]
+    fn only_session_end_stops_the_heartbeat_daemon() {
+        assert!(!heartbeat_stop_requested("Stop"));
+        assert!(heartbeat_stop_requested("SessionEnd"));
+    }
+
+    #[test]
+    fn installs_turn_and_session_end_hooks() {
+        assert!(EVENTS.iter().any(|event| event.name == "Stop"));
+        assert!(EVENTS.iter().any(|event| event.name == "SessionEnd"));
     }
 
     #[test]

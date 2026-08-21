@@ -633,7 +633,7 @@ dependencies = [
 
 [[package]]
 name = "tally"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "tally-claude",
  "tally-codex",
@@ -642,7 +642,7 @@ dependencies = [
 
 [[package]]
 name = "tally-claude"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "fs2",
@@ -653,7 +653,7 @@ dependencies = [
 
 [[package]]
 name = "tally-codex"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "chrono",
  "fs2",
@@ -664,10 +664,11 @@ dependencies = [
 
 [[package]]
 name = "tally-common"
-version = "0.1.7"
+version = "0.1.8"
 dependencies = [
  "fs2",
  "getrandom 0.3.4",
+ "libc",
  "rpassword",
  "serde_json",
  "sha2",

@@ -552,7 +552,29 @@ pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
     #[cfg(windows)]
     spawn_background_windows(executable, args)?;
 
-    #[cfg(not(windows))]
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+
+        let mut command = Command::new(executable);
+        command
+            .args(args)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null());
+        // Hook runners may terminate their process group after each hook exits.
+        unsafe {
+            command.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+        command.spawn()?;
+    }
+
+    #[cfg(all(not(unix), not(windows)))]
     Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
@@ -937,7 +959,7 @@ mod tests {
     use super::{
         claim_agent_heartbeat, executable_is_in_app_bundle, heartbeat_interval_seconds,
         install_options, mark_tally_data_directory, record_agent_activity, remove_tally_data,
-        response_body_error, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        response_body_error, spawn_background, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -976,6 +998,37 @@ mod tests {
             r#""C:\Program Files\Tally\tally.exe" codex heartbeat-daemon "session with spaces""#
         );
         assert_eq!(command_line.last(), Some(&0));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn starts_background_processes_in_a_new_session() {
+        use std::thread;
+        use std::time::{Duration, Instant};
+
+        let output_path = test_directory("background-session");
+        let output = output_path.to_string_lossy().into_owned();
+        spawn_background(
+            Path::new("/usr/bin/env"),
+            &[
+                "python3",
+                "-c",
+                "import os, sys; tmp = sys.argv[1] + '.tmp'; open(tmp, 'w').write(f'{os.getpid()} {os.getsid(0)}\\n'); os.replace(tmp, sys.argv[1])",
+                &output,
+            ],
+        )
+        .unwrap();
+
+        let deadline = Instant::now() + Duration::from_secs(5);
+        while !output_path.exists() && Instant::now() < deadline {
+            thread::sleep(Duration::from_millis(25));
+        }
+        let values = fs::read_to_string(&output_path).unwrap();
+        let mut values = values.split_whitespace();
+        let child_pid = values.next().unwrap().parse::<u32>().unwrap();
+        let child_session = values.next().unwrap().parse::<u32>().unwrap();
+        assert_eq!(child_pid, child_session);
+        fs::remove_file(output_path).unwrap();
     }
 
     #[test]
