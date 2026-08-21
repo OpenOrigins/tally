@@ -69,6 +69,10 @@ settings allow each client's configuration path and the ingest API URL to be
 changed. New installations default to the OpenOrigins Production ingest API;
 development endpoints are used only when explicitly entered.
 
+Quit and reopen Codex after installing or updating Tally. Tally records Codex
+Desktop turns through Codex's notification callback and keeps the command-line
+hooks for detailed tool and lifecycle records.
+
 Select **Remove Tally** to remove hooks, credentials, and installed hook helpers.
 Queued records and local logs are retained by default so they remain available
 after a reinstall. Select **Delete queued records and local logs** on the

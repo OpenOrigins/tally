@@ -2,6 +2,19 @@
 
 All notable changes to Tally are documented in this file.
 
+## Unreleased
+
+### Fixed
+
+- Register a Codex turn-completion callback so Codex Desktop forwards session,
+  instruction, and turn records even when Desktop does not execute hooks.
+- Preserve, chain, and restore an existing Codex notification command during
+  install, update, and uninstall.
+- Suppress callback records when command-line hooks already recorded the same
+  turn, and deduplicate repeated Desktop callbacks.
+- Added native regression coverage for Desktop records, duplicate suppression,
+  existing notification chaining, and uninstall restoration.
+
 ## 0.1.7 - 2026-08-21
 
 ### Fixed

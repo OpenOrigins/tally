@@ -15,6 +15,7 @@ import sys
 import tempfile
 import threading
 import time
+import tomllib
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -424,6 +425,15 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         ),
         encoding="utf-8",
     )
+    codex_toml_path = config_path.parent / "config.toml"
+    previous_notify = [sys.executable, "-c", "pass"]
+    if agent == "codex":
+        codex_toml_path.write_text(
+            "# existing Codex settings must survive Tally\n"
+            'model = "gpt-test"\n'
+            f"notify = {json.dumps(previous_notify)}\n",
+            encoding="utf-8",
+        )
     log_root = root / agent / "logs"
     state_dir = config_path.parent / "tally" / "logs" / ".state"
     api_key_path = state_dir / "api_key.txt"
@@ -457,7 +467,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         legacy_installed_binary.write_bytes(b"legacy unsigned hook executable")
 
     api_key = secrets.token_urlsafe(32)
-    server = CaptureServer([config_path, api_key_path, api_config_path, installed_binary])
+    expected_install_files = [config_path, api_key_path, api_config_path, installed_binary]
+    if agent == "codex":
+        expected_install_files.extend(
+            [codex_toml_path, state_dir / "previous-codex-notify.json"]
+        )
+    server = CaptureServer(expected_install_files)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
@@ -521,6 +536,85 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 handler.get("commandWindows") == handler["command"]
                 for handler in tally_handlers(config)
             )
+        if agent == "codex":
+            codex_toml = tomllib.loads(codex_toml_path.read_text(encoding="utf-8"))
+            assert codex_toml["model"] == "gpt-test"
+            assert codex_toml["notify"] == [
+                str(installed_binary),
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+            ]
+            assert (
+                json.loads(
+                    (state_dir / "previous-codex-notify.json").read_text(encoding="utf-8")
+                )["command"]
+                == previous_notify
+            )
+
+            desktop_payload = {
+                "type": "agent-turn-complete",
+                "thread-id": "native-desktop-thread",
+                "turn-id": "native-desktop-turn-1",
+                "cwd": str(root),
+                "client": "codex-desktop",
+                "input-messages": ["desktop prompt"],
+                "last-assistant-message": "desktop response",
+            }
+            forwarded_before = len(server.recorded("/v1/tally/logs"))
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            desktop_requests = server.wait_for(
+                "/v1/tally/logs", count=forwarded_before + 3
+            )[forwarded_before:]
+            assert [request["body"]["record_type"] for request in desktop_requests] == [
+                "SESSION_START",
+                "INSTRUCTION_RECEIVED",
+                "TURN_END",
+            ]
+            assert all(
+                request["body"]["session_id"] == "native-desktop-thread"
+                for request in desktop_requests
+            )
+
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            time.sleep(0.5)
+            assert len(server.recorded("/v1/tally/logs")) == forwarded_before + 3
+
+            desktop_payload["turn-id"] = "native-desktop-turn-2"
+            desktop_payload["input-messages"] = ["second desktop prompt"]
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            second_turn = server.wait_for(
+                "/v1/tally/logs", count=forwarded_before + 5
+            )[forwarded_before + 3 :]
+            assert [request["body"]["record_type"] for request in second_turn] == [
+                "INSTRUCTION_RECEIVED",
+                "TURN_END",
+            ]
 
         run(
             binary,
@@ -558,6 +652,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         custom_config_path.parent.mkdir(parents=True)
         custom_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         custom_state_dir = custom_config_path.parent / "tally" / "logs" / ".state"
+        custom_codex_toml_path = custom_config_path.parent / "config.toml"
         custom_api_key_path = custom_state_dir / "api_key.txt"
         custom_api_config_path = custom_state_dir / "config.json"
         custom_installed_binary = installed_binary_path(custom_config_path, agent, env)
@@ -567,6 +662,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_api_config_path,
             custom_installed_binary,
         ]
+        if agent == "codex":
+            server.expected_files.extend(
+                [
+                    custom_codex_toml_path,
+                    custom_state_dir / "previous-codex-notify.json",
+                ]
+            )
         custom_installed = run(
             binary,
             agent,
@@ -608,6 +710,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         custom_gui_config_path.parent.mkdir(parents=True)
         custom_gui_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
         custom_gui_state_dir = custom_gui_config_path.parent / "tally" / "logs" / ".state"
+        custom_gui_codex_toml_path = custom_gui_config_path.parent / "config.toml"
         custom_gui_installed_binary = installed_binary_path(
             custom_gui_config_path, agent, env
         )
@@ -617,6 +720,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_gui_state_dir / "config.json",
             custom_gui_installed_binary,
         ]
+        if agent == "codex":
+            server.expected_files.extend(
+                [
+                    custom_gui_codex_toml_path,
+                    custom_gui_state_dir / "previous-codex-notify.json",
+                ]
+            )
         gui_result = gui_install(
             binary,
             agent,
@@ -652,6 +762,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert not custom_gui_installed_binary.exists()
         assert not (custom_gui_state_dir / "api_key.txt").exists()
         assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
+        if agent == "codex":
+            assert not custom_gui_codex_toml_path.exists()
 
         server.expected_files = [
             custom_gui_config_path,
@@ -684,18 +796,21 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert not log_root.exists(), "full uninstall retained local logs"
         assert custom_gui_config_path.exists(), "full uninstall deleted the client settings file"
         assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
+        if agent == "codex":
+            assert not custom_gui_codex_toml_path.exists()
 
         session_start = next(
             command
             for command in tally_commands(config)
             if command.endswith("hook SessionStart")
         )
+        forwarded_count = len(server.recorded("/v1/tally/logs"))
         run_installed_hook(
             session_start,
             env,
             {"session_id": "native-forwarding-session"},
         )
-        forwarded = server.wait_for("/v1/tally/logs")[-1]
+        forwarded = server.wait_for("/v1/tally/logs", count=forwarded_count + 1)[-1]
         assert header(forwarded, "x-api-key") == api_key
         assert forwarded["body"]["record_type"] == "SESSION_START"
 
@@ -752,8 +867,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert not custom_api_key_path.exists()
         assert not custom_api_config_path.exists()
         assert not custom_installed_binary.exists()
+        if agent == "codex":
+            assert not custom_codex_toml_path.exists()
 
-        server.expected_files = [config_path, api_key_path, api_config_path, installed_binary]
+        server.expected_files = expected_install_files
 
         stable_hooks = config_path.read_bytes()
         stable_key = api_key_path.read_bytes()
@@ -847,6 +964,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     assert not api_key_path.exists()
     assert not api_config_path.exists()
     assert not installed_binary.exists()
+    if agent == "codex":
+        restored_toml = tomllib.loads(codex_toml_path.read_text(encoding="utf-8"))
+        assert restored_toml["model"] == "gpt-test"
+        assert restored_toml["notify"] == previous_notify
+        assert "existing Codex settings must survive Tally" in codex_toml_path.read_text(
+            encoding="utf-8"
+        )
 
 
 def smoke_combined_install(source_binary: Path, root: Path) -> None:
