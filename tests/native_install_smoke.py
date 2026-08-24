@@ -89,6 +89,8 @@ def run_installed_hook(command: str, env: dict[str, str], payload: dict) -> None
 def tally_handlers(config: dict) -> list[dict]:
     handlers: list[dict] = []
     for groups in config.get("hooks", {}).values():
+        if not isinstance(groups, list):
+            continue
         for group in groups:
             for hook in group.get("hooks", []):
                 command = hook.get("command", "")
@@ -99,6 +101,39 @@ def tally_handlers(config: dict) -> list[dict]:
 
 def tally_commands(config: dict) -> list[str]:
     return [handler["command"] for handler in tally_handlers(config)]
+
+
+def read_client_config(path: Path, agent: str) -> dict:
+    return parse_client_config(path.read_bytes(), agent)
+
+
+def parse_client_config(contents: bytes, agent: str) -> dict:
+    text = contents.decode("utf-8")
+    return tomllib.loads(text) if agent == "codex" else json.loads(text)
+
+
+def fake_codex_cli(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        path = root / "codex.cmd"
+        path.write_text(
+            "@echo off\n"
+            'if "%1"=="--version" (echo codex-cli 0.149.1 & exit /b 0)\n'
+            'if "%1"=="features" (echo hooks stable true & exit /b 0)\n'
+            "exit /b 1\n",
+            encoding="ascii",
+        )
+    else:
+        path = root / "codex"
+        path.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "codex-cli 0.149.1"; exit 0; fi\n'
+            'if [ "$1" = "features" ] && [ "$2" = "list" ]; then echo "hooks stable true"; exit 0; fi\n'
+            "exit 1\n",
+            encoding="ascii",
+        )
+        path.chmod(0o755)
+    return path
 
 
 def command_references_path(command: str, path: Path) -> bool:
@@ -289,6 +324,9 @@ def gui_install(
             assert "Try another key" in html
             assert "Cancel" in html
             assert "Close" in html
+            assert "Approve the hooks in Codex CLI" in html
+            assert "Review hooks" in html
+            assert "Press <kbd>t</kbd> to trust all hooks" in html
             assert "Delete queued records and local logs" in html
             assert 'id="version"' in html
             assert 'src="/oo-logo-horizontal.png"' in html
@@ -331,6 +369,10 @@ def gui_install(
             client["id"]: client for client in status["clients"] if client["id"] in agent_ids
         }
         assert set(client_status) == set(agent_ids)
+        for agent_id in agent_ids:
+            assert client_status[agent_id]["available"] is True
+            if agent_id == "codex":
+                assert "codex-cli 0.149.1" in client_status[agent_id]["detectedVersion"]
         body = {
             "apiKey": api_key,
             "apiUrl": api_url,
@@ -348,10 +390,17 @@ def gui_install(
         }
         result, _ = gui_request(origin, token, "/api/install", body)
         assert result["connected"] is expect_connected
+        assert result["approvalRequired"] is ("codex" in agent_ids)
         assert api_key not in json.dumps(result)
         assert {client["id"] for client in result["clients"]} == set(agent_ids)
         if config_path is not None and len(agent_ids) == 1:
             assert result["clients"][0]["configPath"] == str(config_path)
+        for client in result["clients"]:
+            assert client["approvalRequired"] is (client["id"] == "codex")
+            if client["id"] == "codex":
+                assert "Review hooks" in client["approvalInstructions"]
+                assert "press `t` to trust all" in client["approvalInstructions"]
+                assert client["clientVersion"] == "codex-cli 0.149.1"
         if expect_connected:
             assert result["warning"] is None
         else:
@@ -450,28 +499,37 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
     home = root / agent / "home with spaces"
-    config_path = home / (".codex/hooks.json" if agent == "codex" else ".claude/settings.json")
+    config_path = home / (".codex/config.toml" if agent == "codex" else ".claude/settings.json")
     config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        json.dumps(
-            {
-                "theme": "dark",
-                "hooks": {
-                    "SessionStart": [
-                        {"hooks": [{"type": "command", "command": "echo keep"}]}
-                    ]
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
-    codex_toml_path = config_path.parent / "config.toml"
     previous_notify = [sys.executable, "-c", "pass"]
     if agent == "codex":
-        codex_toml_path.write_text(
+        config_path.write_text(
             "# existing Codex settings must survive Tally\n"
             'model = "gpt-test"\n'
-            f"notify = {json.dumps(previous_notify)}\n",
+            f"notify = {json.dumps(previous_notify)}\n\n"
+            "[[hooks.SessionStart]]\n"
+            'matcher = ".*"\n\n'
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            'command = "echo keep"\n'
+            "timeout = 5\n\n"
+            "[hooks.state]\n\n"
+            '[hooks.state."existing-hook"]\n'
+            'trusted_hash = "sha256:keep"\n',
+            encoding="utf-8",
+        )
+    else:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "theme": "dark",
+                    "hooks": {
+                        "SessionStart": [
+                            {"hooks": [{"type": "command", "command": "echo keep"}]}
+                        ]
+                    },
+                }
+            ),
             encoding="utf-8",
         )
     log_root = root / agent / "logs"
@@ -493,8 +551,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
     env.pop("CODEX_HOME", None)
     env.pop("CODEX_HOOKS_PATH", None)
+    env.pop("CODEX_CONFIG_PATH", None)
     env.pop("TALLY_CLAUDE_SETTINGS_PATH", None)
     env.pop("TALLY_STATE_DIR", None)
+    if agent == "codex":
+        env["TALLY_CODEX_CLI"] = str(fake_codex_cli(root / "fake-codex-cli"))
     installed_binary = installed_binary_path(config_path, agent, env)
     legacy_installed_binary = (
         config_path.parent
@@ -509,9 +570,23 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     api_key = secrets.token_urlsafe(32)
     expected_install_files = [config_path, api_key_path, api_config_path, installed_binary]
     if agent == "codex":
-        expected_install_files.extend(
-            [codex_toml_path, state_dir / "previous-codex-notify.json"]
+        expected_install_files.append(state_dir / "previous-codex-notify.json")
+        before_missing_cli = config_path.read_bytes()
+        missing_cli_env = env.copy()
+        missing_cli_env["TALLY_CODEX_CLI"] = str(root / "missing-codex-cli")
+        missing_cli = run(
+            binary,
+            agent,
+            "install",
+            "--api-key",
+            api_key,
+            env=missing_cli_env,
+            expected_code=1,
         )
+        assert "Codex CLI with lifecycle hook support is required" in missing_cli.stderr
+        assert config_path.read_bytes() == before_missing_cli
+        assert not api_key_path.exists()
+        assert not installed_binary.exists()
     server = CaptureServer(expected_install_files)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
@@ -529,6 +604,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert api_key not in installed.stdout
         assert api_key not in installed.stderr
         assert "dashboard connection confirmed" in installed.stdout
+        if agent == "codex":
+            assert "Action required" in installed.stdout
+            assert "Review hooks" in installed.stdout
+            assert "press `t` to trust all" in installed.stdout
+            assert "codex-cli 0.149.1" in installed.stdout
 
         handshakes = server.wait_for("/v1/tally/onboarding/client-connected")
         handshake = handshakes[-1]
@@ -555,8 +635,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             assert stat.S_IMODE(api_key_path.stat().st_mode) == 0o600
             assert stat.S_IMODE(api_config_path.stat().st_mode) == 0o600
 
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert config["theme"] == "dark"
+        config = read_client_config(config_path, agent)
+        assert config["model" if agent == "codex" else "theme"] == (
+            "gpt-test" if agent == "codex" else "dark"
+        )
         assert "echo keep" in json.dumps(config)
         assert api_key not in json.dumps(config)
         assert len(tally_commands(config)) == INSTALLED_EVENT_COUNT
@@ -571,13 +653,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert all(command_references_path(command, installed_binary) for command in commands), (
             f"hooks do not reference installed binary {installed_binary}: {commands}"
         )
-        if os.name == "nt" and agent == "codex":
-            assert all(
-                handler.get("commandWindows") == handler["command"]
-                for handler in tally_handlers(config)
-            )
         if agent == "codex":
-            codex_toml = tomllib.loads(codex_toml_path.read_text(encoding="utf-8"))
+            codex_toml = config
             assert codex_toml["model"] == "gpt-test"
             notify = codex_toml["notify"]
             assert notify[1:4] == ["codex", "notify", "--state-dir"]
@@ -589,6 +666,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 )["command"]
                 == previous_notify
             )
+            assert codex_toml["hooks"]["state"] == {
+                "existing-hook": {"trusted_hash": "sha256:keep"}
+            }, "Tally must leave hook approval to Codex CLI"
 
             desktop_payload = {
                 "type": "agent-turn-complete",
@@ -671,7 +751,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             f"--api-url={server.api_url}",
             env=env,
         )
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = read_client_config(config_path, agent)
         assert (
             len(tally_commands(config)) == INSTALLED_EVENT_COUNT
         ), "reinstall duplicated hook handlers"
@@ -685,7 +765,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             server.api_url,
             expect_connected=True,
         )
-        config = json.loads(config_path.read_text(encoding="utf-8"))
+        config = read_client_config(config_path, agent)
         assert (
             len(tally_commands(config)) == INSTALLED_EVENT_COUNT
         ), "GUI reinstall duplicated hook handlers"
@@ -694,12 +774,14 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             root
             / agent
             / "custom config with spaces"
-            / ("hooks.json" if agent == "codex" else "settings.json")
+            / ("config.toml" if agent == "codex" else "settings.json")
         )
         custom_config_path.parent.mkdir(parents=True)
-        custom_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_config_path.write_text(
+            'model = "custom"\n' if agent == "codex" else json.dumps({"hooks": {}}),
+            encoding="utf-8",
+        )
         custom_state_dir = custom_config_path.parent / "tally" / "logs" / ".state"
-        custom_codex_toml_path = custom_config_path.parent / "config.toml"
         custom_api_key_path = custom_state_dir / "api_key.txt"
         custom_api_config_path = custom_state_dir / "config.json"
         custom_installed_binary = installed_binary_path(custom_config_path, agent, env)
@@ -710,12 +792,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_installed_binary,
         ]
         if agent == "codex":
-            server.expected_files.extend(
-                [
-                    custom_codex_toml_path,
-                    custom_state_dir / "previous-codex-notify.json",
-                ]
-            )
+            server.expected_files.append(custom_state_dir / "previous-codex-notify.json")
         custom_installed = run(
             binary,
             agent,
@@ -736,7 +813,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if os.name != "nt":
             assert stat.S_IMODE(custom_api_key_path.stat().st_mode) == 0o600
             assert stat.S_IMODE(custom_api_config_path.stat().st_mode) == 0o600
-        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        custom_config = read_client_config(custom_config_path, agent)
         custom_commands = tally_commands(custom_config)
         assert len(custom_commands) == INSTALLED_EVENT_COUNT
         assert all(
@@ -752,12 +829,16 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             root
             / agent
             / "custom gui config with spaces"
-            / ("hooks.json" if agent == "codex" else "settings.json")
+            / ("config.toml" if agent == "codex" else "settings.json")
         )
         custom_gui_config_path.parent.mkdir(parents=True)
-        custom_gui_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_gui_config_path.write_text(
+            'model = "custom-gui"\n'
+            if agent == "codex"
+            else json.dumps({"hooks": {}}),
+            encoding="utf-8",
+        )
         custom_gui_state_dir = custom_gui_config_path.parent / "tally" / "logs" / ".state"
-        custom_gui_codex_toml_path = custom_gui_config_path.parent / "config.toml"
         custom_gui_installed_binary = installed_binary_path(
             custom_gui_config_path, agent, env
         )
@@ -768,11 +849,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_gui_installed_binary,
         ]
         if agent == "codex":
-            server.expected_files.extend(
-                [
-                    custom_gui_codex_toml_path,
-                    custom_gui_state_dir / "previous-codex-notify.json",
-                ]
+            server.expected_files.append(
+                custom_gui_state_dir / "previous-codex-notify.json"
             )
         gui_result = gui_install(
             binary,
@@ -808,9 +886,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert retained_log.exists(), "normal uninstall deleted local logs"
         assert not custom_gui_installed_binary.exists()
         assert not (custom_gui_state_dir / "api_key.txt").exists()
-        assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
-        if agent == "codex":
-            assert not custom_gui_codex_toml_path.exists()
+        assert not tally_commands(read_client_config(custom_gui_config_path, agent))
 
         server.expected_files = [
             custom_gui_config_path,
@@ -842,9 +918,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert not custom_gui_state_dir.exists(), "full uninstall retained queued state"
         assert not log_root.exists(), "full uninstall retained local logs"
         assert custom_gui_config_path.exists(), "full uninstall deleted the client settings file"
-        assert not tally_commands(json.loads(custom_gui_config_path.read_text(encoding="utf-8")))
-        if agent == "codex":
-            assert not custom_gui_codex_toml_path.exists()
+        assert not tally_commands(read_client_config(custom_gui_config_path, agent))
 
         session_start = next(
             command
@@ -909,13 +983,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         )
 
         run(binary, agent, "uninstall", "--config-path", str(custom_config_path), env=env)
-        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        custom_config = read_client_config(custom_config_path, agent)
         assert not tally_commands(custom_config)
         assert not custom_api_key_path.exists()
         assert not custom_api_config_path.exists()
         assert not custom_installed_binary.exists()
-        if agent == "codex":
-            assert not custom_codex_toml_path.exists()
 
         server.expected_files = expected_install_files
 
@@ -953,7 +1025,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert config_path.read_bytes() == stable_hooks
         assert api_key_path.read_bytes() == stable_key
         assert api_config_path.read_bytes() == stable_api_config
-        assert len(tally_commands(json.loads(stable_hooks))) == INSTALLED_EVENT_COUNT
+        assert len(tally_commands(parse_client_config(stable_hooks, agent))) == INSTALLED_EVENT_COUNT
     finally:
         server.shutdown()
         server.server_close()
@@ -1004,7 +1076,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     assert action_ids["ACTION_TAKEN"] == action_ids["RESULT_RECEIVED"]
 
     run(binary, agent, "uninstall", env=env)
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    config = read_client_config(config_path, agent)
     assert "echo keep" in json.dumps(config)
     assert not tally_commands(config)
     assert list(config_path.parent.glob(f"{config_path.name}.backup-*"))
@@ -1012,21 +1084,22 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     assert not api_config_path.exists()
     assert not installed_binary.exists()
     if agent == "codex":
-        restored_toml = tomllib.loads(codex_toml_path.read_text(encoding="utf-8"))
+        restored_toml = read_client_config(config_path, agent)
         assert restored_toml["model"] == "gpt-test"
         assert restored_toml["notify"] == previous_notify
-        assert "existing Codex settings must survive Tally" in codex_toml_path.read_text(
+        assert "existing Codex settings must survive Tally" in config_path.read_text(
             encoding="utf-8"
         )
 
 
 def smoke_combined_install(source_binary: Path, root: Path) -> None:
     home = root / "combined" / "home"
-    codex_config = home / ".codex" / "hooks.json"
+    codex_config = home / ".codex" / "config.toml"
     claude_config = home / ".claude" / "settings.json"
-    for config in (codex_config, claude_config):
-        config.parent.mkdir(parents=True, exist_ok=True)
-        config.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+    codex_config.write_text('model = "combined"\n', encoding="utf-8")
+    claude_config.parent.mkdir(parents=True, exist_ok=True)
+    claude_config.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
 
     env = os.environ.copy()
     env.update({
@@ -1034,6 +1107,7 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
         "USERPROFILE": str(home),
         "TALLY_HOOK_HEARTBEAT_ENABLED": "0",
         "TALLY_FORWARDING_ENABLED": "0",
+        "TALLY_CODEX_CLI": str(fake_codex_cli(root / "combined-fake-codex")),
     })
     if os.name == "nt":
         env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
@@ -1063,7 +1137,7 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
             "codex", "claude-code"
         }
         assert (
-            len(tally_commands(json.loads(codex_config.read_text(encoding="utf-8"))))
+            len(tally_commands(read_client_config(codex_config, "codex")))
             == INSTALLED_EVENT_COUNT
         )
         assert (
@@ -1299,6 +1373,61 @@ def assert_windows_application_icon(binary: Path) -> None:
     )
 
 
+def smoke_gui_requires_codex_cli(binary: Path, root: Path) -> None:
+    home = root / "missing-codex-cli" / "home"
+    url_file = root / "missing-codex-cli.gui-url"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TALLY_CODEX_CLI": str(root / "does-not-exist"),
+            "TALLY_GUI_NO_OPEN": "1",
+            "TALLY_GUI_URL_FILE": str(url_file),
+        }
+    )
+    process = subprocess.Popen(
+        [str(binary), "gui"],
+        text=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not url_file.exists() and time.monotonic() < deadline:
+            assert process.poll() is None, "GUI exited while checking for Codex CLI"
+            time.sleep(0.05)
+        split = urlsplit(url_file.read_text(encoding="utf-8"))
+        token = parse_qs(split.fragment)["token"][0]
+        origin = f"{split.scheme}://{split.netloc}"
+        status, _ = gui_request(origin, token, "/api/status", {})
+        codex = next(client for client in status["clients"] if client["id"] == "codex")
+        assert codex["available"] is False
+        assert "Codex CLI is required for Codex Desktop" in codex["availabilityDetail"]
+        failed, _ = gui_request(
+            origin,
+            token,
+            "/api/install",
+            {
+                "apiKey": "fake-agent-key",
+                "apiUrl": "http://127.0.0.1:9/v1/tally/logs",
+                "clients": [{"id": "codex", "configPath": codex["configPath"]}],
+            },
+            expected_status=400,
+        )
+        assert "Codex CLI with lifecycle hook support is required" in failed["error"]
+        assert not (home / ".codex" / "config.toml").exists()
+        assert not (home / ".codex" / "tally").exists()
+        gui_request(origin, token, "/api/shutdown", {})
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=5)
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tally", type=Path, required=True)
@@ -1306,6 +1435,7 @@ def main() -> None:
     assert_windows_application_icon(args.tally.resolve())
     with tempfile.TemporaryDirectory(prefix="tally-native-smoke-") as directory:
         root = Path(directory)
+        smoke_gui_requires_codex_cli(args.tally.resolve(), root)
         smoke(args.tally.resolve(), "codex", root)
         smoke(args.tally.resolve(), "claude", root)
         smoke_combined_install(args.tally.resolve(), root)

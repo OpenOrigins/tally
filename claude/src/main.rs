@@ -512,6 +512,9 @@ pub fn install_desktop_hooks(
         installed_binary_path,
         backup_path: backup,
         handshake_error,
+        approval_required: false,
+        approval_instructions: None,
+        client_version: None,
     })
 }
 

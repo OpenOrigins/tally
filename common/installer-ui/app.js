@@ -36,6 +36,20 @@ async function load() {
   document.getElementById("title").textContent = "Connect Tally";
   document.getElementById("clientChoices").replaceChildren(...clients.map(clientChoice));
   document.getElementById("configPaths").replaceChildren(...clients.map(configPathField));
+  const unavailable = clients.filter((client) => !client.available);
+  const requirements = document.getElementById("clientRequirements");
+  requirements.hidden = unavailable.length === 0;
+  if (unavailable.length > 0) {
+    requirements.replaceChildren(
+      document.createTextNode(`${unavailable.map((client) => client.availabilityDetail).join(" ")} `),
+      Object.assign(document.createElement("a"), {
+        href: "https://developers.openai.com/codex/cli",
+        target: "_blank",
+        rel: "noreferrer",
+        textContent: "Open the Codex CLI install guide",
+      }),
+    );
+  }
   document.getElementById("apiUrl").value = status.defaultApiUrl;
   const installed = clients.some((client) => client.installed);
   document.getElementById("status").textContent = installed ? "Update" : "Setup";
@@ -48,12 +62,20 @@ function clientChoice(client) {
   label.className = "client-choice";
   const input = document.createElement("input");
   input.type = "checkbox";
-  input.checked = true;
+  input.checked = client.available;
+  input.disabled = !client.available;
   input.dataset.client = client.id;
   const text = document.createElement("span");
   text.textContent = client.product;
   const state = document.createElement("small");
-  state.textContent = client.installed ? "Installed" : "Ready";
+  if (!client.available) {
+    state.textContent = "CLI required";
+    label.title = client.availabilityDetail || "Required client is unavailable";
+  } else if (client.detectedVersion) {
+    state.textContent = client.installed ? "Installed" : `${client.detectedVersion} ready`;
+  } else {
+    state.textContent = client.installed ? "Installed" : "Ready";
+  }
   label.append(input, text, state);
   return label;
 }
@@ -107,9 +129,11 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   const error = document.getElementById("error");
   const warning = document.getElementById("warning");
   const retryButton = document.getElementById("retryButton");
+  const approval = document.getElementById("approval");
   error.hidden = true;
   warning.hidden = true;
   retryButton.hidden = true;
+  approval.hidden = true;
   document.getElementById("resultMark").classList.remove("warning-mark");
   button.disabled = true;
   document.getElementById("progressTitle").textContent = "Installing Tally";
@@ -118,6 +142,12 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   try {
     const selected = selectedClients();
     if (selected.length === 0) throw new Error("Choose Codex, Claude Code, or both.");
+    const unavailable = selected
+      .map((selection) => clients.find((client) => client.id === selection.id))
+      .filter((client) => !client.available);
+    if (unavailable.length > 0) {
+      throw new Error(unavailable.map((client) => client.availabilityDetail).join(" "));
+    }
     const result = await api("/api/install", {
       apiKey: apiKeyInput.value,
       apiUrl: document.getElementById("apiUrl").value,
@@ -125,20 +155,34 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
     });
     apiKeyInput.value = "";
     showResultDetails(result.clients);
-    if (result.connected) {
+    const approvalClient = result.clients.find((client) => client.approvalRequired);
+    if (result.connected && !result.approvalRequired) {
       sessionStorage.removeItem("tallyInstallerToken");
       document.getElementById("doneTitle").textContent = "Tally is connected";
       document.getElementById("doneMessage").textContent = "Hooks are installed and the OpenOrigins dashboard confirmed every selected client.";
     } else {
       document.getElementById("resultMark").classList.add("warning-mark");
-      document.getElementById("doneTitle").textContent = "Tally is installed locally";
-      document.getElementById("doneMessage").textContent = "Local logging will continue, but the dashboard could not confirm this client automatically.";
-      warning.textContent = result.warning;
-      warning.hidden = false;
-      retryButton.hidden = false;
-      button.disabled = false;
+      if (result.approvalRequired) {
+        document.getElementById("doneTitle").textContent = "One step remains for Codex";
+        document.getElementById("doneMessage").textContent = "Tally is installed, but Codex will not run its lifecycle hooks until you approve them in Codex CLI.";
+        document.getElementById("approvalVersion").textContent = approvalClient?.clientVersion
+          ? `Detected ${approvalClient.clientVersion}.`
+          : "";
+        approval.hidden = false;
+      } else {
+        document.getElementById("doneTitle").textContent = "Tally is installed locally";
+        document.getElementById("doneMessage").textContent = "Local logging will continue, but the dashboard could not confirm this client automatically.";
+      }
+      if (!result.connected) {
+        warning.textContent = result.warning;
+        warning.hidden = false;
+        retryButton.hidden = false;
+        button.disabled = false;
+      }
     }
-    document.getElementById("status").textContent = result.connected ? "Connected" : "Installed with warning";
+    document.getElementById("status").textContent = result.approvalRequired
+      ? "Approval required"
+      : (result.connected ? "Connected" : "Installed with warning");
     show("done");
   } catch (requestError) {
     error.textContent = requestError.message;
@@ -203,6 +247,7 @@ document.getElementById("confirmUninstallButton").addEventListener("click", asyn
       : "Hooks, local credentials, and installed hook helpers were removed. Queued records and local logs were retained.";
     showResultDetails(result.clients, result.dataRemoved);
     document.getElementById("warning").hidden = true;
+    document.getElementById("approval").hidden = true;
     document.getElementById("retryButton").hidden = true;
     document.querySelector(".close-note").textContent = "The installer file remains. Close this window, then delete it or uninstall the Homebrew cask if you no longer need it.";
     document.getElementById("status").textContent = "Removed";

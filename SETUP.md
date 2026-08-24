@@ -11,6 +11,8 @@ Before you begin, ensure you have:
 - A valid work email address
 - Access to your email inbox
 - A supported AI client (Claude Code or Codex)
+- For Codex, the [Codex CLI](https://developers.openai.com/codex/cli) installed
+  and available as `codex` in Terminal or PowerShell
 - A payment method (required for card verification, including the Free plan)
 
 ---
@@ -147,6 +149,11 @@ In the **Download Tally** card, click **Download for your system**. This opens t
 Prefer to configure it yourself? Use the **Setup guide** card and click **Open the setup guide**.
 
 Open the installer, select Claude Code, Codex, or both, paste the Agent API key, and select **Install Tally**.
+
+For Codex, complete the approval step shown by Tally: quit Codex Desktop, run
+`codex` in Terminal or PowerShell, choose **Review hooks**, inspect the
+OpenOrigins Tally commands, then press `t` to trust all hooks. Quit the CLI and
+reopen Codex Desktop. Tally does not approve hooks on your behalf.
 
 ### Expected Result
 

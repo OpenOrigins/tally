@@ -23,6 +23,9 @@ pub struct GuiClient {
     pub config_path: PathBuf,
     pub state_dir: PathBuf,
     pub installed_binary_path: PathBuf,
+    pub available: bool,
+    pub availability_detail: Option<String>,
+    pub detected_version: Option<String>,
 }
 
 pub fn run_installer_gui<I, U>(
@@ -125,6 +128,9 @@ where
                     "keyPath": crate::api_key_path(&client.state_dir),
                     "installed": client.installed_binary_path.exists()
                         && crate::api_key_path(&client.state_dir).exists(),
+                    "available": client.available,
+                    "availabilityDetail": client.availability_detail,
+                    "detectedVersion": client.detected_version,
                 })
             })
             .collect::<Vec<_>>();
@@ -239,6 +245,9 @@ where
                             "installedBinaryPath": report.installed_binary_path,
                             "backupPath": report.backup_path,
                             "connected": report.handshake_error.is_none(),
+                            "approvalRequired": report.approval_required,
+                            "approvalInstructions": report.approval_instructions,
+                            "clientVersion": report.client_version,
                         })
                     })
                     .collect::<Vec<_>>();
@@ -248,6 +257,7 @@ where
                         json!({
                             "ok": true,
                             "connected": connected,
+                            "approvalRequired": reports.iter().any(|(_, report)| report.approval_required),
                             "warning": (!connected).then_some("The dashboard could not confirm every selected client automatically. Local logging is installed and will continue offline. Try the key again, or use \"Mark connected manually\" in the dashboard if needed."),
                             "clients": details,
                         }),

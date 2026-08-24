@@ -69,6 +69,9 @@ pub struct InstallReport {
     pub installed_binary_path: PathBuf,
     pub backup_path: Option<PathBuf>,
     pub handshake_error: Option<String>,
+    pub approval_required: bool,
+    pub approval_instructions: Option<String>,
+    pub client_version: Option<String>,
 }
 
 #[derive(Debug)]
