@@ -69,6 +69,10 @@ settings allow each client's configuration path and the ingest API URL to be
 changed. New installations default to the OpenOrigins Production ingest API;
 development endpoints are used only when explicitly entered.
 
+Quit and reopen Codex after installing or updating Tally. Tally records Codex
+Desktop turns through Codex's notification callback and keeps the command-line
+hooks for detailed tool and lifecycle records.
+
 Select **Remove Tally** to remove hooks, credentials, and installed hook helpers.
 Queued records and local logs are retained by default so they remain available
 after a reinstall. Select **Delete queued records and local logs** on the
@@ -82,6 +86,18 @@ Production. Re-enter an intentional custom API URL under **Advanced settings**.
 
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).
+
+## Compatibility
+
+Tally 0.1.9 is tested with Codex CLI/Desktop 0.149.0-alpha.4 and Claude Code
+2.1.223. It is expected to remain compatible with Codex versions that support
+`hooks.json` and the `notify` callback, and Claude Code versions that support
+command hooks.
+
+Codex CLI provides detailed lifecycle and tool records. Codex Desktop currently
+provides session, instruction, and turn records through the notification
+callback because its app server does not invoke `hooks.json` in the tested
+version.
 
 ## From Source
 

@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use toml_edit::{Array as TomlArray, DocumentMut, Item as TomlItem, Value as TomlValue};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -62,6 +63,10 @@ pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
             tally_common::forward_pending(&onboarding_state_dir())?;
             Ok(0)
         }
+        Some("notify") => {
+            handle_desktop_notification(args.collect())?;
+            Ok(0)
+        }
         Some("install-desktop-hooks" | "install") => {
             let options = tally_common::parse_install_options(args.collect::<Vec<_>>(), "Codex")?;
             install_desktop_hooks(options)?;
@@ -91,34 +96,45 @@ pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install or update Codex hooks\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n",
+        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install or update Codex hooks\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n  notify        Record a Codex Desktop turn notification\n",
         env!("CARGO_PKG_VERSION")
     );
 }
 
 fn record_hook_event(event_type: &str) -> Result<()> {
-    set_runtime_defaults();
-
     let raw = read_stdin()?;
     let payload = parse_payload(&raw);
+    record_payload_event(event_type, &raw, &payload, "codex-hooks", true)?;
+    if event_type == "Stop" {
+        mark_turn_complete(&onboarding_state_dir(), "hook", &payload)?;
+    }
+    Ok(())
+}
+
+fn record_payload_event(
+    event_type: &str,
+    raw: &str,
+    payload: &Value,
+    source: &str,
+    update_heartbeat: bool,
+) -> Result<()> {
+    set_runtime_defaults();
     if env::var("TALLY_RUN_ID").unwrap_or_default().is_empty() {
-        if let Some(run_id) = derive_run_id(&payload) {
+        if let Some(run_id) = derive_run_id(payload) {
             env::set_var("TALLY_RUN_ID", run_id);
         }
     }
 
-    let sink = AuditSink::new("codex-hooks")?;
-    let raw_ref = sink.private_payload(
-        &format!("hook_{}_{}", event_type, unique_suffix()),
-        &payload,
-    )?;
+    let sink = AuditSink::new(source)?;
+    let raw_ref =
+        sink.private_payload(&format!("hook_{}_{}", event_type, unique_suffix()), payload)?;
     let observed_at = utc_now();
     let metadata = json!({
         "observed_at": observed_at,
         "hook_event": event_type,
         "cwd": env::current_dir()?.display().to_string(),
-        "argv": env::args().collect::<Vec<_>>(),
-        "raw_stdin_hash": sha256_str(&raw),
+        "argv": scrub_argv(),
+        "raw_stdin_hash": sha256_str(raw),
         "environment": scrub_environment(),
         "git_state": light_git_state(&workspace_path()),
     });
@@ -127,7 +143,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         "schema_version": "tally-codex.v1",
         "event_id": event_id,
         "run_id": sink.run_id,
-        "source": "codex-hooks",
+        "source": source,
         "event_type": event_type,
         "observed_at": observed_at,
         "payload_hash": raw_ref["hash"],
@@ -135,15 +151,17 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         "metadata": metadata,
     });
 
-    sink.append_jsonl("codex-hooks", &event)?;
-    update_heartbeat_state(
-        &sink,
-        event_type,
-        &payload,
-        event["observed_at"].as_str().unwrap_or(&utc_now()),
-    )?;
+    sink.append_jsonl(source, &event)?;
+    if update_heartbeat {
+        update_heartbeat_state(
+            &sink,
+            event_type,
+            payload,
+            event["observed_at"].as_str().unwrap_or(&utc_now()),
+        )?;
+    }
 
-    let mut record = build_tally_record(&sink, event_type, &payload, &raw_ref, &metadata);
+    let mut record = build_tally_record(&sink, event_type, payload, &raw_ref, &metadata);
     record["record_id"] = Value::String(format!(
         "rec_{}",
         event["event_id"]
@@ -153,6 +171,124 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     ));
     record["audit_event_id"] = event["event_id"].clone();
     sink.write_tally_record(&record)?;
+    Ok(())
+}
+
+fn handle_desktop_notification(arguments: Vec<String>) -> Result<()> {
+    let mut state_dir = None;
+    let mut raw = None;
+    let mut args = arguments.into_iter();
+    while let Some(argument) = args.next() {
+        match argument.as_str() {
+            "--state-dir" => {
+                state_dir = Some(PathBuf::from(
+                    args.next().ok_or("--state-dir requires a value")?,
+                ));
+            }
+            _ if argument.starts_with("--state-dir=") => {
+                state_dir = Some(PathBuf::from(&argument["--state-dir=".len()..]));
+            }
+            _ if raw.is_none() => raw = Some(argument),
+            _ => return Err("notify accepts exactly one JSON payload".into()),
+        }
+    }
+    if let Some(state_dir) = state_dir {
+        env::set_var("TALLY_STATE_DIR", state_dir);
+    }
+    let raw = raw.ok_or("notify requires the JSON payload supplied by Codex")?;
+    let result = record_desktop_turn(&raw);
+    if let Err(error) = run_previous_notify(&raw) {
+        eprintln!("Warning: the previous Codex notification command failed: {error}");
+    }
+    result
+}
+
+fn record_desktop_turn(raw: &str) -> Result<()> {
+    let payload = parse_payload(raw);
+    if payload["type"].as_str() != Some("agent-turn-complete") {
+        return Ok(());
+    }
+    let session_id = first_string_by_key(&payload, &["thread-id"])
+        .ok_or("Codex notification is missing thread-id")?;
+    let turn_id = first_string_by_key(&payload, &["turn-id"])
+        .ok_or("Codex notification is missing turn-id")?;
+    env::set_var(
+        "TALLY_RUN_ID",
+        safe_slug(&format!("codex_{session_id}"), "codex-session"),
+    );
+
+    let state_dir = onboarding_state_dir();
+    let marker_dir = state_dir.join("desktop-notifications");
+    fs::create_dir_all(&marker_dir)?;
+    let marker_key = stable_id("turn", &json!([session_id, turn_id]));
+    let lock_path = marker_dir.join(format!("{marker_key}.lock"));
+    let lock = OpenOptions::new()
+        .create(true)
+        .read(true)
+        .write(true)
+        .truncate(false)
+        .open(lock_path)?;
+    lock.lock_exclusive()?;
+
+    let completed_path = marker_dir.join(format!("{marker_key}.json"));
+    if completed_path.exists()
+        || turn_marker_path(&state_dir, "hook", &payload).is_some_and(|p| p.exists())
+    {
+        FileExt::unlock(&lock)?;
+        return Ok(());
+    }
+
+    let base = json!({
+        "session_id": session_id,
+        "turn_id": turn_id,
+        "cwd": payload["cwd"],
+        "client": payload["client"],
+        "desktop_notification": true,
+    });
+    let session_marker = marker_dir.join(format!(
+        "{}.session.json",
+        stable_id("session", &Value::String(session_id.clone()))
+    ));
+    if !session_marker.exists() {
+        record_payload_event("SessionStart", raw, &base, "codex-desktop", false)?;
+        write_json_atomic(
+            &session_marker,
+            &json!({"session_id": session_id, "observed_at": utc_now()}),
+        )?;
+    }
+
+    let prompt = payload["input-messages"]
+        .as_array()
+        .map(|messages| {
+            messages
+                .iter()
+                .filter_map(Value::as_str)
+                .collect::<Vec<_>>()
+                .join("\n")
+        })
+        .unwrap_or_default();
+    let mut instruction = base.clone();
+    instruction["prompt"] = Value::String(prompt);
+    record_payload_event(
+        "UserPromptSubmit",
+        raw,
+        &instruction,
+        "codex-desktop",
+        false,
+    )?;
+
+    let mut turn_end = base;
+    turn_end["last_assistant_message"] = payload["last-assistant-message"].clone();
+    record_payload_event("Stop", raw, &turn_end, "codex-desktop", false)?;
+    write_json_atomic(
+        &completed_path,
+        &json!({
+            "session_id": session_id,
+            "turn_id": turn_id,
+            "observed_at": utc_now(),
+        }),
+    )?;
+    FileExt::unlock(&lock)?;
     Ok(())
 }
 
@@ -430,6 +566,8 @@ pub fn install_desktop_hooks(
     let hooks_path = effective_hooks_path(options.config_path.as_deref());
     let state_dir = state_dir_for_hooks_path(&hooks_path);
     let installed_binary_path = installed_binary_path_for_hooks_path(&hooks_path);
+    let codex_config_path = codex_config_path_for_hooks_path(&hooks_path);
+    let previous_notify_path = previous_notify_path(&state_dir);
     fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
     tally_common::mark_tally_data_directory(&log_root())?;
     let source_binary = tally_common::installation_source_executable()?;
@@ -452,7 +590,10 @@ pub fn install_desktop_hooks(
     }
 
     let backup = backup_if_exists(&hooks_path)?;
+    let codex_config_backup = backup_if_exists(&codex_config_path)?;
     let hooks_snapshot = tally_common::FileSnapshot::capture(&hooks_path)?;
+    let codex_config_snapshot = tally_common::FileSnapshot::capture(&codex_config_path)?;
+    let previous_notify_snapshot = tally_common::FileSnapshot::capture(&previous_notify_path)?;
     let key_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
     let api_config_snapshot =
@@ -475,6 +616,12 @@ pub fn install_desktop_hooks(
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
         tally_common::write_credentials(&state_dir, &options)?;
         write_json_atomic(&hooks_path, &config)?;
+        install_desktop_notify(
+            &codex_config_path,
+            &installed_binary_path,
+            &state_dir,
+            &previous_notify_path,
+        )?;
         if let Err(error) =
             tally_common::remove_legacy_installed_executable(&hooks_path, "tally-codex")
         {
@@ -484,6 +631,8 @@ pub fn install_desktop_hooks(
     })();
     if let Err(error) = install_result {
         let _ = hooks_snapshot.restore();
+        let _ = codex_config_snapshot.restore();
+        let _ = previous_notify_snapshot.restore();
         let _ = key_snapshot.restore();
         let _ = api_config_snapshot.restore();
         let _ = binary_snapshot.restore();
@@ -496,7 +645,14 @@ pub fn install_desktop_hooks(
     if let Some(backup) = backup.as_ref() {
         println!("Backed up previous hooks file to {}", backup.display());
     }
+    if let Some(backup) = codex_config_backup.as_ref() {
+        println!("Backed up previous Codex config to {}", backup.display());
+    }
     println!("Hook binary: {hook_bin}");
+    println!(
+        "Codex Desktop notifications: {}",
+        codex_config_path.display()
+    );
     println!("Logs: {}", log_root().display());
     println!(
         "Agent API key: stored securely at {}",
@@ -536,6 +692,12 @@ pub fn uninstall_desktop_hooks_with_options(
     let hooks_path = effective_hooks_path(config_path.as_deref());
     let state_dir = state_dir_for_hooks_path(&hooks_path);
     let logs_path = log_root();
+    uninstall_desktop_notify(
+        &codex_config_path_for_hooks_path(&hooks_path),
+        &installed_binary_path_for_hooks_path(&hooks_path),
+        &state_dir,
+        &previous_notify_path(&state_dir),
+    )?;
     if hooks_path.exists() {
         let mut config = read_json_file(&hooks_path)?;
         if !config.is_object() || !config.get("hooks").map(Value::is_object).unwrap_or(false) {
@@ -919,6 +1081,227 @@ impl AuditSink {
     }
 }
 
+fn codex_config_path_for_hooks_path(hooks_path: &Path) -> PathBuf {
+    hooks_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join("config.toml")
+}
+
+fn previous_notify_path(state_dir: &Path) -> PathBuf {
+    state_dir.join("previous-codex-notify.json")
+}
+
+fn tally_notify_command(binary_path: &Path, state_dir: &Path) -> Vec<String> {
+    vec![
+        binary_path.display().to_string(),
+        "codex".to_string(),
+        "notify".to_string(),
+        "--state-dir".to_string(),
+        state_dir.display().to_string(),
+    ]
+}
+
+fn toml_notify_command(document: &DocumentMut) -> Result<Option<Vec<String>>> {
+    let Some(item) = document.get("notify") else {
+        return Ok(None);
+    };
+    let array = item
+        .as_array()
+        .ok_or("Codex config notify must be an array of command arguments")?;
+    let mut command = Vec::with_capacity(array.len());
+    for argument in array {
+        command.push(
+            argument
+                .as_str()
+                .ok_or("Codex config notify arguments must be strings")?
+                .to_string(),
+        );
+    }
+    if command.is_empty() {
+        return Err("Codex config notify command cannot be empty".into());
+    }
+    Ok(Some(command))
+}
+
+fn set_toml_notify_command(document: &mut DocumentMut, command: &[String]) {
+    let mut array = TomlArray::new();
+    for argument in command {
+        array.push(argument.as_str());
+    }
+    document["notify"] = TomlItem::Value(TomlValue::Array(array));
+}
+
+fn read_codex_config(path: &Path) -> Result<DocumentMut> {
+    if !path.exists() {
+        return Ok(DocumentMut::new());
+    }
+    Ok(fs::read_to_string(path)?.parse::<DocumentMut>()?)
+}
+
+fn install_desktop_notify(
+    config_path: &Path,
+    binary_path: &Path,
+    state_dir: &Path,
+    saved_notify_path: &Path,
+) -> Result<()> {
+    let config_existed = config_path.exists();
+    let mut document = read_codex_config(config_path)?;
+    let current = toml_notify_command(&document)?;
+    let tally_command = tally_notify_command(binary_path, state_dir);
+
+    if current.as_ref() != Some(&tally_command) {
+        write_json_atomic(
+            saved_notify_path,
+            &json!({
+                "config_existed": config_existed,
+                "command": current,
+            }),
+        )?;
+    } else if !saved_notify_path.exists() {
+        write_json_atomic(
+            saved_notify_path,
+            &json!({"config_existed": config_existed, "command": Value::Null}),
+        )?;
+    }
+
+    set_toml_notify_command(&mut document, &tally_command);
+    write_text_atomic(config_path, &document.to_string())
+}
+
+fn uninstall_desktop_notify(
+    config_path: &Path,
+    binary_path: &Path,
+    state_dir: &Path,
+    saved_notify_path: &Path,
+) -> Result<()> {
+    if !config_path.exists() {
+        remove_file_if_exists(saved_notify_path)?;
+        return Ok(());
+    }
+
+    let mut document = read_codex_config(config_path)?;
+    let current = toml_notify_command(&document)?;
+    let tally_command = tally_notify_command(binary_path, state_dir);
+    if current.as_ref() != Some(&tally_command) {
+        remove_file_if_exists(saved_notify_path)?;
+        return Ok(());
+    }
+
+    let saved = if saved_notify_path.exists() {
+        read_json_file(saved_notify_path)?
+    } else {
+        json!({"config_existed": true, "command": Value::Null})
+    };
+    let previous = saved["command"].as_array().map(|items| {
+        items
+            .iter()
+            .filter_map(Value::as_str)
+            .map(str::to_string)
+            .collect::<Vec<_>>()
+    });
+    if let Some(previous) = previous.filter(|command| !command.is_empty()) {
+        set_toml_notify_command(&mut document, &previous);
+    } else {
+        document.remove("notify");
+    }
+
+    if !saved["config_existed"].as_bool().unwrap_or(true) && document.is_empty() {
+        remove_file_if_exists(config_path)?;
+    } else {
+        write_text_atomic(config_path, &document.to_string())?;
+    }
+    remove_file_if_exists(saved_notify_path)?;
+    Ok(())
+}
+
+fn run_previous_notify(raw: &str) -> Result<()> {
+    let path = previous_notify_path(&onboarding_state_dir());
+    if !path.exists() {
+        return Ok(());
+    }
+    let saved = read_json_file(&path)?;
+    let Some(command) = saved["command"].as_array() else {
+        return Ok(());
+    };
+    let command = command
+        .iter()
+        .map(|item| {
+            item.as_str()
+                .map(str::to_string)
+                .ok_or("saved Codex notify argument is not a string")
+        })
+        .collect::<std::result::Result<Vec<_>, _>>()?;
+    let Some(program) = command.first() else {
+        return Ok(());
+    };
+    let status = Command::new(program)
+        .args(&command[1..])
+        .arg(raw)
+        .status()?;
+    if !status.success() {
+        return Err(format!("notification command exited with {status}").into());
+    }
+    Ok(())
+}
+
+fn turn_marker_path(state_dir: &Path, kind: &str, payload: &Value) -> Option<PathBuf> {
+    let session_id = first_string_by_key(
+        payload,
+        &["session_id", "thread_id", "thread-id", "conversation_id"],
+    )?;
+    let turn_id = first_string_by_key(payload, &["turn_id", "turnId", "turn-id"])?;
+    Some(state_dir.join("completed-turns").join(format!(
+        "{}.{}.json",
+        kind,
+        stable_id("turn", &json!([session_id, turn_id]))
+    )))
+}
+
+fn mark_turn_complete(state_dir: &Path, kind: &str, payload: &Value) -> Result<()> {
+    let Some(path) = turn_marker_path(state_dir, kind, payload) else {
+        return Ok(());
+    };
+    write_json_atomic(&path, &json!({"observed_at": utc_now()}))
+}
+
+fn write_text_atomic(path: &Path, value: &str) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    #[cfg(unix)]
+    let mode = {
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0o600)
+    };
+    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), random_hex(4)));
+    fs::write(&tmp, value)?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        fs::set_permissions(&tmp, fs::Permissions::from_mode(mode))?;
+    }
+    #[cfg(windows)]
+    if path.exists() {
+        fs::remove_file(path)?;
+    }
+    if let Err(error) = fs::rename(&tmp, path) {
+        let _ = fs::remove_file(&tmp);
+        return Err(error.into());
+    }
+    Ok(())
+}
+
+fn remove_file_if_exists(path: &Path) -> Result<()> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(error) => Err(error.into()),
+    }
+}
+
 fn remove_tally_hooks(config: &mut Value) -> usize {
     let Some(hooks) = config.get_mut("hooks").and_then(Value::as_object_mut) else {
         return 0;
@@ -1038,6 +1421,7 @@ fn extract_session_id(payload: &Value) -> Option<String> {
         &[
             "session_id",
             "thread_id",
+            "thread-id",
             "conversation_id",
             "conversationId",
         ],
@@ -1082,7 +1466,7 @@ fn action_id(payload: &Value) -> String {
 }
 
 fn turn_id(payload: &Value) -> String {
-    first_string_by_key(payload, &["turn_id", "turnId"])
+    first_string_by_key(payload, &["turn_id", "turnId", "turn-id"])
         .unwrap_or_else(|| stable_id("turn", payload))
 }
 
@@ -1123,6 +1507,21 @@ fn scrub_environment() -> Value {
         }
     }
     Value::Object(out)
+}
+
+fn scrub_argv() -> Vec<String> {
+    env::args()
+        .map(|argument| {
+            let is_notification_payload = serde_json::from_str::<Value>(&argument)
+                .ok()
+                .is_some_and(|value| value["type"].as_str() == Some("agent-turn-complete"));
+            if is_notification_payload {
+                "[REDACTED: Codex notification payload]".to_string()
+            } else {
+                argument
+            }
+        })
+        .collect()
 }
 
 fn light_git_state(cwd: &Path) -> Value {
@@ -1485,6 +1884,7 @@ fn remove_local_credentials_for_hooks_path(path: &Path) -> Result<()> {
     for path in [
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
+        previous_notify_path(&state_dir),
         installed_binary_path_for_hooks_path(path),
         tally_common::legacy_installed_executable_path(path, "tally-codex"),
     ] {
@@ -1576,6 +1976,57 @@ mod tests {
     fn extracts_session_id_recursively() {
         let payload = json!({"outer": {"conversationId": "conv-123"}});
         assert_eq!(extract_session_id(&payload).as_deref(), Some("conv-123"));
+        let notification = json!({"thread-id": "thread-123", "turn-id": "turn-123"});
+        assert_eq!(
+            extract_session_id(&notification).as_deref(),
+            Some("thread-123")
+        );
+        assert_eq!(turn_id(&notification), "turn-123");
+    }
+
+    #[test]
+    fn installs_and_restores_existing_desktop_notification() {
+        let directory = env::temp_dir().join(format!("tally-notify-config-{}", unique_suffix()));
+        let hooks_path = directory.join("hooks.json");
+        let config_path = codex_config_path_for_hooks_path(&hooks_path);
+        let state_dir = state_dir_for_hooks_path(&hooks_path);
+        let binary_path = installed_binary_path_for_hooks_path(&hooks_path);
+        let saved_path = previous_notify_path(&state_dir);
+        fs::create_dir_all(&directory).unwrap();
+        fs::write(
+            &config_path,
+            "# keep this comment\nmodel = \"gpt-test\"\nnotify = [\"keep-notify\", \"--flag\"]\n",
+        )
+        .unwrap();
+
+        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path).unwrap();
+        let installed = read_codex_config(&config_path).unwrap();
+        assert_eq!(installed["model"].as_str(), Some("gpt-test"));
+        assert_eq!(
+            toml_notify_command(&installed).unwrap(),
+            Some(tally_notify_command(&binary_path, &state_dir))
+        );
+        assert_eq!(
+            read_json_file(&saved_path).unwrap()["command"],
+            json!(["keep-notify", "--flag"])
+        );
+
+        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path).unwrap();
+        assert_eq!(
+            read_json_file(&saved_path).unwrap()["command"],
+            json!(["keep-notify", "--flag"])
+        );
+        uninstall_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path).unwrap();
+        let restored = read_codex_config(&config_path).unwrap();
+        assert_eq!(
+            toml_notify_command(&restored).unwrap(),
+            Some(vec!["keep-notify".to_string(), "--flag".to_string()])
+        );
+        assert!(fs::read_to_string(&config_path)
+            .unwrap()
+            .contains("# keep this comment"));
+        assert!(!saved_path.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

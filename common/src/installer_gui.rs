@@ -126,6 +126,7 @@ where
             .collect::<Vec<_>>();
         let response = json!({
             "ok": true,
+            "version": env!("CARGO_PKG_VERSION"),
             "clients": client_status,
             "defaultApiUrl": DEFAULT_API_URL,
         });
