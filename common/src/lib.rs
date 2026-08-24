@@ -5,6 +5,7 @@ use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
 use std::path::{Path, PathBuf};
+#[cfg(not(windows))]
 use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
@@ -956,10 +957,12 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
 
 #[cfg(test)]
 mod tests {
+    #[cfg(unix)]
+    use super::spawn_background;
     use super::{
         claim_agent_heartbeat, executable_is_in_app_bundle, heartbeat_interval_seconds,
         install_options, mark_tally_data_directory, record_agent_activity, remove_tally_data,
-        response_body_error, spawn_background, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        response_body_error, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     };
     use std::fs;
     use std::path::{Path, PathBuf};

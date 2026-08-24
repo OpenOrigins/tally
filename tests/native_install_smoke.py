@@ -544,13 +544,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if agent == "codex":
             codex_toml = tomllib.loads(codex_toml_path.read_text(encoding="utf-8"))
             assert codex_toml["model"] == "gpt-test"
-            assert codex_toml["notify"] == [
-                str(installed_binary),
-                "codex",
-                "notify",
-                "--state-dir",
-                str(state_dir),
-            ]
+            notify = codex_toml["notify"]
+            assert notify[1:4] == ["codex", "notify", "--state-dir"]
+            assert Path(notify[0]).resolve() == installed_binary.resolve()
+            assert Path(notify[4]).resolve() == state_dir.resolve()
             assert (
                 json.loads(
                     (state_dir / "previous-codex-notify.json").read_text(encoding="utf-8")

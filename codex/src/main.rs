@@ -1269,18 +1269,12 @@ fn write_text_atomic(path: &Path, value: &str) -> Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
+    #[cfg(unix)]
     let mode = {
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::metadata(path)
-                .map(|metadata| metadata.permissions().mode() & 0o777)
-                .unwrap_or(0o600)
-        }
-        #[cfg(not(unix))]
-        {
-            0o600
-        }
+        use std::os::unix::fs::PermissionsExt;
+        fs::metadata(path)
+            .map(|metadata| metadata.permissions().mode() & 0o777)
+            .unwrap_or(0o600)
     };
     let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), random_hex(4)));
     fs::write(&tmp, value)?;
