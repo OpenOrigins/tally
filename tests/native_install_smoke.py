@@ -271,16 +271,16 @@ def gui_install(
             assert "Close" in html
             assert "Delete queued records and local logs" in html
             assert 'id="version"' in html
-            assert 'src="/openorigins.webp"' in html
+            assert 'src="/oo-logo-horizontal.png"' in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert "img-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
 
-        with urlopen(f"{origin}/openorigins.webp", timeout=10) as response:
+        with urlopen(f"{origin}/oo-logo-horizontal.png", timeout=10) as response:
             logo = response.read()
-            assert response.headers["content-type"] == "image/webp"
-            assert logo.startswith(b"RIFF") and logo[8:12] == b"WEBP"
+            assert response.headers["content-type"] == "image/png"
+            assert logo.startswith(b"\x89PNG\r\n\x1a\n")
             assert response.headers["cache-control"] == "no-store"
 
         unauthorized, _ = gui_request(
