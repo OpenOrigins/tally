@@ -12,6 +12,7 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const INDEX: &str = include_str!("../installer-ui/index.html");
 const STYLES: &str = include_str!("../installer-ui/style.css");
 const APP: &str = include_str!("../installer-ui/app.js");
+const OPENORIGINS_LOGO: &[u8] = include_bytes!("../installer-ui/openorigins.webp");
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -96,6 +97,7 @@ where
             "/" | "/index.html" => static_response(INDEX, "text/html; charset=utf-8"),
             "/style.css" => static_response(STYLES, "text/css; charset=utf-8"),
             "/app.js" => static_response(APP, "text/javascript; charset=utf-8"),
+            "/openorigins.webp" => static_bytes_response(OPENORIGINS_LOGO, "image/webp"),
             _ => json_response(StatusCode(404), json!({"ok": false, "error": "Not found"})),
         };
         let _ = request.respond(response);
@@ -399,6 +401,13 @@ fn static_response(
     secured(Response::from_string(body).with_header(header("content-type", content_type)))
 }
 
+fn static_bytes_response(
+    body: &'static [u8],
+    content_type: &'static str,
+) -> Response<std::io::Cursor<Vec<u8>>> {
+    secured(Response::from_data(body).with_header(header("content-type", content_type)))
+}
+
 fn json_response(status: StatusCode, body: Value) -> Response<std::io::Cursor<Vec<u8>>> {
     secured(
         Response::from_string(body.to_string())
@@ -410,7 +419,7 @@ fn json_response(status: StatusCode, body: Value) -> Response<std::io::Cursor<Ve
 fn secured<T: Read + Send + 'static>(response: Response<T>) -> Response<T> {
     response
         .with_header(header("cache-control", "no-store"))
-        .with_header(header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'none'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"))
+        .with_header(header("content-security-policy", "default-src 'self'; script-src 'self'; style-src 'self'; connect-src 'self'; img-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'"))
         .with_header(header("referrer-policy", "no-referrer"))
         .with_header(header("x-content-type-options", "nosniff"))
         .with_header(header("x-frame-options", "DENY"))
