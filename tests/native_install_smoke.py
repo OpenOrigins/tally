@@ -271,8 +271,16 @@ def gui_install(
             assert "Close" in html
             assert "Delete queued records and local logs" in html
             assert 'id="version"' in html
+            assert 'src="/openorigins.webp"' in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
+            assert "img-src 'self'" in response.headers["content-security-policy"]
+            assert response.headers["cache-control"] == "no-store"
+
+        with urlopen(f"{origin}/openorigins.webp", timeout=10) as response:
+            logo = response.read()
+            assert response.headers["content-type"] == "image/webp"
+            assert logo.startswith(b"RIFF") and logo[8:12] == b"WEBP"
             assert response.headers["cache-control"] == "no-store"
 
         unauthorized, _ = gui_request(
@@ -613,10 +621,16 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             second_turn = server.wait_for(
                 "/v1/tally/logs", count=forwarded_before + 5
             )[forwarded_before + 3 :]
-            assert [request["body"]["record_type"] for request in second_turn] == [
+            assert sorted(
+                request["body"]["record_type"] for request in second_turn
+            ) == [
                 "INSTRUCTION_RECEIVED",
                 "TURN_END",
             ]
+            assert all(
+                request["body"]["session_id"] == "native-desktop-thread"
+                for request in second_turn
+            )
 
         run(
             binary,

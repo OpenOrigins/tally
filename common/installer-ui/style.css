@@ -49,8 +49,10 @@ header {
 }
 
 .brand, .status { margin: 0; }
-.brand { flex-shrink: 0; font-weight: 700; white-space: nowrap; }
-.brand span, .status { color: var(--muted); }
+.brand { display: flex; flex-shrink: 0; align-items: center; gap: 6px; font-weight: 700; white-space: nowrap; }
+.brand-mark { width: 28px; height: 28px; margin-right: 2px; overflow: hidden; flex: 0 0 28px; }
+.brand-mark img { display: block; width: auto; max-width: none; height: 28px; }
+.brand-separator, .status { color: var(--muted); }
 .brand .version { margin-left: 5px; font-size: 12px; font-weight: 500; }
 .status { font-size: 13px; text-align: right; }
 
@@ -167,7 +169,8 @@ button.danger-action:hover { filter: brightness(0.88); }
 @media (max-width: 520px) {
   body { padding: 0; place-items: stretch; background: var(--panel); }
   .installer { width: 100%; min-height: 100vh; padding: 22px 18px; border: 0; border-radius: 0; box-shadow: none; }
-  header { align-items: flex-start; }
+  header { align-items: flex-start; flex-wrap: wrap; }
+  .status { width: 100%; text-align: left; }
   .details div { grid-template-columns: 1fr; gap: 3px; }
 }
 
