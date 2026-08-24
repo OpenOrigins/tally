@@ -614,12 +614,19 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             desktop_requests = server.wait_for_matching(
                 "/v1/tally/logs", is_desktop_session, count=3
             )
-            assert sorted(
+            desktop_types = sorted(
                 request["body"]["record_type"] for request in desktop_requests
-            ) == [
+            )
+            assert desktop_types == [
                 "INSTRUCTION_RECEIVED",
                 "SESSION_START",
                 "TURN_END",
+            ], [
+                {
+                    "record_type": request["body"].get("record_type"),
+                    "record_id": request["body"].get("record_id"),
+                }
+                for request in desktop_requests
             ]
 
             run(
