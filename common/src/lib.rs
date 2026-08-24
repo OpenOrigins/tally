@@ -20,6 +20,7 @@ pub const DEFAULT_API_URL: &str = "https://api.prod.openorigins.com/v1/tally/log
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 600;
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 const TALLY_DATA_MARKER: &str = ".openorigins-tally-data";
+const FORWARD_CLAIM_STALE_AFTER: Duration = Duration::from_secs(30);
 #[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
 
@@ -535,18 +536,33 @@ pub fn enqueue_record(state_dir: &Path, record_path: &Path, executable: &Path) -
     }
     let queue_dir = state_dir.join("forward-queue");
     create_private_dir(&queue_dir)?;
-    let suffix = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_nanos();
-    let name = record_path
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let queued = queue_dir.join(format!("{suffix}-{}-{name}", std::process::id()));
-    atomic_write(&queued, &fs::read(record_path)?, 0o600)?;
+    let contents = fs::read(record_path)?;
+    let queue_name = forward_queue_name(&contents);
+    if !forward_record_is_pending(&queue_dir, &queue_name)? {
+        let queued = queue_dir.join(&queue_name);
+        if let Err(error) = atomic_write(&queued, &contents, 0o600) {
+            if !forward_record_is_pending(&queue_dir, &queue_name)? {
+                return Err(error.into());
+            }
+        }
+    }
 
     spawn_background(executable, &["forward-pending"])
+}
+
+fn forward_queue_name(contents: &[u8]) -> String {
+    format!("{:x}.json", Sha256::digest(contents))
+}
+
+fn forward_record_is_pending(queue_dir: &Path, queue_name: &str) -> io::Result<bool> {
+    if queue_dir.join(queue_name).exists() {
+        return Ok(true);
+    }
+    let claim_prefix = format!("{queue_name}.sending-");
+    Ok(fs::read_dir(queue_dir)?
+        .filter_map(std::result::Result::ok)
+        .filter_map(|entry| entry.file_name().into_string().ok())
+        .any(|name| name.starts_with(&claim_prefix)))
 }
 
 pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
@@ -695,6 +711,7 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
         .truncate(false)
         .open(state_dir.join("forward.lock"))?;
     lock.lock_exclusive()?;
+    recover_stale_forward_claims(&queue_dir)?;
 
     let api_key = fs::read_to_string(api_key_path(state_dir))?
         .trim()
@@ -711,20 +728,77 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
     let mut records = fs::read_dir(&queue_dir)?
         .filter_map(std::result::Result::ok)
         .map(|entry| entry.path())
-        .filter(|path| path.is_file())
+        .filter(|path| path.is_file() && path.extension().is_some_and(|value| value == "json"))
         .collect::<Vec<_>>();
     records.sort();
     for path in records {
-        let body = fs::read_to_string(&path)?;
-        serde_json::from_str::<Value>(&body)?;
+        let Some(claimed) = claim_forward_record(&path)? else {
+            continue;
+        };
+        let body = match fs::read_to_string(&claimed) {
+            Ok(body) => body,
+            Err(error) => {
+                restore_forward_claim(&path, &claimed)?;
+                return Err(error.into());
+            }
+        };
+        if let Err(error) = serde_json::from_str::<Value>(&body) {
+            restore_forward_claim(&path, &claimed)?;
+            return Err(error.into());
+        }
         if let Err(error) = post_json(api_url, &api_key, &body) {
+            restore_forward_claim(&path, &claimed)?;
             write_forward_status(state_dir, false, Some(&error))?;
             return Err(error.into());
         }
-        fs::remove_file(path)?;
+        fs::remove_file(claimed)?;
     }
     write_forward_status(state_dir, true, None)?;
     FileExt::unlock(&lock)?;
+    Ok(())
+}
+
+fn claim_forward_record(path: &Path) -> io::Result<Option<PathBuf>> {
+    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+        return Ok(None);
+    };
+    let claimed = path.with_file_name(format!("{name}.sending-{}", std::process::id()));
+    match fs::rename(path, &claimed) {
+        Ok(()) => Ok(Some(claimed)),
+        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+fn restore_forward_claim(path: &Path, claimed: &Path) -> io::Result<()> {
+    if path.exists() {
+        fs::remove_file(claimed)
+    } else {
+        fs::rename(claimed, path)
+    }
+}
+
+fn recover_stale_forward_claims(queue_dir: &Path) -> io::Result<()> {
+    for entry in fs::read_dir(queue_dir)?.filter_map(std::result::Result::ok) {
+        let claimed = entry.path();
+        let Some(name) = claimed.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        let Some((original_name, _)) = name.rsplit_once(".sending-") else {
+            continue;
+        };
+        let stale = claimed
+            .metadata()
+            .and_then(|metadata| metadata.modified())
+            .ok()
+            .and_then(|modified| modified.elapsed().ok())
+            .is_some_and(|elapsed| elapsed >= FORWARD_CLAIM_STALE_AFTER);
+        if !stale {
+            continue;
+        }
+        let original = queue_dir.join(original_name);
+        restore_forward_claim(&original, &claimed)?;
+    }
     Ok(())
 }
 
@@ -960,9 +1034,10 @@ mod tests {
     #[cfg(unix)]
     use super::spawn_background;
     use super::{
-        claim_agent_heartbeat, executable_is_in_app_bundle, heartbeat_interval_seconds,
-        install_options, mark_tally_data_directory, record_agent_activity, remove_tally_data,
-        response_body_error, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        claim_agent_heartbeat, claim_forward_record, executable_is_in_app_bundle,
+        forward_queue_name, forward_record_is_pending, heartbeat_interval_seconds, install_options,
+        mark_tally_data_directory, record_agent_activity, remove_tally_data, response_body_error,
+        restore_forward_claim, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1095,6 +1170,35 @@ mod tests {
                 );
             }
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn forwarding_queue_coalesces_and_atomically_claims_records() {
+        let directory = test_directory("forward-claim");
+        fs::create_dir_all(&directory).unwrap();
+        let body = br#"{"record_id":"rec-1"}"#;
+        assert_eq!(forward_queue_name(body), forward_queue_name(body));
+        assert_ne!(
+            forward_queue_name(body),
+            forward_queue_name(br#"{"record_id":"rec-2"}"#)
+        );
+
+        let queued = directory.join(forward_queue_name(body));
+        fs::write(&queued, body).unwrap();
+        let claimed = claim_forward_record(&queued).unwrap().unwrap();
+        assert!(!queued.exists());
+        assert!(claimed.exists());
+        assert!(claim_forward_record(&queued).unwrap().is_none());
+        assert!(forward_record_is_pending(
+            &directory,
+            queued.file_name().unwrap().to_str().unwrap()
+        )
+        .unwrap());
+
+        restore_forward_claim(&queued, &claimed).unwrap();
+        assert!(queued.exists());
+        assert!(!claimed.exists());
         fs::remove_dir_all(directory).unwrap();
     }
 
