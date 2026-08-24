@@ -476,6 +476,7 @@ fn codex_cli_candidates() -> Vec<PathBuf> {
         push_existing_candidate(&mut candidates, PathBuf::from(path));
     }
 
+    #[cfg(not(windows))]
     let home = PathBuf::from(home_dir());
     #[cfg(not(windows))]
     for path in [

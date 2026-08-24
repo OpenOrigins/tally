@@ -514,7 +514,9 @@ pub fn read_json_file(path: &Path) -> Result<Value> {
 }
 
 fn private_open_options() -> OpenOptions {
-    let mut options = OpenOptions::new();
+    let options = OpenOptions::new();
+    #[cfg(unix)]
+    let mut options = options;
     #[cfg(unix)]
     {
         use std::os::unix::fs::OpenOptionsExt;
@@ -696,7 +698,14 @@ fn shell_quote(value: &str) -> String {
 
 #[cfg(windows)]
 fn shell_quote(value: &str) -> String {
-    format!("\"{}\"", value.replace('"', "\\\""))
+    if value
+        .chars()
+        .all(|character| character.is_ascii_alphanumeric() || "_+-./:\\".contains(character))
+    {
+        value.to_string()
+    } else {
+        format!("\"{value}\"")
+    }
 }
 
 pub fn unique_suffix() -> String {
@@ -848,5 +857,18 @@ mod tests {
         FileExt::unlock(&second).unwrap();
         drop(second);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_hook_command_quotes_paths_but_not_fixed_arguments() {
+        let command = super::hook_command(
+            r"C:\Program Files\Tally\tally.exe",
+            "codex",
+            "SessionEnd",
+            std::path::Path::new(r"C:\Users\Test User\.codex\tally\logs\.state"),
+        );
+        assert!(command.contains(r#""C:\Program Files\Tally\tally.exe""#));
+        assert!(command.ends_with(" codex hook SessionEnd"));
     }
 }
