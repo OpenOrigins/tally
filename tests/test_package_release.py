@@ -82,6 +82,7 @@ def assert_app_layout(app: Path) -> None:
     assert_plist(plistlib.loads((app / "Contents" / "Info.plist").read_bytes()))
     assert (app / "Contents" / "Resources" / "LICENSE").read_bytes() == b"test license\n"
     assert (app / "Contents" / "Resources" / "Tally.icns").is_file()
+    assert_finder_uses_custom_icon(app)
     subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True)
     subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(helper)], check=True)
     with tempfile.TemporaryDirectory(prefix="tally-standalone-hook-") as directory:
@@ -93,6 +94,38 @@ def assert_app_layout(app: Path) -> None:
             check=True,
         )
         subprocess.run([str(installed_hook)], check=True)
+
+
+def assert_finder_uses_custom_icon(app: Path) -> None:
+    swift = r'''import AppKit
+import UniformTypeIdentifiers
+
+func png(_ image: NSImage) -> Data {
+    let size = 256
+    let bitmap = NSBitmapImageRep(
+        bitmapDataPlanes: nil,
+        pixelsWide: size,
+        pixelsHigh: size,
+        bitsPerSample: 8,
+        samplesPerPixel: 4,
+        hasAlpha: true,
+        isPlanar: false,
+        colorSpaceName: .deviceRGB,
+        bytesPerRow: 0,
+        bitsPerPixel: 0
+    )!
+    NSGraphicsContext.saveGraphicsState()
+    NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: bitmap)
+    image.draw(in: NSRect(x: 0, y: 0, width: size, height: size))
+    NSGraphicsContext.restoreGraphicsState()
+    return bitmap.representation(using: .png, properties: [:])!
+}
+
+let appIcon = png(NSWorkspace.shared.icon(forFile: CommandLine.arguments[1]))
+let placeholder = png(NSWorkspace.shared.icon(for: .applicationBundle))
+precondition(appIcon != placeholder, "Finder resolved the generic application icon")
+'''
+    subprocess.run(["swift", "-e", swift, str(app)], check=True)
 
 
 def assert_plist(plist: dict) -> None:
