@@ -11,9 +11,7 @@ license.workspace = true
 path = "src/main.rs"
 
 [dependencies]
-chrono.workspace = true
 fs2.workspace = true
 serde_json.workspace = true
-sha2.workspace = true
 tally-common.workspace = true
 toml_edit.workspace = true

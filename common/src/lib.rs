@@ -10,6 +10,7 @@ use std::process::{Command, Stdio};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
+pub mod agent_runtime;
 mod installer_gui;
 
 pub use installer_gui::{run_installer_gui, GuiClient};
@@ -191,6 +192,31 @@ impl FileSnapshot {
                 Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
                 Err(error) => Err(error),
             },
+        }
+    }
+}
+
+pub fn restore_snapshots(snapshots: &[&FileSnapshot]) -> io::Result<()> {
+    let errors = snapshots
+        .iter()
+        .filter_map(|snapshot| snapshot.restore().err().map(|error| error.to_string()))
+        .collect::<Vec<_>>();
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(io::Error::other(errors.join("; ")))
+    }
+}
+
+pub fn install_error_with_rollback(
+    error: Box<dyn std::error::Error>,
+    snapshots: &[&FileSnapshot],
+) -> Box<dyn std::error::Error> {
+    match restore_snapshots(snapshots) {
+        Ok(()) => error,
+        Err(rollback_error) => {
+            format!("{error}; restoring the previous installation also failed: {rollback_error}")
+                .into()
         }
     }
 }
@@ -399,9 +425,10 @@ pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<(
         Ok(())
     })();
     if let Err(error) = result {
-        let _ = key_snapshot.restore();
-        let _ = config_snapshot.restore();
-        return Err(error);
+        return Err(install_error_with_rollback(
+            error,
+            &[&key_snapshot, &config_snapshot],
+        ));
     }
     Ok(())
 }
@@ -1021,15 +1048,48 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
         fs::set_permissions(&tmp, fs::Permissions::from_mode(_mode))?;
     }
     drop(file);
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    if let Err(error) = fs::rename(&tmp, path) {
+    if let Err(error) = replace_file(&tmp, path) {
         let _ = fs::remove_file(tmp);
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(not(windows))]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    fs::rename(source, destination)
+}
+
+#[cfg(windows)]
+fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
+    use std::iter::once;
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::Storage::FileSystem::{
+        MoveFileExW, MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH,
+    };
+
+    let source = source
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let destination = destination
+        .as_os_str()
+        .encode_wide()
+        .chain(once(0))
+        .collect::<Vec<_>>();
+    let moved = unsafe {
+        MoveFileExW(
+            source.as_ptr(),
+            destination.as_ptr(),
+            MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+        )
+    };
+    if moved == 0 {
+        Err(io::Error::last_os_error())
+    } else {
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -1037,10 +1097,11 @@ mod tests {
     #[cfg(unix)]
     use super::spawn_background;
     use super::{
-        claim_agent_heartbeat, claim_forward_record, executable_is_in_app_bundle,
+        atomic_write, claim_agent_heartbeat, claim_forward_record, executable_is_in_app_bundle,
         forward_queue_name, forward_record_is_pending, heartbeat_interval_seconds, install_options,
         mark_tally_data_directory, record_agent_activity, remove_tally_data, response_body_error,
-        restore_forward_claim, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        restore_forward_claim, restore_snapshots, FileSnapshot, DEFAULT_API_URL,
+        DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1055,6 +1116,44 @@ mod tests {
             "tally-common-{label}-{}-{suffix}",
             std::process::id()
         ))
+    }
+
+    #[test]
+    fn atomic_write_replaces_existing_content() {
+        let directory = test_directory("atomic-write");
+        let path = directory.join("state.json");
+
+        atomic_write(&path, b"first", 0o600).unwrap();
+        atomic_write(&path, b"second", 0o600).unwrap();
+
+        assert_eq!(fs::read(&path).unwrap(), b"second");
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+                0o600
+            );
+        }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn snapshots_restore_existing_and_new_files() {
+        let directory = test_directory("snapshots");
+        let existing = directory.join("existing.txt");
+        let new = directory.join("new.txt");
+        atomic_write(&existing, b"original", 0o600).unwrap();
+        let existing_snapshot = FileSnapshot::capture(&existing).unwrap();
+        let new_snapshot = FileSnapshot::capture(&new).unwrap();
+
+        atomic_write(&existing, b"changed", 0o600).unwrap();
+        atomic_write(&new, b"created", 0o600).unwrap();
+        restore_snapshots(&[&existing_snapshot, &new_snapshot]).unwrap();
+
+        assert_eq!(fs::read(&existing).unwrap(), b"original");
+        assert!(!new.exists());
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

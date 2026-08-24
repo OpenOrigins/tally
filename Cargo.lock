@@ -667,10 +667,7 @@ dependencies = [
 name = "tally-claude"
 version = "0.1.9"
 dependencies = [
- "chrono",
- "fs2",
  "serde_json",
- "sha2",
  "tally-common",
 ]
 
@@ -678,10 +675,8 @@ dependencies = [
 name = "tally-codex"
 version = "0.1.9"
 dependencies = [
- "chrono",
  "fs2",
  "serde_json",
- "sha2",
  "tally-common",
  "toml_edit",
 ]
@@ -690,6 +685,7 @@ dependencies = [
 name = "tally-common"
 version = "0.1.9"
 dependencies = [
+ "chrono",
  "fs2",
  "getrandom 0.3.4",
  "libc",

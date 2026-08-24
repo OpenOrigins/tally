@@ -1,7 +1,4 @@
-use chrono::{SecondsFormat, Utc};
-use fs2::FileExt;
 use serde_json::{json, Value};
-use sha2::{Digest, Sha256};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
@@ -9,7 +6,12 @@ use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use tally_common::agent_runtime::{
+    backup_if_exists, env_enabled, expand_home, first_mapping_by_key, first_string_by_key,
+    home_dir, hook_command, light_git_state, parse_payload, random_hex, read_json_file, read_stdin,
+    run_id, safe_slug, set_default, sha256_str, sha256_value, stable_id, unique_suffix, utc_now,
+    workspace_path, write_json_atomic, AuditSink, AuditSinkConfig, HeartbeatFiles,
+};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
@@ -112,7 +114,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         }
     }
 
-    let sink = AuditSink::new("claude-hooks")?;
+    let sink = audit_sink("claude-hooks")?;
     let raw_ref = sink.private_payload(
         &format!("hook_{}_{}", event_type, unique_suffix()),
         &payload,
@@ -236,178 +238,23 @@ fn update_heartbeat_state(
     payload: &Value,
     observed_at: &str,
 ) -> Result<()> {
-    if !env_enabled("TALLY_HOOK_HEARTBEAT_ENABLED", true) {
-        return Ok(());
-    }
-
-    let session_id = extract_session_id(payload).unwrap_or_else(|| sink.run_id.clone());
-    let state_path = heartbeat_state_path(&sink.run_id);
-    let pid_path = heartbeat_pid_path(&sink.run_id);
-    write_json_atomic(
-        &state_path,
-        &json!({
-            "run_id": sink.run_id,
-            "session_id": session_id,
-            "updated_at": observed_at,
-            "last_hook_event": event_type,
-            "stop_requested": heartbeat_stop_requested(event_type),
-        }),
-    )?;
-    tally_common::record_agent_activity(&sink.state_dir, &agent_id(), unix_now_millis())?;
-
-    if event_type != "SessionStart" {
-        return Ok(());
-    }
-    if pid_path.exists() {
-        let pid = fs::read_to_string(&pid_path).unwrap_or_default();
-        if process_is_alive(pid.trim()) {
-            return Ok(());
-        }
-        let _ = fs::remove_file(&pid_path);
-    }
-
-    tally_common::spawn_background(&env::current_exe()?, &["claude", "heartbeat-daemon"])?;
-    Ok(())
+    tally_common::agent_runtime::update_heartbeat_state(
+        sink,
+        &HeartbeatFiles::new(&log_root(), &sink.run_id),
+        "claude",
+        event_type,
+        extract_session_id(payload),
+        observed_at,
+    )
 }
 
 fn run_heartbeat_daemon() -> Result<()> {
     set_runtime_defaults();
-
-    let sink = AuditSink::new("hook-heartbeat")?;
-    let state_path = heartbeat_state_path(&sink.run_id);
-    let pid_path = heartbeat_pid_path(&sink.run_id);
-    let Some(pid_file) = claim_heartbeat_daemon(&pid_path)? else {
-        return Ok(());
-    };
-    write_json_atomic(
-        &heartbeat_daemon_status_path(&sink.run_id),
-        &json!({
-            "pid": std::process::id(),
-            "status": "started",
-            "updated_at": utc_now(),
-            "state_path": state_path,
-        }),
-    )?;
-
-    let interval = configured_heartbeat_interval();
-    let poll_interval =
-        env_u64("TALLY_HOOK_HEARTBEAT_POLL_SECONDS", interval.min(30)).clamp(1, interval);
-    let idle_timeout = env_u64(
-        "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS",
-        interval.saturating_mul(3),
+    let sink = audit_sink("hook-heartbeat")?;
+    tally_common::agent_runtime::run_heartbeat_daemon(
+        &sink,
+        &HeartbeatFiles::new(&log_root(), &sink.run_id),
     )
-    .max(interval)
-    .min(i64::MAX as u64) as i64;
-
-    loop {
-        thread::sleep(Duration::from_secs(poll_interval));
-        let state = read_json_file(&state_path).unwrap_or_else(|_| json!({}));
-        if state["stop_requested"].as_bool().unwrap_or(false) {
-            break;
-        }
-        let last_update = state["updated_at"].as_str().unwrap_or("");
-        let quiet_seconds = seconds_since(last_update);
-        if quiet_seconds > idle_timeout {
-            sink.emit_heartbeat(
-                &[state["session_id"]
-                    .as_str()
-                    .unwrap_or(&sink.run_id)
-                    .to_string()],
-                "hook-heartbeat",
-                json!({
-                    "heartbeat_kind": "hook-daemon-timeout",
-                    "last_hook_event": state["last_hook_event"],
-                    "last_hook_observed_at": state["updated_at"],
-                }),
-                interval,
-            )?;
-            break;
-        }
-        if !heartbeat_due(quiet_seconds, interval) {
-            continue;
-        }
-        sink.emit_heartbeat(
-            &[state["session_id"]
-                .as_str()
-                .unwrap_or(&sink.run_id)
-                .to_string()],
-            "hook-heartbeat",
-            json!({
-                "heartbeat_kind": "hook-daemon",
-                "last_hook_event": state["last_hook_event"],
-                "last_hook_observed_at": state["updated_at"],
-            }),
-            interval,
-        )?;
-    }
-
-    write_json_atomic(
-        &heartbeat_daemon_status_path(&sink.run_id),
-        &json!({
-            "pid": std::process::id(),
-            "status": "stopped",
-            "updated_at": utc_now(),
-            "state_path": state_path,
-        }),
-    )?;
-    FileExt::unlock(&pid_file)?;
-    let _ = fs::remove_file(pid_path);
-    Ok(())
-}
-
-fn claim_heartbeat_daemon(path: &Path) -> io::Result<Option<fs::File>> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let mut file = match OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(path)
-    {
-        Ok(file) => file,
-        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
-        Err(error) => return Err(error),
-    };
-    match file.try_lock_exclusive() {
-        Ok(()) => {}
-        Err(error) if heartbeat_lock_is_contended(&error) => return Ok(None),
-        Err(error) => return Err(error),
-    }
-    file.set_len(0)?;
-    file.write_all(std::process::id().to_string().as_bytes())?;
-    file.sync_all()?;
-    Ok(Some(file))
-}
-
-fn heartbeat_lock_is_contended(error: &io::Error) -> bool {
-    if error.kind() == io::ErrorKind::WouldBlock {
-        return true;
-    }
-    #[cfg(windows)]
-    if matches!(error.raw_os_error(), Some(32) | Some(33)) {
-        return true;
-    }
-    false
-}
-
-fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
-    quiet_seconds >= 0 && quiet_seconds as u64 >= interval_seconds
-}
-
-fn heartbeat_stop_requested(event_type: &str) -> bool {
-    event_type == "SessionEnd"
-}
-
-fn configured_heartbeat_interval() -> u64 {
-    tally_common::heartbeat_interval_seconds(env_u64(
-        "TALLY_HOOK_HEARTBEAT_SECONDS",
-        env_u64(
-            "TALLY_HEARTBEAT_SECONDS",
-            tally_common::DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-        ),
-    ))
 }
 
 pub fn install_desktop_hooks(
@@ -471,11 +318,15 @@ pub fn install_desktop_hooks(
         Ok(())
     })();
     if let Err(error) = install_result {
-        let _ = settings_snapshot.restore();
-        let _ = key_snapshot.restore();
-        let _ = api_config_snapshot.restore();
-        let _ = binary_snapshot.restore();
-        return Err(error);
+        return Err(tally_common::install_error_with_rollback(
+            error,
+            &[
+                &settings_snapshot,
+                &key_snapshot,
+                &api_config_snapshot,
+                &binary_snapshot,
+            ],
+        ));
     }
     println!(
         "Installed Tally Claude Code hooks into {}",
@@ -750,7 +601,7 @@ impl HookEvent {
             "hooks".to_string(),
             json!([{
                 "type": "command",
-                "command": hook_command(hook_bin, self.name, state_dir),
+                "command": hook_command(hook_bin, "claude", self.name, state_dir),
                 "timeout": if self.name == "SessionEnd" { 3 } else { 15 },
                 "statusMessage": self.status,
             }]),
@@ -759,156 +610,17 @@ impl HookEvent {
     }
 }
 
-struct AuditSink {
-    source: String,
-    run_id: String,
-    workspace: PathBuf,
-    jsonl_dir: PathBuf,
-    tally_dir: PathBuf,
-    private_dir: PathBuf,
-    state_dir: PathBuf,
-}
-
-impl AuditSink {
-    fn new(source: &str) -> Result<Self> {
-        let source = safe_slug(source, "source");
-        let root = log_root();
-        tally_common::mark_tally_data_directory(&root)?;
-        let run_id = run_id();
-        let workspace = workspace_path();
-        let jsonl_dir = root.join("jsonl");
-        let tally_dir = root.join("tally").join(&source);
-        let private_dir = root.join("private").join(&run_id).join(&source);
-        let state_dir = root.join("state");
-        for path in [&jsonl_dir, &tally_dir, &private_dir, &state_dir] {
-            fs::create_dir_all(path)?;
-        }
-        Ok(Self {
-            source,
-            run_id,
-            workspace,
-            jsonl_dir,
-            tally_dir,
-            private_dir,
-            state_dir,
-        })
-    }
-
-    fn next_sequence(&self) -> Result<u64> {
-        let counter = self.state_dir.join(format!("{}.counter", self.source));
-        let lock_path = self.state_dir.join(format!("{}.counter.lock", self.source));
-        let lock = OpenOptions::new()
-            .create(true)
-            .read(true)
-            .write(true)
-            .truncate(false)
-            .open(lock_path)?;
-        lock.lock_exclusive()?;
-        let current = fs::read_to_string(&counter)
-            .ok()
-            .and_then(|value| value.trim().parse::<u64>().ok())
-            .unwrap_or(0);
-        let next = current + 1;
-        fs::write(counter, next.to_string())?;
-        lock.unlock()?;
-        Ok(next)
-    }
-
-    fn private_payload(&self, label: &str, payload: &Value) -> Result<Value> {
-        let path = self
-            .private_dir
-            .join(format!("{}.json", safe_slug(label, "payload")));
-        write_json_atomic(&path, payload)?;
-        Ok(json!({
-            "hash": sha256_value(payload),
-            "uri": format!("private://{}/{}/{}", self.run_id, self.source, path.file_name().unwrap().to_string_lossy()),
-            "path": path.display().to_string(),
-        }))
-    }
-
-    fn append_jsonl(&self, stream_name: &str, event: &Value) -> Result<()> {
-        append_jsonl_locked(
-            &self
-                .jsonl_dir
-                .join(format!("{}.jsonl", safe_slug(stream_name, "stream"))),
-            event,
-        )
-    }
-
-    fn write_tally_record(&self, record: &Value) -> Result<PathBuf> {
-        let seq = self.next_sequence()?;
-        let record_type = record["record_type"].as_str().unwrap_or("RECORD");
-        let record_id = record["record_id"].as_str().unwrap_or("record");
-        let path = self.tally_dir.join(format!(
-            "{seq:06}_{}_{}.json",
-            safe_slug(record_type, "RECORD"),
-            safe_slug(record_id, "record")
-        ));
-        let mut with_defaults = record.clone();
-        with_defaults["run_id"] = Value::String(self.run_id.clone());
-        if with_defaults.get("schema_version").is_none() {
-            with_defaults["schema_version"] = Value::String("0.2".to_string());
-        }
-        write_json_atomic(&path, &with_defaults)?;
-        let _ = tally_common::enqueue_record(&onboarding_state_dir(), &path, &env::current_exe()?);
-        Ok(path)
-    }
-
-    fn emit_heartbeat(
-        &self,
-        active_sessions: &[String],
-        stream_name: &str,
-        mut metadata: Value,
-        requested_interval_seconds: u64,
-    ) -> Result<()> {
-        let agent_id = agent_id();
-        let emitted_at_unix_millis = unix_now_millis();
-        let Some(rate_limit_seconds) = tally_common::claim_agent_heartbeat(
-            &self.state_dir,
-            &agent_id,
-            emitted_at_unix_millis,
-            requested_interval_seconds,
-        )?
-        else {
-            return Ok(());
-        };
-        merge_object(
-            &mut metadata,
-            json!({"rate_limit_seconds": rate_limit_seconds}),
-        );
-        let timestamp = utc_now();
-        let record_id = stable_id(
-            "heartbeat",
-            &json!({
-                "agent_id": agent_id,
-                "client": "claude-code",
-                "emitted_at_unix_millis": emitted_at_unix_millis,
-            }),
-        );
-        let mut event = json!({
-            "schema_version": "tally-claude.v1",
-            "record_id": record_id,
-            "run_id": self.run_id,
-            "source": self.source,
-            "event_type": "heartbeat",
-            "observed_at": timestamp,
-            "workspace": self.workspace.display().to_string(),
-        });
-        merge_object(&mut event, metadata.clone());
-        self.append_jsonl(stream_name, &event)?;
-        self.write_tally_record(&json!({
-            "record_type": "HEARTBEAT",
-            "record_id": record_id,
-            "schema_version": "0.2",
-            "session_id": self.run_id,
-            "agent_id": agent_id,
-            "active_sessions": active_sessions,
-            "timestamp": timestamp,
-            "source": self.source,
-            "metadata": metadata,
-        }))?;
-        Ok(())
-    }
+fn audit_sink(source: &str) -> Result<AuditSink> {
+    AuditSink::new(AuditSinkConfig {
+        source,
+        log_root: log_root(),
+        run_id: run_id(),
+        workspace: workspace_path(),
+        forwarding_state_dir: onboarding_state_dir(),
+        agent_id: agent_id(),
+        heartbeat_client: "claude-code",
+        event_schema: "tally-claude.v1",
+    })
 }
 
 fn remove_tally_hooks(config: &mut Value) -> usize {
@@ -964,64 +676,6 @@ fn set_runtime_defaults() {
     );
 }
 
-fn set_default(key: &str, value: &str) {
-    if env::var(key).unwrap_or_default().is_empty() {
-        env::set_var(key, value);
-    }
-}
-
-fn read_stdin() -> Result<String> {
-    let mut raw = String::new();
-    io::stdin().read_to_string(&mut raw)?;
-    Ok(raw)
-}
-
-fn parse_payload(raw: &str) -> Value {
-    if raw.is_empty() {
-        json!({})
-    } else {
-        serde_json::from_str::<Value>(raw).unwrap_or_else(|_| json!({"raw_stdin": raw}))
-    }
-}
-
-fn first_string_by_key(value: &Value, names: &[&str]) -> Option<String> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(Value::String(value)) = map.get(*name) {
-                    if !value.is_empty() {
-                        return Some(value.clone());
-                    }
-                }
-            }
-            map.values()
-                .find_map(|item| first_string_by_key(item, names))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|item| first_string_by_key(item, names)),
-        _ => None,
-    }
-}
-
-fn first_mapping_by_key<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
-    match value {
-        Value::Object(map) => {
-            for name in names {
-                if let Some(item @ Value::Object(_)) = map.get(*name) {
-                    return Some(item);
-                }
-            }
-            map.values()
-                .find_map(|item| first_mapping_by_key(item, names))
-        }
-        Value::Array(items) => items
-            .iter()
-            .find_map(|item| first_mapping_by_key(item, names)),
-        _ => None,
-    }
-}
-
 fn extract_session_id(payload: &Value) -> Option<String> {
     first_string_by_key(
         payload,
@@ -1039,15 +693,6 @@ fn derive_run_id(payload: &Value) -> Option<String> {
     extract_session_id(payload)
         .or_else(|| env::var("CLAUDE_SESSION_ID").ok())
         .map(|value| safe_slug(&format!("claude_{value}"), "claude-session"))
-}
-
-fn stable_id(prefix: &str, value: &Value) -> String {
-    let digest = sha256_value(value);
-    format!(
-        "{}_{}",
-        prefix,
-        &digest["sha256:".len().."sha256:".len() + 16]
-    )
 }
 
 fn action_id(payload: &Value) -> String {
@@ -1116,318 +761,12 @@ fn scrub_environment() -> Value {
     Value::Object(out)
 }
 
-fn light_git_state(cwd: &Path) -> Value {
-    if !cwd.join(".git").exists() {
-        return json!({"is_git_repo": false, "workspace": cwd.display().to_string()});
-    }
-    let head = run_command(["git", "rev-parse", "--verify", "HEAD"], cwd);
-    let branch = run_command(["git", "branch", "--show-current"], cwd);
-    let status = run_command(["git", "status", "--short", "--branch"], cwd);
-    let status_stdout = status["stdout"].as_str().unwrap_or("");
-    json!({
-        "is_git_repo": true,
-        "workspace": cwd.display().to_string(),
-        "head": head["stdout"].as_str().unwrap_or("").trim(),
-        "branch": branch["stdout"].as_str().unwrap_or("").trim(),
-        "status_hash": sha256_str(status_stdout),
-        "status": tail_chars(status_stdout, 20_000),
-    })
-}
-
-fn run_command<const N: usize>(argv: [&str; N], cwd: &Path) -> Value {
-    let started = SystemTime::now();
-    let argv_vec = argv.to_vec();
-    match Command::new(argv[0])
-        .args(&argv[1..])
-        .current_dir(cwd)
-        .output()
-    {
-        Ok(output) => json!({
-            "argv": argv_vec,
-            "exit_code": output.status.code(),
-            "duration_ms": started.elapsed().map(|d| d.as_millis()).unwrap_or(0),
-            "stdout": tail_chars(&String::from_utf8_lossy(&output.stdout), 20_000),
-            "stderr": tail_chars(&String::from_utf8_lossy(&output.stderr), 20_000),
-        }),
-        Err(error) => json!({
-            "argv": argv_vec,
-            "exit_code": Value::Null,
-            "duration_ms": started.elapsed().map(|d| d.as_millis()).unwrap_or(0),
-            "error": error.to_string(),
-        }),
-    }
-}
-
-fn tail_chars(value: &str, max: usize) -> String {
-    let chars: Vec<char> = value.chars().rev().take(max).collect();
-    chars.into_iter().rev().collect()
-}
-
-fn append_jsonl_locked(path: &Path, value: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let lock_path = PathBuf::from(format!("{}.lock", path.display()));
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(lock_path)?;
-    lock.lock_exclusive()?;
-    let mut file = OpenOptions::new().create(true).append(true).open(path)?;
-    writeln!(file, "{}", canonical_json(value)?)?;
-    lock.unlock()?;
-    Ok(())
-}
-
-fn read_json_file(path: &Path) -> Result<Value> {
-    let text = fs::read_to_string(path)?;
-    Ok(serde_json::from_str(&text)?)
-}
-
-fn write_json_atomic(path: &Path, value: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    let tmp = path.with_extension(format!("tmp-{}-{}", std::process::id(), random_hex(4)));
-    write_json_pretty(&tmp, value)?;
-    #[cfg(windows)]
-    if path.exists() {
-        fs::remove_file(path)?;
-    }
-    if let Err(error) = fs::rename(&tmp, path) {
-        let _ = fs::remove_file(&tmp);
-        return Err(error.into());
-    }
-    Ok(())
-}
-
-fn write_json_pretty(path: &Path, value: &Value) -> Result<()> {
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)?;
-    }
-    fs::write(path, format!("{}\n", serde_json::to_string_pretty(value)?))?;
-    Ok(())
-}
-
-fn canonical_json(value: &Value) -> Result<String> {
-    Ok(serde_json::to_string(value)?)
-}
-
-fn sha256_value(value: &Value) -> String {
-    sha256_bytes(canonical_json(value).unwrap_or_default().as_bytes())
-}
-
-fn sha256_str(value: &str) -> String {
-    sha256_bytes(value.as_bytes())
-}
-
-fn sha256_bytes(bytes: &[u8]) -> String {
-    let mut digest = Sha256::new();
-    digest.update(bytes);
-    let bytes = digest.finalize();
-    let mut hex = String::with_capacity(bytes.len() * 2);
-    for byte in bytes {
-        hex.push_str(&format!("{byte:02x}"));
-    }
-    format!("sha256:{hex}")
-}
-
-fn merge_object(target: &mut Value, extra: Value) {
-    let Some(target) = target.as_object_mut() else {
-        return;
-    };
-    if let Value::Object(extra) = extra {
-        for (key, value) in extra {
-            target.insert(key, value);
-        }
-    }
-}
-
-fn safe_slug(value: &str, default: &str) -> String {
-    let mut out = String::new();
-    for ch in value.chars() {
-        if ch.is_ascii_alphanumeric() || matches!(ch, '_' | '-' | '.') {
-            out.push(ch);
-        } else if !out.ends_with('_') {
-            out.push('_');
-        }
-        if out.len() >= 96 {
-            break;
-        }
-    }
-    let out = out.trim_matches('_').to_string();
-    if out.is_empty() {
-        default.to_string()
-    } else {
-        out
-    }
-}
-
-fn utc_now() -> String {
-    Utc::now().to_rfc3339_opts(SecondsFormat::Millis, true)
-}
-
-fn unix_now_millis() -> u64 {
-    SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or_default()
-        .as_millis()
-        .min(u64::MAX as u128) as u64
-}
-
-fn backup_stamp() -> String {
-    Utc::now().format("%Y%m%dT%H%M%S%.9fZ").to_string()
-}
-
-fn random_hex(bytes: usize) -> String {
-    let mut input = Vec::new();
-    input.extend_from_slice(
-        &SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos()
-            .to_le_bytes(),
-    );
-    input.extend_from_slice(&std::process::id().to_le_bytes());
-    input.extend_from_slice(format!("{:?}", thread::current().id()).as_bytes());
-    let hash = sha256_bytes(&input);
-    hash["sha256:".len().."sha256:".len() + bytes * 2].to_string()
-}
-
-fn seconds_since(value: &str) -> i64 {
-    chrono::DateTime::parse_from_rfc3339(value)
-        .map(|dt| (Utc::now() - dt.with_timezone(&Utc)).num_seconds())
-        .unwrap_or(0)
-}
-
-#[cfg(unix)]
-fn process_is_alive(pid: &str) -> bool {
-    if pid.is_empty() {
-        return false;
-    }
-    Command::new("kill")
-        .arg("-0")
-        .arg(pid)
-        .status()
-        .map(|status| status.success())
-        .unwrap_or(false)
-}
-
-#[cfg(windows)]
-fn process_is_alive(pid: &str) -> bool {
-    if pid.is_empty() || !pid.chars().all(|ch| ch.is_ascii_digit()) {
-        return false;
-    }
-    Command::new("tasklist")
-        .args(["/FI", &format!("PID eq {pid}"), "/NH"])
-        .output()
-        .map(|output| {
-            String::from_utf8_lossy(&output.stdout)
-                .split_whitespace()
-                .any(|field| field == pid)
-        })
-        .unwrap_or(false)
-}
-
-#[cfg(unix)]
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("'{}'", value.replace('\'', "'\"'\"'"))
-    }
-}
-
-#[cfg(windows)]
-fn shell_quote(value: &str) -> String {
-    if value
-        .chars()
-        .all(|ch| ch.is_ascii_alphanumeric() || matches!(ch, '\\' | '/' | '.' | '_' | '-' | ':'))
-    {
-        value.to_string()
-    } else {
-        format!("\"{value}\"")
-    }
-}
-
-#[cfg(unix)]
-fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
-    format!(
-        "TALLY_STATE_DIR={} {} claude hook {}",
-        shell_quote(&state_dir.display().to_string()),
-        shell_quote(hook_bin),
-        shell_quote(event_name)
-    )
-}
-
-#[cfg(windows)]
-fn hook_command(hook_bin: &str, event_name: &str, state_dir: &Path) -> String {
-    format!(
-        "set \"TALLY_STATE_DIR={}\" && {} claude hook {}",
-        state_dir.display(),
-        shell_quote(hook_bin),
-        shell_quote(event_name)
-    )
-}
-
-fn unique_suffix() -> String {
-    format!("{}-{}", std::process::id(), random_hex(4))
-}
-
-fn home_dir() -> String {
-    env::var("HOME")
-        .or_else(|_| env::var("USERPROFILE"))
-        .or_else(|_| {
-            Ok::<_, env::VarError>(format!(
-                "{}{}",
-                env::var("HOMEDRIVE")?,
-                env::var("HOMEPATH")?
-            ))
-        })
-        .unwrap_or_else(|_| ".".to_string())
-}
-
 fn default_log_root() -> String {
     format!("{}/.tally-claude/logs", home_dir())
 }
 
 fn log_root() -> PathBuf {
     expand_home(&env::var("TALLY_LOG_ROOT").unwrap_or_else(|_| default_log_root()))
-}
-
-fn workspace_path() -> PathBuf {
-    expand_home(
-        &env::var("TALLY_WORKSPACE")
-            .ok()
-            .filter(|value| !value.is_empty())
-            .unwrap_or_else(|| {
-                env::current_dir()
-                    .unwrap_or_else(|_| PathBuf::from("."))
-                    .display()
-                    .to_string()
-            }),
-    )
-}
-
-fn run_id() -> String {
-    env::var("TALLY_RUN_ID")
-        .ok()
-        .filter(|value| !value.is_empty())
-        .map(|value| safe_slug(&value, "run"))
-        .unwrap_or_else(|| {
-            safe_slug(
-                &format!(
-                    "run_{}",
-                    env::var("USER").unwrap_or_else(|_| "local".to_string())
-                ),
-                "run",
-            )
-        })
 }
 
 pub fn default_config_path() -> PathBuf {
@@ -1487,62 +826,6 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn expand_home(value: &str) -> PathBuf {
-    if value == "~" {
-        PathBuf::from(home_dir())
-    } else if let Some(rest) = value.strip_prefix("~/") {
-        PathBuf::from(home_dir()).join(rest)
-    } else {
-        PathBuf::from(value)
-    }
-}
-
-fn heartbeat_state_path(run_id: &str) -> PathBuf {
-    log_root()
-        .join("state")
-        .join(format!("hook-heartbeat.{}.json", safe_slug(run_id, "run")))
-}
-
-fn heartbeat_pid_path(run_id: &str) -> PathBuf {
-    log_root()
-        .join("state")
-        .join(format!("hook-heartbeat.{}.pid", safe_slug(run_id, "run")))
-}
-
-fn heartbeat_daemon_status_path(run_id: &str) -> PathBuf {
-    log_root().join("state").join(format!(
-        "hook-heartbeat.{}.daemon.json",
-        safe_slug(run_id, "run")
-    ))
-}
-
-fn backup_if_exists(path: &Path) -> Result<Option<PathBuf>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let backup = path.with_file_name(format!(
-        "{}.backup-{}",
-        path.file_name().unwrap().to_string_lossy(),
-        backup_stamp()
-    ));
-    fs::copy(path, &backup)?;
-    Ok(Some(backup))
-}
-
-fn env_enabled(key: &str, default: bool) -> bool {
-    match env::var(key) {
-        Ok(value) => !matches!(value.as_str(), "0" | "false" | "False" | "no"),
-        Err(_) => default,
-    }
-}
-
-fn env_u64(key: &str, default: u64) -> u64 {
-    env::var(key)
-        .ok()
-        .and_then(|value| value.parse::<u64>().ok())
-        .unwrap_or(default)
-}
-
 fn agent_id() -> String {
     env::var("TALLY_AGENT_ID").unwrap_or_else(|_| "claude-desktop".to_string())
 }
@@ -1583,37 +866,9 @@ mod tests {
     }
 
     #[test]
-    fn only_session_end_stops_the_heartbeat_daemon() {
-        assert!(!heartbeat_stop_requested("Stop"));
-        assert!(heartbeat_stop_requested("SessionEnd"));
-    }
-
-    #[test]
     fn installs_turn_and_session_end_hooks() {
         assert!(EVENTS.iter().any(|event| event.name == "Stop"));
         assert!(EVENTS.iter().any(|event| event.name == "SessionEnd"));
-    }
-
-    #[test]
-    fn emits_heartbeat_only_after_a_quiet_interval() {
-        assert!(!heartbeat_due(0, 600));
-        assert!(!heartbeat_due(599, 600));
-        assert!(heartbeat_due(600, 600));
-        assert!(heartbeat_due(1_200, 600));
-    }
-
-    #[test]
-    fn allows_only_one_heartbeat_daemon_lock() {
-        let directory = env::temp_dir().join(format!("tally-heartbeat-{}", unique_suffix()));
-        let path = directory.join("session.pid");
-        let first = claim_heartbeat_daemon(&path).unwrap().unwrap();
-        assert!(claim_heartbeat_daemon(&path).unwrap().is_none());
-        FileExt::unlock(&first).unwrap();
-        drop(first);
-        let second = claim_heartbeat_daemon(&path).unwrap().unwrap();
-        FileExt::unlock(&second).unwrap();
-        drop(second);
-        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]
