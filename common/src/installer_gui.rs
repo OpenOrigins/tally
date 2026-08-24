@@ -12,7 +12,8 @@ use tiny_http::{Header, Method, Request, Response, Server, StatusCode};
 const INDEX: &str = include_str!("../installer-ui/index.html");
 const STYLES: &str = include_str!("../installer-ui/style.css");
 const APP: &str = include_str!("../installer-ui/app.js");
-const OPENORIGINS_LOGO: &[u8] = include_bytes!("../installer-ui/openorigins.webp");
+const OPENORIGINS_LOGO: &[u8] = include_bytes!("../installer-ui/oo-logo-horizontal.png");
+const OPENORIGINS_ICON: &[u8] = include_bytes!("../../assets/oo-logo-no-text.png");
 const MAX_BODY_BYTES: usize = 16 * 1024;
 const IDLE_TIMEOUT: Duration = Duration::from_secs(15 * 60);
 
@@ -97,7 +98,8 @@ where
             "/" | "/index.html" => static_response(INDEX, "text/html; charset=utf-8"),
             "/style.css" => static_response(STYLES, "text/css; charset=utf-8"),
             "/app.js" => static_response(APP, "text/javascript; charset=utf-8"),
-            "/openorigins.webp" => static_bytes_response(OPENORIGINS_LOGO, "image/webp"),
+            "/oo-logo-horizontal.png" => static_bytes_response(OPENORIGINS_LOGO, "image/png"),
+            "/oo-logo-no-text.png" => static_bytes_response(OPENORIGINS_ICON, "image/png"),
             _ => json_response(StatusCode(404), json!({"ok": false, "error": "Not found"})),
         };
         let _ = request.respond(response);

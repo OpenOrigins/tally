@@ -151,6 +151,11 @@ class CaptureServer(ThreadingHTTPServer):
         with self.lock:
             return [request for request in self.requests if request["path"] == path]
 
+    def recorded_matching(
+        self, path: str, predicate: Callable[[dict], bool]
+    ) -> list[dict]:
+        return [request for request in self.recorded(path) if predicate(request)]
+
     def set_response_status(self, status: int) -> None:
         with self.lock:
             self.response_status = status
@@ -163,6 +168,21 @@ class CaptureServer(ThreadingHTTPServer):
                 return requests
             time.sleep(0.05)
         raise AssertionError(f"timed out waiting for {count} request(s) to {path}")
+
+    def wait_for_matching(
+        self,
+        path: str,
+        predicate: Callable[[dict], bool],
+        count: int = 1,
+        timeout: float = 10,
+    ) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            requests = self.recorded_matching(path, predicate)
+            if len(requests) >= count:
+                return requests
+            time.sleep(0.05)
+        raise AssertionError(f"timed out waiting for {count} matching request(s) to {path}")
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
@@ -271,16 +291,23 @@ def gui_install(
             assert "Close" in html
             assert "Delete queued records and local logs" in html
             assert 'id="version"' in html
-            assert 'src="/openorigins.webp"' in html
+            assert 'src="/oo-logo-horizontal.png"' in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert "img-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
 
-        with urlopen(f"{origin}/openorigins.webp", timeout=10) as response:
+        with urlopen(f"{origin}/oo-logo-horizontal.png", timeout=10) as response:
             logo = response.read()
-            assert response.headers["content-type"] == "image/webp"
-            assert logo.startswith(b"RIFF") and logo[8:12] == b"WEBP"
+            assert response.headers["content-type"] == "image/png"
+            assert logo.startswith(b"\x89PNG\r\n\x1a\n")
+            assert response.headers["cache-control"] == "no-store"
+
+        assert '<link rel="icon" type="image/png" href="/oo-logo-no-text.png">' in html
+        with urlopen(f"{origin}/oo-logo-no-text.png", timeout=10) as response:
+            icon = response.read()
+            assert response.headers["content-type"] == "image/png"
+            assert icon.startswith(b"\x89PNG\r\n\x1a\n")
             assert response.headers["cache-control"] == "no-store"
 
         unauthorized, _ = gui_request(
@@ -572,7 +599,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 "input-messages": ["desktop prompt"],
                 "last-assistant-message": "desktop response",
             }
-            forwarded_before = len(server.recorded("/v1/tally/logs"))
+            is_desktop_session = lambda request: (
+                request["body"].get("session_id") == "native-desktop-thread"
+            )
             run(
                 installed_binary,
                 "codex",
@@ -582,18 +611,16 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 json.dumps(desktop_payload),
                 env=env,
             )
-            desktop_requests = server.wait_for(
-                "/v1/tally/logs", count=forwarded_before + 3
-            )[forwarded_before:]
-            assert [request["body"]["record_type"] for request in desktop_requests] == [
-                "SESSION_START",
+            desktop_requests = server.wait_for_matching(
+                "/v1/tally/logs", is_desktop_session, count=3
+            )
+            assert sorted(
+                request["body"]["record_type"] for request in desktop_requests
+            ) == [
                 "INSTRUCTION_RECEIVED",
+                "SESSION_START",
                 "TURN_END",
             ]
-            assert all(
-                request["body"]["session_id"] == "native-desktop-thread"
-                for request in desktop_requests
-            )
 
             run(
                 installed_binary,
@@ -605,7 +632,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 env=env,
             )
             time.sleep(0.5)
-            assert len(server.recorded("/v1/tally/logs")) == forwarded_before + 3
+            assert len(
+                server.recorded_matching("/v1/tally/logs", is_desktop_session)
+            ) == 3
 
             desktop_payload["turn-id"] = "native-desktop-turn-2"
             desktop_payload["input-messages"] = ["second desktop prompt"]
@@ -618,20 +647,15 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 json.dumps(desktop_payload),
                 env=env,
             )
-            second_turn = server.wait_for(
-                "/v1/tally/logs", count=forwarded_before + 5
-            )[forwarded_before + 3 :]
+            second_turn = server.wait_for_matching(
+                "/v1/tally/logs", is_desktop_session, count=5
+            )[3:]
             assert sorted(
                 request["body"]["record_type"] for request in second_turn
             ) == [
                 "INSTRUCTION_RECEIVED",
                 "TURN_END",
             ]
-            assert all(
-                request["body"]["session_id"] == "native-desktop-thread"
-                for request in second_turn
-            )
-
         run(
             binary,
             agent,
@@ -1248,10 +1272,31 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
         server_thread.join(timeout=5)
 
 
+def assert_windows_application_icon(binary: Path) -> None:
+    if os.name != "nt":
+        return
+
+    import ctypes
+
+    extract_icon = ctypes.windll.shell32.ExtractIconExW
+    extract_icon.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+    ]
+    extract_icon.restype = ctypes.c_uint
+    assert extract_icon(str(binary), -1, None, None, 0) > 0, (
+        "Windows installer does not contain an application icon"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tally", type=Path, required=True)
     args = parser.parse_args()
+    assert_windows_application_icon(args.tally.resolve())
     with tempfile.TemporaryDirectory(prefix="tally-native-smoke-") as directory:
         root = Path(directory)
         smoke(args.tally.resolve(), "codex", root)
