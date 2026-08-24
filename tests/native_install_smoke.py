@@ -283,6 +283,13 @@ def gui_install(
             assert logo.startswith(b"\x89PNG\r\n\x1a\n")
             assert response.headers["cache-control"] == "no-store"
 
+        assert '<link rel="icon" type="image/png" href="/oo-logo-no-text.png">' in html
+        with urlopen(f"{origin}/oo-logo-no-text.png", timeout=10) as response:
+            icon = response.read()
+            assert response.headers["content-type"] == "image/png"
+            assert icon.startswith(b"\x89PNG\r\n\x1a\n")
+            assert response.headers["cache-control"] == "no-store"
+
         unauthorized, _ = gui_request(
             origin,
             token,
@@ -1248,10 +1255,31 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
         server_thread.join(timeout=5)
 
 
+def assert_windows_application_icon(binary: Path) -> None:
+    if os.name != "nt":
+        return
+
+    import ctypes
+
+    extract_icon = ctypes.windll.shell32.ExtractIconExW
+    extract_icon.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+    ]
+    extract_icon.restype = ctypes.c_uint
+    assert extract_icon(str(binary), -1, None, None, 0) > 0, (
+        "Windows installer does not contain an application icon"
+    )
+
+
 def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--tally", type=Path, required=True)
     args = parser.parse_args()
+    assert_windows_application_icon(args.tally.resolve())
     with tempfile.TemporaryDirectory(prefix="tally-native-smoke-") as directory:
         root = Path(directory)
         smoke(args.tally.resolve(), "codex", root)

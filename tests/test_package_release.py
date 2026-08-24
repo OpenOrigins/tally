@@ -22,6 +22,9 @@ def main() -> None:
             '[workspace]\n[workspace.package]\nversion = "9.8.7"\n', encoding="ascii"
         )
         (root / "LICENSE").write_text("test license\n", encoding="ascii")
+        assets = root / "assets"
+        assets.mkdir()
+        shutil.copy2(repo / "assets" / "Tally.icns", assets / "Tally.icns")
         release_dir = root / "target" / "test-target" / "release"
         release_dir.mkdir(parents=True)
         binary = release_dir / "tally"
@@ -55,8 +58,10 @@ def main() -> None:
             with zipfile.ZipFile(archive_path) as archive:
                 executable = "Tally.app/Contents/MacOS/tally"
                 helper = "Tally.app/Contents/Helpers/tally-hook"
+                icon = "Tally.app/Contents/Resources/Tally.icns"
                 assert executable in archive.namelist()
                 assert helper in archive.namelist()
+                assert archive.read(icon) == (repo / "assets" / "Tally.icns").read_bytes()
                 assert stat.S_IMODE(archive.getinfo(executable).external_attr >> 16) == 0o755
                 assert stat.S_IMODE(archive.getinfo(helper).external_attr >> 16) == 0o755
                 plist = plistlib.loads(archive.read("Tally.app/Contents/Info.plist"))
@@ -76,6 +81,7 @@ def assert_app_layout(app: Path) -> None:
     assert helper.is_file() and os.access(helper, os.X_OK)
     assert_plist(plistlib.loads((app / "Contents" / "Info.plist").read_bytes()))
     assert (app / "Contents" / "Resources" / "LICENSE").read_bytes() == b"test license\n"
+    assert (app / "Contents" / "Resources" / "Tally.icns").is_file()
     subprocess.run(["codesign", "--verify", "--deep", "--strict", "--verbose=2", str(app)], check=True)
     subprocess.run(["codesign", "--verify", "--strict", "--verbose=2", str(helper)], check=True)
     with tempfile.TemporaryDirectory(prefix="tally-standalone-hook-") as directory:
@@ -93,6 +99,7 @@ def assert_plist(plist: dict) -> None:
     assert plist["CFBundleExecutable"] == "tally"
     assert plist["CFBundleIdentifier"] == "com.openorigins.tally"
     assert plist["CFBundleDisplayName"] == "Tally"
+    assert plist["CFBundleIconFile"] == "Tally.icns"
     assert plist["CFBundleShortVersionString"] == "9.8.7"
     assert plist["LSMinimumSystemVersion"] == "11.0"
     assert plist["LSUIElement"] is True

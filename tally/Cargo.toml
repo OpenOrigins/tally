@@ -10,3 +10,6 @@ license.workspace = true
 tally-claude = { path = "../claude" }
 tally-codex = { path = "../codex" }
 tally-common.workspace = true
+
+[build-dependencies]
+winres = "0.1.12"

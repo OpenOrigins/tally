@@ -22,6 +22,7 @@ BINARY_NAME = "tally"
 HOOK_HELPER_NAME = "tally-hook"
 PRODUCT_NAME = "Tally"
 BUNDLE_ID = "com.openorigins.tally"
+MACOS_ICON = Path("assets/Tally.icns")
 
 
 def main() -> None:
@@ -134,6 +135,7 @@ def build_macos_app(
             "CFBundleDevelopmentRegion": "en",
             "CFBundleDisplayName": product_name,
             "CFBundleExecutable": binary_name,
+            "CFBundleIconFile": MACOS_ICON.name,
             "CFBundleIdentifier": bundle_id,
             "CFBundleInfoDictionaryVersion": "6.0",
             "CFBundleName": product_name,
@@ -149,6 +151,7 @@ def build_macos_app(
     )
     (contents / "Info.plist").write_bytes(plist)
     shutil.copy2("LICENSE", resources / "LICENSE")
+    shutil.copy2(MACOS_ICON, resources / MACOS_ICON.name)
     executable = macos / binary_name
     shutil.copy2(source, executable)
     executable.chmod(0o755)
