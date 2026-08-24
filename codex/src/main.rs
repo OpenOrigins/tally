@@ -10,39 +10,34 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
-use toml_edit::{Array as TomlArray, DocumentMut, Item as TomlItem, Value as TomlValue};
+use toml_edit::{
+    value as toml_value, Array as TomlArray, ArrayOfTables, DocumentMut, Item as TomlItem,
+    Table as TomlTable, Value as TomlValue,
+};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 const EVENTS: &[HookEvent] = &[
-    HookEvent::new(
-        "SessionStart",
-        Some("*"),
-        "Tally: recording Codex session start",
-    ),
-    HookEvent::new("UserPromptSubmit", None, "Tally: recording user prompt"),
-    HookEvent::new("PreToolUse", Some("*"), "Tally: recording pre-tool action"),
-    HookEvent::new(
-        "PermissionRequest",
-        Some("*"),
-        "Tally: recording permission request",
-    ),
-    HookEvent::new(
-        "PostToolUse",
-        Some("*"),
-        "Tally: recording post-tool result",
-    ),
-    HookEvent::new("PreCompact", Some("*"), "Tally: recording pre-compact"),
-    HookEvent::new("PostCompact", Some("*"), "Tally: recording post-compact"),
-    HookEvent::new(
-        "SubagentStart",
-        Some("*"),
-        "Tally: recording subagent start",
-    ),
-    HookEvent::new("SubagentStop", Some("*"), "Tally: recording subagent stop"),
-    HookEvent::new("Stop", None, "Tally: recording Codex turn end"),
-    HookEvent::new("SessionEnd", None, "Tally: recording Codex session end"),
+    HookEvent::new("SessionStart", Some("*")),
+    HookEvent::new("UserPromptSubmit", None),
+    HookEvent::new("PreToolUse", Some("*")),
+    HookEvent::new("PermissionRequest", Some("*")),
+    HookEvent::new("PostToolUse", Some("*")),
+    HookEvent::new("PreCompact", Some("*")),
+    HookEvent::new("PostCompact", Some("*")),
+    HookEvent::new("SubagentStart", Some("*")),
+    HookEvent::new("SubagentStop", Some("*")),
+    HookEvent::new("Stop", None),
+    HookEvent::new("SessionEnd", None),
 ];
+
+const CODEX_CLI_INSTALL_URL: &str = "https://developers.openai.com/codex/cli";
+
+#[derive(Clone, Debug)]
+pub struct CodexCliStatus {
+    pub command: PathBuf,
+    pub version: String,
+}
 
 pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
     let mut args = arguments.into_iter();
@@ -96,7 +91,7 @@ pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
 
 fn print_help() {
     println!(
-        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install or update Codex hooks\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n  notify        Record a Codex Desktop turn notification\n",
+        "tally-codex {}\n\nCommands:\n  gui           Open the graphical installer\n  install --api-key <KEY> [--api-url <URL>] [--config-path <PATH>]\n                Install Codex hooks, then run `codex` to review and trust them\n  uninstall [--config-path <PATH>]\n                Remove Tally hooks and local credentials\n  wrap [ARGS]   Run Codex through Tally\n  hook EVENT    Record a hook event\n  notify        Record a Codex Desktop turn notification\n",
         env!("CARGO_PKG_VERSION")
     );
 }
@@ -295,30 +290,14 @@ fn record_desktop_turn(raw: &str) -> Result<()> {
 fn wrap_codex(args: Vec<String>) -> Result<i32> {
     set_runtime_defaults();
 
-    let mut codex_args = Vec::new();
-    if should_bypass_hook_trust(args.first().map(String::as_str)) {
-        codex_args.push("--dangerously-bypass-hook-trust".to_string());
-    }
-    codex_args.extend(args.clone());
-
     if args.first().map(String::as_str) == Some("exec")
         && env_enabled("TALLY_TEE_CODEX_STDIO", true)
     {
-        run_codex_with_tee(&codex_args)
+        run_codex_with_tee(&args)
     } else {
-        let status = Command::new("codex").args(&codex_args).status()?;
+        let status = Command::new("codex").args(&args).status()?;
         Ok(status.code().unwrap_or(1))
     }
-}
-
-fn should_bypass_hook_trust(first_arg: Option<&str>) -> bool {
-    if !env_enabled("TALLY_BYPASS_HOOK_TRUST", true) {
-        return false;
-    }
-    !matches!(
-        first_arg,
-        Some("login" | "logout" | "help" | "--help" | "-h" | "--version" | "version")
-    )
 }
 
 fn run_codex_with_tee(args: &[String]) -> Result<i32> {
@@ -558,101 +537,270 @@ fn configured_heartbeat_interval() -> u64 {
     ))
 }
 
+pub fn codex_cli_status() -> Result<CodexCliStatus> {
+    let configured = env::var_os("TALLY_CODEX_CLI").map(PathBuf::from);
+    let candidates = configured
+        .clone()
+        .map(|path| vec![path])
+        .unwrap_or_else(codex_cli_candidates);
+    let mut last_error = None;
+
+    for candidate in candidates {
+        let version = match run_codex_cli(&candidate, &["--version"]) {
+            Ok(output) if output.status.success() => {
+                String::from_utf8_lossy(&output.stdout).trim().to_string()
+            }
+            Ok(output) => {
+                last_error = Some(format!(
+                    "{} exited with status {}",
+                    candidate.display(),
+                    output.status
+                ));
+                continue;
+            }
+            Err(error) => {
+                last_error = Some(format!("{}: {error}", candidate.display()));
+                continue;
+            }
+        };
+        let features = match run_codex_cli_features(&candidate) {
+            Ok(output) => output,
+            Err(error) => {
+                last_error = Some(format!(
+                    "{} could not inspect hook support: {error}",
+                    candidate.display()
+                ));
+                continue;
+            }
+        };
+        if !features.status.success() {
+            last_error = Some(format!("Codex CLI {version} could not verify hook support"));
+            continue;
+        }
+        let hooks_enabled = String::from_utf8_lossy(&features.stdout)
+            .lines()
+            .any(|line| {
+                let fields = line.split_whitespace().collect::<Vec<_>>();
+                fields.first() == Some(&"hooks") && fields.last() == Some(&"true")
+            });
+        if !hooks_enabled {
+            last_error = Some(format!(
+                "Codex CLI {version} does not have lifecycle hooks enabled"
+            ));
+            continue;
+        }
+        return Ok(CodexCliStatus {
+            command: candidate,
+            version,
+        });
+    }
+
+    let detail = last_error
+        .map(|error| format!(" Last check: {error}."))
+        .unwrap_or_default();
+    Err(format!(
+        "Codex CLI with lifecycle hook support is required. Install it from {CODEX_CLI_INSTALL_URL}, confirm `codex --version` works, and reopen Tally.{detail}"
+    )
+    .into())
+}
+
+pub fn codex_hook_approval_instructions() -> String {
+    "Open a terminal and run `codex`. When Codex says hooks need review, choose `Review hooks`, inspect the OpenOrigins Tally commands, then press `t` to trust all. Quit the CLI and reopen Codex Desktop afterward."
+        .to_string()
+}
+
+fn codex_cli_candidates() -> Vec<PathBuf> {
+    let mut candidates = Vec::new();
+    if let Some(path) = env::var_os("PATH") {
+        for directory in env::split_paths(&path) {
+            #[cfg(windows)]
+            for name in ["codex.exe", "codex.cmd", "codex.bat"] {
+                push_existing_candidate(&mut candidates, directory.join(name));
+            }
+            #[cfg(not(windows))]
+            push_existing_candidate(&mut candidates, directory.join("codex"));
+        }
+    }
+
+    #[cfg(target_os = "macos")]
+    for path in ["/opt/homebrew/bin/codex", "/usr/local/bin/codex"] {
+        push_existing_candidate(&mut candidates, PathBuf::from(path));
+    }
+
+    let home = PathBuf::from(home_dir());
+    #[cfg(not(windows))]
+    for path in [
+        home.join(".local/bin/codex"),
+        home.join(".bun/bin/codex"),
+        home.join(".npm-global/bin/codex"),
+    ] {
+        push_existing_candidate(&mut candidates, path);
+    }
+    #[cfg(windows)]
+    if let Ok(app_data) = env::var("APPDATA") {
+        for name in ["codex.cmd", "codex.exe"] {
+            push_existing_candidate(
+                &mut candidates,
+                PathBuf::from(&app_data).join("npm").join(name),
+            );
+        }
+    }
+    candidates
+}
+
+fn push_existing_candidate(candidates: &mut Vec<PathBuf>, candidate: PathBuf) {
+    if candidate.is_file() && !candidates.contains(&candidate) {
+        candidates.push(candidate);
+    }
+}
+
+fn run_codex_cli(path: &Path, arguments: &[&str]) -> io::Result<std::process::Output> {
+    #[cfg(windows)]
+    if matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("cmd" | "bat")
+    ) {
+        return Command::new("cmd")
+            .arg("/C")
+            .arg(path)
+            .args(arguments)
+            .output();
+    }
+    Command::new(path).args(arguments).output()
+}
+
+fn run_codex_cli_features(path: &Path) -> io::Result<std::process::Output> {
+    let configured_home = env::var_os("CODEX_HOME")
+        .map(PathBuf::from)
+        .unwrap_or_else(|| PathBuf::from(home_dir()).join(".codex"));
+    if configured_home.is_dir() {
+        return run_codex_cli(path, &["features", "list"]);
+    }
+
+    let temporary_home = env::temp_dir().join(format!(
+        "tally-codex-preflight-{}-{}",
+        std::process::id(),
+        unique_suffix()
+    ));
+    fs::create_dir_all(&temporary_home)?;
+    let output = run_codex_cli_with_home(path, &["features", "list"], &temporary_home);
+    let cleanup_result = fs::remove_dir_all(&temporary_home);
+    match (output, cleanup_result) {
+        (Ok(output), _) => Ok(output),
+        (Err(error), _) => Err(error),
+    }
+}
+
+fn run_codex_cli_with_home(
+    path: &Path,
+    arguments: &[&str],
+    codex_home: &Path,
+) -> io::Result<std::process::Output> {
+    #[cfg(windows)]
+    if matches!(
+        path.extension().and_then(|extension| extension.to_str()),
+        Some("cmd" | "bat")
+    ) {
+        return Command::new("cmd")
+            .arg("/C")
+            .arg(path)
+            .args(arguments)
+            .env("CODEX_HOME", codex_home)
+            .output();
+    }
+    Command::new(path)
+        .args(arguments)
+        .env("CODEX_HOME", codex_home)
+        .output()
+}
+
 pub fn install_desktop_hooks(
     options: tally_common::InstallOptions,
 ) -> Result<tally_common::InstallReport> {
     set_runtime_defaults();
 
-    let hooks_path = effective_hooks_path(options.config_path.as_deref());
-    let state_dir = state_dir_for_hooks_path(&hooks_path);
-    let installed_binary_path = installed_binary_path_for_hooks_path(&hooks_path);
-    let codex_config_path = codex_config_path_for_hooks_path(&hooks_path);
+    let codex_cli = codex_cli_status()?;
+    let config_path = effective_config_path(options.config_path.as_deref());
+    let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
+    let state_dir = state_dir_for_config_path(&config_path);
+    let installed_binary_path = installed_binary_path_for_config_path(&config_path);
     let previous_notify_path = previous_notify_path(&state_dir);
-    fs::create_dir_all(hooks_path.parent().unwrap_or_else(|| Path::new(".")))?;
+    fs::create_dir_all(config_path.parent().unwrap_or_else(|| Path::new(".")))?;
     tally_common::mark_tally_data_directory(&log_root())?;
     let source_binary = tally_common::installation_source_executable()?;
     let hook_bin = installed_binary_path.display().to_string();
 
-    let mut config = if hooks_path.exists() {
-        read_json_file(&hooks_path)?
-    } else {
-        json!({"hooks": {}})
-    };
-    if !config.is_object() {
-        return Err(format!(
-            "refusing to modify non-object JSON at {}",
-            hooks_path.display()
-        )
-        .into());
-    }
-    if !config.get("hooks").map(Value::is_object).unwrap_or(false) {
-        config["hooks"] = json!({});
-    }
+    let config_existed = config_path.exists();
+    let mut document = read_codex_config(&config_path)?;
+    remove_tally_config_hooks(&mut document)?;
+    install_tally_config_hooks(&mut document, &hook_bin, &state_dir)?;
 
-    let backup = backup_if_exists(&hooks_path)?;
-    let codex_config_backup = backup_if_exists(&codex_config_path)?;
-    let hooks_snapshot = tally_common::FileSnapshot::capture(&hooks_path)?;
-    let codex_config_snapshot = tally_common::FileSnapshot::capture(&codex_config_path)?;
+    let mut legacy_config = read_legacy_hooks(&legacy_hooks_path)?;
+    let legacy_removed = legacy_config.as_mut().map(remove_tally_hooks).unwrap_or(0);
+    let backup = backup_if_exists(&config_path)?;
+    let legacy_backup = (legacy_removed > 0)
+        .then(|| backup_if_exists(&legacy_hooks_path))
+        .transpose()?
+        .flatten();
+    let config_snapshot = tally_common::FileSnapshot::capture(&config_path)?;
+    let legacy_snapshot = tally_common::FileSnapshot::capture(&legacy_hooks_path)?;
     let previous_notify_snapshot = tally_common::FileSnapshot::capture(&previous_notify_path)?;
     let key_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
     let api_config_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::config_path(&state_dir))?;
     let binary_snapshot = tally_common::FileSnapshot::capture(&installed_binary_path)?;
-    remove_tally_hooks(&mut config);
-    let hooks = config["hooks"]
-        .as_object_mut()
-        .expect("hooks object exists");
-    for event in EVENTS {
-        hooks
-            .entry(event.name.to_string())
-            .or_insert_with(|| Value::Array(Vec::new()))
-            .as_array_mut()
-            .ok_or_else(|| format!("refusing to modify hooks.{}: not a list", event.name))?
-            .push(event.to_hook_group(&hook_bin, &state_dir));
-    }
 
     let install_result = (|| -> Result<()> {
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
         tally_common::write_credentials(&state_dir, &options)?;
-        write_json_atomic(&hooks_path, &config)?;
+        write_text_atomic(&config_path, &document.to_string())?;
+        if legacy_removed > 0 {
+            write_json_atomic(
+                &legacy_hooks_path,
+                legacy_config.as_ref().expect("legacy config was loaded"),
+            )?;
+        }
         install_desktop_notify(
-            &codex_config_path,
+            &config_path,
             &installed_binary_path,
             &state_dir,
             &previous_notify_path,
+            config_existed,
         )?;
         if let Err(error) =
-            tally_common::remove_legacy_installed_executable(&hooks_path, "tally-codex")
+            tally_common::remove_legacy_installed_executable(&config_path, "tally-codex")
         {
             eprintln!("Warning: could not remove the previous hook executable: {error}");
         }
         Ok(())
     })();
     if let Err(error) = install_result {
-        let _ = hooks_snapshot.restore();
-        let _ = codex_config_snapshot.restore();
+        let _ = config_snapshot.restore();
+        let _ = legacy_snapshot.restore();
         let _ = previous_notify_snapshot.restore();
         let _ = key_snapshot.restore();
         let _ = api_config_snapshot.restore();
         let _ = binary_snapshot.restore();
         return Err(error);
     }
-    println!(
-        "Installed Tally Codex Desktop hooks into {}",
-        hooks_path.display()
-    );
+    println!("Installed Tally Codex hooks into {}", config_path.display());
     if let Some(backup) = backup.as_ref() {
-        println!("Backed up previous hooks file to {}", backup.display());
-    }
-    if let Some(backup) = codex_config_backup.as_ref() {
         println!("Backed up previous Codex config to {}", backup.display());
     }
-    println!("Hook binary: {hook_bin}");
+    if let Some(backup) = legacy_backup.as_ref() {
+        println!(
+            "Backed up previous legacy hooks file to {}",
+            backup.display()
+        );
+    }
     println!(
-        "Codex Desktop notifications: {}",
-        codex_config_path.display()
+        "Codex CLI: {} ({})",
+        codex_cli.version,
+        codex_cli.command.display()
     );
+    println!("Hook binary: {hook_bin}");
+    println!("Codex Desktop notifications: {}", config_path.display());
     println!("Logs: {}", log_root().display());
     println!(
         "Agent API key: stored securely at {}",
@@ -670,13 +818,18 @@ pub fn install_desktop_hooks(
                 Some(error)
             }
         };
+    let approval_instructions = codex_hook_approval_instructions();
+    println!("Action required: {approval_instructions}");
     Ok(tally_common::InstallReport {
-        config_path: hooks_path,
+        config_path,
         state_dir,
         logs_path: log_root(),
         installed_binary_path,
         backup_path: backup,
         handshake_error,
+        approval_required: true,
+        approval_instructions: Some(approval_instructions),
+        client_version: Some(codex_cli.version),
     })
 }
 
@@ -689,43 +842,58 @@ pub fn uninstall_desktop_hooks_with_options(
     remove_data: bool,
 ) -> Result<tally_common::UninstallReport> {
     set_runtime_defaults();
-    let hooks_path = effective_hooks_path(config_path.as_deref());
-    let state_dir = state_dir_for_hooks_path(&hooks_path);
+    let config_path = effective_config_path(config_path.as_deref());
+    let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
+    let state_dir = state_dir_for_config_path(&config_path);
     let logs_path = log_root();
     uninstall_desktop_notify(
-        &codex_config_path_for_hooks_path(&hooks_path),
-        &installed_binary_path_for_hooks_path(&hooks_path),
+        &config_path,
+        &installed_binary_path_for_config_path(&config_path),
         &state_dir,
         &previous_notify_path(&state_dir),
     )?;
-    if hooks_path.exists() {
-        let mut config = read_json_file(&hooks_path)?;
-        if !config.is_object() || !config.get("hooks").map(Value::is_object).unwrap_or(false) {
-            return Err(format!(
-                "refusing to modify {}: unexpected hooks file shape",
-                hooks_path.display()
-            )
-            .into());
+    if config_path.exists() {
+        let backup = backup_if_exists(&config_path)?;
+        let mut document = read_codex_config(&config_path)?;
+        let removed = remove_tally_config_hooks(&mut document)?;
+        if document.is_empty() {
+            remove_file_if_exists(&config_path)?;
+        } else {
+            write_text_atomic(&config_path, &document.to_string())?;
         }
-        let backup = backup_if_exists(&hooks_path)?;
-        let removed = remove_tally_hooks(&mut config);
-        write_json_atomic(&hooks_path, &config)?;
         println!(
-            "Removed {removed} Tally hook handler(s) from {}",
-            hooks_path.display()
+            "Removed {removed} Tally Codex hook handler(s) from {}",
+            config_path.display()
         );
         if let Some(backup) = backup {
-            println!("Backed up previous hooks file to {}", backup.display());
+            println!("Backed up previous Codex config to {}", backup.display());
         }
     } else {
-        println!("No hooks file found at {}", hooks_path.display());
+        println!("No Codex config found at {}", config_path.display());
     }
-    remove_local_credentials_for_hooks_path(&hooks_path)?;
+    if let Some(mut legacy_config) = read_legacy_hooks(&legacy_hooks_path)? {
+        let removed = remove_tally_hooks(&mut legacy_config);
+        if removed > 0 {
+            let backup = backup_if_exists(&legacy_hooks_path)?;
+            write_json_atomic(&legacy_hooks_path, &legacy_config)?;
+            println!(
+                "Removed {removed} legacy Tally hook handler(s) from {}",
+                legacy_hooks_path.display()
+            );
+            if let Some(backup) = backup {
+                println!(
+                    "Backed up previous legacy hooks file to {}",
+                    backup.display()
+                );
+            }
+        }
+    }
+    remove_local_credentials_for_config_path(&config_path)?;
     if remove_data {
         tally_common::remove_tally_data(&state_dir, &logs_path)?;
     }
     Ok(tally_common::UninstallReport {
-        config_path: hooks_path,
+        config_path,
         queue_path: state_dir.join("forward-queue"),
         state_dir,
         logs_path,
@@ -894,38 +1062,11 @@ fn record_type_for_hook(event_type: &str) -> &'static str {
 struct HookEvent {
     name: &'static str,
     matcher: Option<&'static str>,
-    status: &'static str,
 }
 
 impl HookEvent {
-    const fn new(name: &'static str, matcher: Option<&'static str>, status: &'static str) -> Self {
-        Self {
-            name,
-            matcher,
-            status,
-        }
-    }
-
-    fn to_hook_group(self, hook_bin: &str, state_dir: &Path) -> Value {
-        let mut group = serde_json::Map::new();
-        if let Some(matcher) = self.matcher {
-            group.insert("matcher".to_string(), Value::String(matcher.to_string()));
-        }
-        let command = hook_command(hook_bin, self.name, state_dir);
-        let handler = json!({
-            "type": "command",
-            "command": command,
-            "timeout": if self.name == "SessionEnd" { 3 } else { 15 },
-            "statusMessage": self.status,
-        });
-        #[cfg(windows)]
-        let handler = {
-            let mut handler = handler;
-            handler["commandWindows"] = handler["command"].clone();
-            handler
-        };
-        group.insert("hooks".to_string(), Value::Array(vec![handler]));
-        Value::Object(group)
+    const fn new(name: &'static str, matcher: Option<&'static str>) -> Self {
+        Self { name, matcher }
     }
 }
 
@@ -1081,11 +1222,11 @@ impl AuditSink {
     }
 }
 
-fn codex_config_path_for_hooks_path(hooks_path: &Path) -> PathBuf {
-    hooks_path
+fn legacy_hooks_path_for_config_path(config_path: &Path) -> PathBuf {
+    config_path
         .parent()
         .unwrap_or_else(|| Path::new("."))
-        .join("config.toml")
+        .join("hooks.json")
 }
 
 fn previous_notify_path(state_dir: &Path) -> PathBuf {
@@ -1139,13 +1280,131 @@ fn read_codex_config(path: &Path) -> Result<DocumentMut> {
     Ok(fs::read_to_string(path)?.parse::<DocumentMut>()?)
 }
 
+fn read_legacy_hooks(path: &Path) -> Result<Option<Value>> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let config = read_json_file(path)?;
+    if !config.is_object() || config.get("hooks").is_some_and(|hooks| !hooks.is_object()) {
+        return Err(format!(
+            "refusing to modify {}: unexpected legacy hooks file shape",
+            path.display()
+        )
+        .into());
+    }
+    Ok(Some(config))
+}
+
+fn install_tally_config_hooks(
+    document: &mut DocumentMut,
+    hook_bin: &str,
+    state_dir: &Path,
+) -> Result<()> {
+    if !document.contains_key("hooks") {
+        document["hooks"] = TomlItem::Table(TomlTable::new());
+    }
+    let hooks = document["hooks"]
+        .as_table_mut()
+        .ok_or("Codex config `hooks` must be a table")?;
+
+    for event in EVENTS {
+        if !hooks.contains_key(event.name) {
+            hooks[event.name] = TomlItem::ArrayOfTables(ArrayOfTables::new());
+        }
+        let groups = hooks[event.name].as_array_of_tables_mut().ok_or_else(|| {
+            format!(
+                "Codex config `hooks.{}` must be an array of tables",
+                event.name
+            )
+        })?;
+        let mut group = TomlTable::new();
+        if event.matcher.is_some() {
+            group["matcher"] = toml_value(".*");
+        }
+        let mut handlers = ArrayOfTables::new();
+        let mut handler = TomlTable::new();
+        handler["type"] = toml_value("command");
+        handler["command"] = toml_value(hook_command(hook_bin, event.name, state_dir));
+        handler["timeout"] = toml_value(if event.name == "SessionEnd" { 3 } else { 15 });
+        handlers.push(handler);
+        group["hooks"] = TomlItem::ArrayOfTables(handlers);
+        groups.push(group);
+    }
+    Ok(())
+}
+
+fn remove_tally_config_hooks(document: &mut DocumentMut) -> Result<usize> {
+    let Some(item) = document.get_mut("hooks") else {
+        return Ok(0);
+    };
+    let hooks = item
+        .as_table_mut()
+        .ok_or("Codex config `hooks` must be a table")?;
+    let events = hooks
+        .iter()
+        .filter(|(name, _)| *name != "state")
+        .map(|(name, _)| name.to_string())
+        .collect::<Vec<_>>();
+    let mut removed = 0;
+    let mut empty_events = Vec::new();
+
+    for event in events {
+        let Some(groups) = hooks
+            .get_mut(&event)
+            .and_then(TomlItem::as_array_of_tables_mut)
+        else {
+            continue;
+        };
+        for group in groups.iter_mut() {
+            let Some(handlers) = group
+                .get_mut("hooks")
+                .and_then(TomlItem::as_array_of_tables_mut)
+            else {
+                continue;
+            };
+            let before = handlers.len();
+            handlers.retain(|handler| {
+                let command = handler
+                    .get("command")
+                    .and_then(TomlItem::as_str)
+                    .unwrap_or("");
+                !is_tally_hook_command(command)
+            });
+            removed += before - handlers.len();
+        }
+        groups.retain(|group| {
+            group
+                .get("hooks")
+                .and_then(TomlItem::as_array_of_tables)
+                .is_none_or(|handlers| !handlers.is_empty())
+        });
+        if groups.is_empty() {
+            empty_events.push(event);
+        }
+    }
+    for event in empty_events {
+        hooks.remove(&event);
+    }
+    if hooks.is_empty() {
+        document.remove("hooks");
+    }
+    Ok(removed)
+}
+
+fn is_tally_hook_command(command: &str) -> bool {
+    let current = command.contains("tally-codex") && command.contains(" hook ");
+    let unified = command.contains("tally") && command.contains(" codex hook ");
+    let legacy = command.contains("tally-host-hook") || command.contains("codex_hook_logger.py");
+    current || unified || legacy
+}
+
 fn install_desktop_notify(
     config_path: &Path,
     binary_path: &Path,
     state_dir: &Path,
     saved_notify_path: &Path,
+    config_existed: bool,
 ) -> Result<()> {
-    let config_existed = config_path.exists();
     let mut document = read_codex_config(config_path)?;
     let current = toml_notify_command(&document)?;
     let tally_command = tally_notify_command(binary_path, state_dir);
@@ -1320,12 +1579,7 @@ fn remove_tally_hooks(config: &mut Value) -> usize {
             let before = handlers.len();
             handlers.retain(|handler| {
                 let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                let is_current_hook = (command.contains("tally-codex")
-                    || command.contains(" codex hook "))
-                    && command.contains(" hook ");
-                let is_legacy_hook =
-                    command.contains("tally-host-hook") || command.contains("codex_hook_logger.py");
-                !(is_current_hook || is_legacy_hook)
+                !is_tally_hook_command(command)
             });
             removed += before - handlers.len();
             !handlers.is_empty()
@@ -1839,14 +2093,20 @@ fn run_id() -> String {
 }
 
 pub fn default_config_path() -> PathBuf {
-    if let Ok(path) = env::var("CODEX_HOOKS_PATH") {
+    if let Ok(path) = env::var("CODEX_CONFIG_PATH") {
         return expand_home(&path);
     }
+    if let Ok(path) = env::var("CODEX_HOOKS_PATH") {
+        return expand_home(&path)
+            .parent()
+            .unwrap_or_else(|| Path::new("."))
+            .join("config.toml");
+    }
     let codex_home = env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir()));
-    expand_home(&format!("{codex_home}/hooks.json"))
+    expand_home(&format!("{codex_home}/config.toml"))
 }
 
-fn effective_hooks_path(config_path: Option<&Path>) -> PathBuf {
+fn effective_config_path(config_path: Option<&Path>) -> PathBuf {
     config_path
         .map(Path::to_path_buf)
         .unwrap_or_else(default_config_path)
@@ -1856,10 +2116,10 @@ fn onboarding_state_dir() -> PathBuf {
     if let Ok(path) = env::var("TALLY_STATE_DIR") {
         return expand_home(&path);
     }
-    state_dir_for_hooks_path(&default_config_path())
+    state_dir_for_config_path(&default_config_path())
 }
 
-fn state_dir_for_hooks_path(path: &Path) -> PathBuf {
+fn state_dir_for_config_path(path: &Path) -> PathBuf {
     path.parent()
         .unwrap_or_else(|| Path::new("."))
         .join("tally")
@@ -1868,24 +2128,24 @@ fn state_dir_for_hooks_path(path: &Path) -> PathBuf {
 }
 
 pub fn default_state_dir() -> PathBuf {
-    state_dir_for_hooks_path(&default_config_path())
+    state_dir_for_config_path(&default_config_path())
 }
 
 pub fn default_installed_binary_path() -> PathBuf {
-    installed_binary_path_for_hooks_path(&default_config_path())
+    installed_binary_path_for_config_path(&default_config_path())
 }
 
-fn installed_binary_path_for_hooks_path(path: &Path) -> PathBuf {
+fn installed_binary_path_for_config_path(path: &Path) -> PathBuf {
     tally_common::installed_executable_path(path, "tally-codex")
 }
 
-fn remove_local_credentials_for_hooks_path(path: &Path) -> Result<()> {
-    let state_dir = state_dir_for_hooks_path(path);
+fn remove_local_credentials_for_config_path(path: &Path) -> Result<()> {
+    let state_dir = state_dir_for_config_path(path);
     for path in [
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
         previous_notify_path(&state_dir),
-        installed_binary_path_for_hooks_path(path),
+        installed_binary_path_for_config_path(path),
         tally_common::legacy_installed_executable_path(path, "tally-codex"),
     ] {
         match fs::remove_file(path) {
@@ -1987,10 +2247,9 @@ mod tests {
     #[test]
     fn installs_and_restores_existing_desktop_notification() {
         let directory = env::temp_dir().join(format!("tally-notify-config-{}", unique_suffix()));
-        let hooks_path = directory.join("hooks.json");
-        let config_path = codex_config_path_for_hooks_path(&hooks_path);
-        let state_dir = state_dir_for_hooks_path(&hooks_path);
-        let binary_path = installed_binary_path_for_hooks_path(&hooks_path);
+        let config_path = directory.join("config.toml");
+        let state_dir = state_dir_for_config_path(&config_path);
+        let binary_path = installed_binary_path_for_config_path(&config_path);
         let saved_path = previous_notify_path(&state_dir);
         fs::create_dir_all(&directory).unwrap();
         fs::write(
@@ -1999,7 +2258,7 @@ mod tests {
         )
         .unwrap();
 
-        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path).unwrap();
+        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path, true).unwrap();
         let installed = read_codex_config(&config_path).unwrap();
         assert_eq!(installed["model"].as_str(), Some("gpt-test"));
         assert_eq!(
@@ -2011,7 +2270,7 @@ mod tests {
             json!(["keep-notify", "--flag"])
         );
 
-        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path).unwrap();
+        install_desktop_notify(&config_path, &binary_path, &state_dir, &saved_path, true).unwrap();
         assert_eq!(
             read_json_file(&saved_path).unwrap()["command"],
             json!(["keep-notify", "--flag"])
@@ -2056,6 +2315,63 @@ mod tests {
     }
 
     #[test]
+    fn installs_untrusted_config_hooks_without_changing_existing_trust() {
+        let mut document = r#"model = "gpt-test"
+
+[[hooks.SessionStart]]
+matcher = ".*"
+
+[[hooks.SessionStart.hooks]]
+type = "command"
+command = "echo keep"
+timeout = 5
+
+[hooks.state]
+
+[hooks.state."existing-hook"]
+trusted_hash = "sha256:keep"
+"#
+        .parse::<DocumentMut>()
+        .unwrap();
+        let state_dir = Path::new("/tmp/tally state");
+        install_tally_config_hooks(&mut document, "/tmp/tally-codex", state_dir).unwrap();
+
+        let hooks = document["hooks"].as_table().unwrap();
+        for event in EVENTS {
+            let groups = hooks[event.name].as_array_of_tables().unwrap();
+            assert_eq!(
+                groups
+                    .iter()
+                    .flat_map(|group| group["hooks"].as_array_of_tables().unwrap().iter())
+                    .filter(|handler| {
+                        handler["command"]
+                            .as_str()
+                            .is_some_and(is_tally_hook_command)
+                    })
+                    .count(),
+                1
+            );
+        }
+        assert_eq!(
+            hooks["state"]["existing-hook"]["trusted_hash"].as_str(),
+            Some("sha256:keep")
+        );
+        assert_eq!(document.to_string().matches("trusted_hash").count(), 1);
+
+        assert_eq!(
+            remove_tally_config_hooks(&mut document).unwrap(),
+            EVENTS.len()
+        );
+        let hooks = document["hooks"].as_table().unwrap();
+        assert_eq!(
+            hooks["state"]["existing-hook"]["trusted_hash"].as_str(),
+            Some("sha256:keep")
+        );
+        assert!(document.to_string().contains("command = \"echo keep\""));
+        assert!(!document.to_string().contains("tally-codex"));
+    }
+
+    #[test]
     fn emits_heartbeat_only_after_a_quiet_interval() {
         assert!(!heartbeat_due(0, 600));
         assert!(!heartbeat_due(599, 600));
@@ -2092,19 +2408,22 @@ mod tests {
                 "SessionStart": [{
                     "hooks": [
                         {"type": "command", "command": "/bin/echo keep"},
+                        {"type": "command", "command": "/tmp/acme codex hook SessionStart"},
                         {"type": "command", "command": "/tmp/tally-codex hook SessionStart"},
+                        {"type": "command", "command": "/tmp/tally codex hook SessionStart"},
                         {"type": "command", "command": "/tmp/tally-host-hook SessionStart"},
                         {"type": "command", "command": "python3 codex_hook_logger.py SessionStart"}
                     ]
                 }]
             }
         });
-        assert_eq!(remove_tally_hooks(&mut config), 3);
+        assert_eq!(remove_tally_hooks(&mut config), 4);
         let handlers = config["hooks"]["SessionStart"][0]["hooks"]
             .as_array()
             .unwrap();
-        assert_eq!(handlers.len(), 1);
+        assert_eq!(handlers.len(), 2);
         assert_eq!(handlers[0]["command"], "/bin/echo keep");
+        assert_eq!(handlers[1]["command"], "/tmp/acme codex hook SessionStart");
     }
 
     #[test]

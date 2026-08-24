@@ -121,6 +121,8 @@ input:focus { outline: 3px solid rgba(23, 107, 77, 0.2); border-color: var(--acc
 .removal-option strong, .removal-option small { display: block; }
 .removal-option small { margin-top: 3px; color: var(--muted); font-weight: 400; }
 .notice { margin: 0 0 20px; color: var(--muted); font-size: 13px; }
+.requirement { margin: 10px 0 0; color: var(--error-text); }
+.requirement a { color: inherit; font-weight: 700; }
 .compact-details { margin-bottom: 18px; }
 
 details { margin: 0 0 22px; }
@@ -153,6 +155,13 @@ button.danger-action:hover { filter: brightness(0.88); }
 .error, .warning { padding: 12px; border-radius: 6px; overflow-wrap: anywhere; }
 .error { background: var(--error-bg); color: var(--error-text); }
 .warning { background: var(--warning-bg); color: var(--warning-text); }
+.approval { margin: 0 0 18px; padding: 14px; border: 1px solid var(--line); border-radius: 6px; background: var(--field); }
+.approval strong { display: block; }
+.approval ol { margin: 9px 0; padding-left: 22px; }
+.approval li + li { margin-top: 5px; }
+.approval code { padding: 1px 5px; border-radius: 3px; background: var(--line); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.approval kbd { padding: 1px 5px; border: 1px solid var(--line); border-radius: 3px; background: var(--surface); font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+.approval small { color: var(--muted); }
 
 .progress { height: 6px; overflow: hidden; border-radius: 3px; background: var(--line); }
 .progress span { display: block; width: 35%; height: 100%; background: var(--accent); animation: progress 1.1s ease-in-out infinite alternate; }

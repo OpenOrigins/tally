@@ -28,6 +28,7 @@
         <fieldset>
           <legend>Connect</legend>
           <div id="clientChoices"></div>
+          <p class="notice requirement" id="clientRequirements" role="status" hidden></p>
         </fieldset>
 
         <label for="apiKey">Agent API key</label>
@@ -84,6 +85,17 @@
         <div id="doneDataRow" hidden><dt>Local data</dt><dd id="doneData"></dd></div>
       </dl>
       <p class="warning" id="warning" role="status" hidden></p>
+      <div class="approval" id="approval" role="status" hidden>
+        <strong>Approve the hooks in Codex CLI</strong>
+        <ol>
+          <li>Quit Codex Desktop.</li>
+          <li>Open Terminal or PowerShell and run <code>codex</code>.</li>
+          <li>Choose <strong>Review hooks</strong> and inspect the OpenOrigins Tally commands.</li>
+          <li>Press <kbd>t</kbd> to trust all hooks, then quit the CLI.</li>
+          <li>Reopen Codex Desktop.</li>
+        </ol>
+        <small id="approvalVersion"></small>
+      </div>
       <button class="secondary" id="retryButton" type="button" hidden>Try another key</button>
       <button class="secondary" id="doneCloseButton" type="button">Close</button>
       <p class="close-note">You can close this window.</p>

@@ -48,6 +48,26 @@ fn run() -> Result<()> {
 }
 
 fn run_gui() -> Result<()> {
+    let codex_cli = tally_codex::codex_cli_status();
+    let (codex_available, codex_detail, codex_version) = match codex_cli {
+        Ok(status) => (
+            true,
+            Some(format!(
+                "{} at {}",
+                status.version,
+                status.command.display()
+            )),
+            Some(status.version),
+        ),
+        Err(_) => (
+            false,
+            Some(
+                "Codex CLI is required for Codex Desktop. Install or update it, confirm `codex --version` works, then reopen Tally."
+                    .to_string(),
+            ),
+            None,
+        ),
+    };
     tally_common::run_installer_gui(
         vec![
             tally_common::GuiClient {
@@ -56,6 +76,9 @@ fn run_gui() -> Result<()> {
                 config_path: tally_codex::default_config_path(),
                 state_dir: tally_codex::default_state_dir(),
                 installed_binary_path: tally_codex::default_installed_binary_path(),
+                available: codex_available,
+                availability_detail: codex_detail,
+                detected_version: codex_version,
             },
             tally_common::GuiClient {
                 id: "claude",
@@ -63,6 +86,9 @@ fn run_gui() -> Result<()> {
                 config_path: tally_claude::default_config_path(),
                 state_dir: tally_claude::default_state_dir(),
                 installed_binary_path: tally_claude::default_installed_binary_path(),
+                available: true,
+                availability_detail: None,
+                detected_version: None,
             },
         ],
         |client, options| match client {

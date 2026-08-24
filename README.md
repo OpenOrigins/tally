@@ -9,6 +9,10 @@ dashboard.
 First, open **Connect a client** in the OpenOrigins dashboard and generate an
 Agent API key. Keep that page open so you can paste the key into Tally.
 
+For Codex, install the [Codex CLI](https://developers.openai.com/codex/cli)
+first and confirm that `codex --version` works in Terminal or PowerShell. Tally
+uses Codex's native lifecycle hooks and does not bypass Codex's hook review.
+
 ### macOS
 
 1. Open the [latest Tally release](https://github.com/OpenOrigins/tally/releases/latest).
@@ -70,8 +74,11 @@ changed. New installations default to the OpenOrigins Production ingest API;
 development endpoints are used only when explicitly entered.
 
 Quit and reopen Codex after installing or updating Tally. Tally records Codex
-Desktop turns through Codex's notification callback and keeps the command-line
-hooks for detailed tool and lifecycle records.
+Desktop turns through Codex's notification callback and uses approved Codex
+hooks for detailed tool and lifecycle records. After installing Tally for
+Codex, quit Codex Desktop, run `codex` in Terminal or PowerShell, choose
+**Review hooks**, inspect the OpenOrigins Tally commands, then press `t` to trust
+all hooks. Quit the CLI and reopen Codex Desktop.
 
 Select **Remove Tally** to remove hooks, credentials, and installed hook helpers.
 Queued records and local logs are retained by default so they remain available
@@ -89,15 +96,14 @@ verification is documented under [docs](docs/).
 
 ## Compatibility
 
-Tally 0.1.9 is tested with Codex CLI/Desktop 0.149.0-alpha.4 and Claude Code
-2.1.223. It is expected to remain compatible with Codex versions that support
-`hooks.json` and the `notify` callback, and Claude Code versions that support
+Tally is tested with Codex CLI/Desktop 0.149.1 and Claude Code 2.1.223. It is
+expected to remain compatible with Codex versions that support lifecycle hooks
+in `config.toml` and the `notify` callback, and Claude Code versions that support
 command hooks.
 
-Codex CLI provides detailed lifecycle and tool records. Codex Desktop currently
-provides session, instruction, and turn records through the notification
-callback because its app server does not invoke `hooks.json` in the tested
-version.
+Codex requires hook commands to be reviewed and trusted in Codex CLI before
+they run. Tally writes the hook definitions but never writes Codex's trust
+hashes or bypasses this approval.
 
 ## From Source
 
