@@ -30,7 +30,9 @@ async function load() {
   if (!token) throw new Error("This installer session has expired. Reopen the Tally installer.");
   const status = await api("/api/status");
   clients = status.clients;
-  document.title = "Tally Installer";
+  const version = status.version ? `v${status.version}` : "";
+  document.getElementById("version").textContent = version;
+  document.title = version ? `Tally ${version} Installer` : "Tally Installer";
   document.getElementById("title").textContent = "Connect Tally";
   document.getElementById("clientChoices").replaceChildren(...clients.map(clientChoice));
   document.getElementById("configPaths").replaceChildren(...clients.map(configPathField));

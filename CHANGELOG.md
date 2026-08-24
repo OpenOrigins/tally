@@ -4,6 +4,14 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.9 - 2026-08-24
+
+### Added
+
+- Show the installed Tally version in the graphical installer and window title.
+- State the exact Codex CLI/Desktop and Claude Code versions verified for the
+  release, together with capability-based compatibility guidance.
+
 ### Fixed
 
 - Register a Codex turn-completion callback so Codex Desktop forwards session,

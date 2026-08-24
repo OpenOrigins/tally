@@ -40,6 +40,9 @@ EXPECTED_TYPES = [
     "SESSION_START",
     "TURN_END",
 ]
+PACKAGE_VERSION = tomllib.loads(
+    (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+)["workspace"]["package"]["version"]
 
 
 def run(
@@ -267,6 +270,7 @@ def gui_install(
             assert "Cancel" in html
             assert "Close" in html
             assert "Delete queued records and local logs" in html
+            assert 'id="version"' in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
             assert response.headers["cache-control"] == "no-store"
@@ -282,6 +286,7 @@ def gui_install(
         assert not unauthorized["ok"]
 
         status, _ = gui_request(origin, token, "/api/status", {})
+        assert status["version"] == PACKAGE_VERSION
         assert status["defaultApiUrl"] == (
             "https://api.prod.openorigins.com/v1/tally/logs"
         )

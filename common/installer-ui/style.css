@@ -51,6 +51,7 @@ header {
 .brand, .status { margin: 0; }
 .brand { flex-shrink: 0; font-weight: 700; white-space: nowrap; }
 .brand span, .status { color: var(--muted); }
+.brand .version { margin-left: 5px; font-size: 12px; font-weight: 500; }
 .status { font-size: 13px; text-align: right; }
 
 section { padding-top: 24px; }

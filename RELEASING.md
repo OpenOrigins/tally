@@ -17,15 +17,17 @@ assessed by Gatekeeper before upload. Windows is currently unsigned.
 ## Checklist
 
 1. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
-2. Run `./scripts/release-check.sh` from a clean checkout.
-3. Merge to `dev` and wait for every CI job to pass.
-4. Tag that exact commit as `v<version>` and push the tag.
-5. Wait for all four native release jobs and the publish job to pass.
-6. Download every asset and verify `sha256sum --check SHA256SUMS`.
-7. Mount both DMGs and verify the app and DMG with `codesign`, `stapler`, and
+2. Record the exact Codex CLI/Desktop and Claude Code versions tested in
+   `README.md` and `.github/workflows/release.yml`.
+3. Run `./scripts/release-check.sh` from a clean checkout.
+4. Merge to `dev` and wait for every CI job to pass.
+5. Tag that exact commit as `v<version>` and push the tag.
+6. Wait for all four native release jobs and the publish job to pass.
+7. Download every asset and verify `sha256sum --check SHA256SUMS`.
+8. Mount both DMGs and verify the app and DMG with `codesign`, `stapler`, and
    `spctl`. Test installation, retry, hook execution, and uninstall on Windows
    and Linux as well.
-8. Promote the generated Homebrew cask only after the published bytes and
+9. Promote the generated Homebrew cask only after the published bytes and
    checksums are final.
 
 Never replace an asset after its checksum has been promoted to Homebrew. Publish

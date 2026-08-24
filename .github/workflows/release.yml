@@ -14,6 +14,10 @@ on:
 permissions:
   contents: write
 
+env:
+  TESTED_CODEX_VERSION: "0.149.0-alpha.4"
+  TESTED_CLAUDE_VERSION: "2.1.223"
+
 jobs:
   build:
     name: Build (${{ matrix.label }})
@@ -263,6 +267,12 @@ jobs:
 
             Choose Codex, Claude Code, or both in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard.
 
+            ## Compatibility
+
+            Tested with Codex CLI/Desktop `${{ env.TESTED_CODEX_VERSION }}` and Claude Code `${{ env.TESTED_CLAUDE_VERSION }}`.
+
+            Tally is expected to remain compatible with Codex versions that support `hooks.json` and the `notify` callback, and Claude Code versions that support command hooks. Codex CLI provides detailed lifecycle and tool records. Codex Desktop provides session, instruction, and turn records through the notification callback in the tested version.
+
       - name: Open Homebrew cask update pull request
         if: github.event_name == 'push'
         continue-on-error: true
@@ -317,6 +327,12 @@ jobs:
             - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
 
             Choose Codex, Claude Code, or both. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard.
+
+            ## Compatibility
+
+            Tested with Codex CLI/Desktop `${{ env.TESTED_CODEX_VERSION }}` and Claude Code `${{ env.TESTED_CLAUDE_VERSION }}`.
+
+            Tally is expected to remain compatible with Codex versions that support `hooks.json` and the `notify` callback, and Claude Code versions that support command hooks. Codex CLI provides detailed lifecycle and tool records. Codex Desktop provides session, instruction, and turn records through the notification callback in the tested version.
 
             macOS apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
         run: gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES" --repo "$GITHUB_REPOSITORY"
