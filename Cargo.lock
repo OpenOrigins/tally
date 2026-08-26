@@ -693,7 +693,7 @@ dependencies = [
 
 [[package]]
 name = "tally"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "tally-claude",
  "tally-codex",
@@ -703,7 +703,7 @@ dependencies = [
 
 [[package]]
 name = "tally-claude"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "serde_json",
  "tally-common",
@@ -711,7 +711,7 @@ dependencies = [
 
 [[package]]
 name = "tally-codex"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "fs2",
  "serde_json",
@@ -721,7 +721,7 @@ dependencies = [
 
 [[package]]
 name = "tally-common"
-version = "0.1.10"
+version = "0.1.11"
 dependencies = [
  "chrono",
  "fs2",
