@@ -15,6 +15,7 @@ fs2 = "0.4"
 getrandom = "0.3"
 libc = "0.2"
 rpassword = "7"
+regex = "1"
 serde_json = "1"
 sha2 = "0.10"
 tally-common = { path = "common" }

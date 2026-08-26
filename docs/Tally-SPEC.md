@@ -64,8 +64,8 @@ Each party's Anchor independently records the handoff event using the same `hand
 **5. Timestamps must be externally attested.**  
 Anchor attaches an OpenOrigins receipt to each transmitted record, carrying an external time attestation.
 
-**6. The log is append-only.**  
-No record may be modified or deleted after being written. Corrections are made by appending a new record referencing the corrected one.
+**6. The logical log is append-only.**
+No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery spool may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
 
 **7. Heartbeat ensures gap detection.**  
 Anchor emits one agent-scoped `HEARTBEAT` record every 10 minutes (600 seconds) whenever no other records are being written for that agent. Concurrent sessions share the same heartbeat window.
@@ -86,6 +86,41 @@ Arbitrator-tier fields are sealed by default. On routine ingestion they are stor
 
 ### PRIVATE `[PRV]`
 Only the SHA-256 hash and a company-held URI are transmitted to OpenOrigins. The plaintext never leaves company infrastructure. OpenOrigins can confirm the content existed and has not been altered, but cannot read it. If a dispute requires inspection of a private field, the company must voluntarily produce the plaintext, which is verified against the anchored hash.
+
+### Bounded server evidence
+
+Implementations may transmit a bounded, redacted plaintext excerpt as an
+ARBITRATOR field to support server-side anomaly detection. When present it uses
+this shape:
+
+```json
+{
+  "server_evidence": {
+    "schema_version": "tally-server-evidence.v1",
+    "visibility": "arbitrator",
+    "text": "<bounded redacted plaintext>",
+    "content_hash": "<SHA-256 of the unredacted source value>",
+    "truncated": false,
+    "redaction_count": 0,
+    "risk_signals": []
+  }
+}
+```
+
+`risk_signals` are advisory candidates for ranking and human review. They are not
+findings. The receiver must apply ARBITRATOR access control, encryption, audit,
+unsealing, and deletion requirements to `server_evidence`. Clients must support
+disabling this field when those controls are unavailable.
+
+### Local retention
+
+Pending records and the private evidence they reference must not be deleted.
+After successful ingestion, clients may remove redundant structured local
+copies and garbage-collect unreferenced private evidence under a documented age
+and size policy. Content-addressed storage is recommended so repeated payloads
+share one immutable object. An implementation claiming Level 2 must configure
+private retention long enough to keep its URIs resolvable for the organisation's
+dispute window.
 
 ---
 
