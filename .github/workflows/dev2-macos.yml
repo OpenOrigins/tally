@@ -142,7 +142,7 @@ jobs:
         shell: bash
         run: |
           mv "dist/tally-${{ matrix.label }}.dmg" "dist/tally-dev2-${{ matrix.label }}.dmg"
-          shasum -a 256 "dist/tally-dev2-${{ matrix.label }}.dmg" > "dist/tally-dev2-${{ matrix.label }}.sha256"
+          (cd dist && shasum -a 256 "tally-dev2-${{ matrix.label }}.dmg" > "tally-dev2-${{ matrix.label }}.sha256")
 
       - name: Upload Dev2 installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
