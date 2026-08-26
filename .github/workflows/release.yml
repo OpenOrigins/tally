@@ -202,8 +202,15 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
+  build-dev2-macos:
+    name: Build Dev2 macOS installers
+    uses: ./.github/workflows/dev2-macos.yml
+    secrets: inherit
+
   publish:
-    needs: build
+    needs:
+      - build
+      - build-dev2-macos
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -214,12 +221,20 @@ jobs:
         with:
           ref: dev
 
-      - name: Download tested release assets
+      - name: Download tested production release assets
         uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
         with:
           pattern: native-*
           path: dist
           merge-multiple: true
+
+      - name: Keep Dev2 installers out of the release
+        shell: bash
+        run: |
+          if find dist -type f -iname '*dev2*' -print -quit | grep -q .; then
+            echo "::error::Dev2 test artifacts must not be published"
+            exit 1
+          fi
 
       - name: Create one checksum manifest
         working-directory: dist

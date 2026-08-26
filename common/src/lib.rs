@@ -19,7 +19,10 @@ pub use installer_gui::{run_installer_gui, GuiClient};
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
-pub const DEFAULT_API_URL: &str = "https://api.prod.openorigins.com/v1/tally/logs";
+pub const DEFAULT_API_URL: &str = match option_env!("TALLY_DEFAULT_API_URL") {
+    Some(url) => url,
+    None => "https://api.prod.openorigins.com/v1/tally/logs",
+};
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 600;
 pub const DEFAULT_PRIVATE_RETENTION_DAYS: u64 = 30;
 pub const DEFAULT_PRIVATE_STORAGE_LIMIT_MIB: u64 = 256;
@@ -1658,14 +1661,14 @@ mod tests {
     }
 
     #[test]
-    fn installer_defaults_to_production_ingest() {
+    fn installer_uses_the_build_default_ingest() {
         let options = install_options("test-agent-key".to_string(), None, None).unwrap();
         assert_eq!(options.api_url, DEFAULT_API_URL);
         assert_eq!(
             options.api_url,
-            "https://api.prod.openorigins.com/v1/tally/logs"
+            option_env!("TALLY_DEFAULT_API_URL")
+                .unwrap_or("https://api.prod.openorigins.com/v1/tally/logs")
         );
-        assert!(!options.api_url.contains("dev2"));
     }
 
     #[test]

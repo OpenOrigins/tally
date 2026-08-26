@@ -360,10 +360,11 @@ def gui_install(
 
         status, _ = gui_request(origin, token, "/api/status", {})
         assert status["version"] == PACKAGE_VERSION
-        assert status["defaultApiUrl"] == (
-            "https://api.prod.openorigins.com/v1/tally/logs"
+        expected_default_api_url = os.environ.get(
+            "TALLY_EXPECTED_DEFAULT_API_URL",
+            "https://api.prod.openorigins.com/v1/tally/logs",
         )
-        assert "dev2" not in status["defaultApiUrl"]
+        assert status["defaultApiUrl"] == expected_default_api_url
         agent_ids = [agent] if isinstance(agent, str) else agent
         client_status = {
             client["id"]: client for client in status["clients"] if client["id"] in agent_ids
