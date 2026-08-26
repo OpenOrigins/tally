@@ -7,10 +7,11 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use tally_common::agent_runtime::{
-    backup_if_exists, env_enabled, expand_home, first_mapping_by_key, first_string_by_key,
-    home_dir, hook_command, light_git_state, parse_payload, random_hex, read_json_file, read_stdin,
-    run_id, safe_slug, set_default, sha256_str, sha256_value, stable_id, unique_suffix, utc_now,
-    workspace_path, write_json_atomic, AuditSink, AuditSinkConfig, HeartbeatFiles,
+    backup_if_exists, env_enabled, evidence_summary, expand_home, first_mapping_by_key,
+    first_string_by_key, first_value_by_key, home_dir, hook_command, light_git_state,
+    parse_payload, random_hex, read_json_file, read_stdin, run_id, safe_slug, server_evidence,
+    set_default, sha256_str, sha256_value, stable_id, utc_now, workspace_path, write_json_atomic,
+    AuditSink, AuditSinkConfig, HeartbeatFiles,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -115,10 +116,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     }
 
     let sink = audit_sink("claude-hooks")?;
-    let raw_ref = sink.private_payload(
-        &format!("hook_{}_{}", event_type, unique_suffix()),
-        &payload,
-    )?;
+    let raw_ref = sink.private_payload(&payload)?;
     let observed_at = utc_now();
     let metadata = json!({
         "observed_at": observed_at,
@@ -167,7 +165,7 @@ fn wrap_claude(args: Vec<String>) -> Result<i32> {
     set_runtime_defaults();
 
     let is_print_mode = matches!(args.first().map(String::as_str), Some("-p" | "--print"));
-    if is_print_mode && env_enabled("TALLY_TEE_CLAUDE_STDIO", true) {
+    if is_print_mode && env_enabled("TALLY_TEE_CLAUDE_STDIO", false) {
         run_claude_with_tee(&args)
     } else {
         let status = Command::new("claude").args(&args).status()?;
@@ -448,9 +446,9 @@ fn build_tally_record(
             "raw_hook_hash": raw_hash,
         }),
         "UserPromptSubmit" => {
-            let summary = prompt
-                .map(|value| value.chars().take(240).collect::<String>())
-                .unwrap_or_else(|| "User prompt submitted to Claude Code".to_string());
+            let evidence =
+                server_evidence(&prompt.map(Value::String).unwrap_or_else(|| payload.clone()));
+            let summary = evidence_summary(&evidence, "User prompt submitted to Claude Code");
             json!({
                 "record_type": "INSTRUCTION_RECEIVED",
                 "schema_version": "0.2",
@@ -467,6 +465,7 @@ fn build_tally_record(
                     "detail_hash": raw_ref["hash"],
                     "detail_uri": raw_ref["uri"],
                 },
+                "server_evidence": evidence,
                 "claude_hook_event": event_type,
             })
         }
@@ -477,6 +476,7 @@ fn build_tally_record(
             )
             .cloned()
             .unwrap_or_else(|| payload.clone());
+            let evidence = server_evidence(&tool_params);
             json!({
                 "record_type": "ACTION_TAKEN",
                 "schema_version": "0.2",
@@ -499,6 +499,7 @@ fn build_tally_record(
                 "post_state_uri": Value::Null,
                 "action_timestamp": observed_at,
                 "deviance_flag": {"deviated": false, "delta_category": Value::Null, "delta_hash": Value::Null, "delta_uri": Value::Null},
+                "server_evidence": evidence,
                 "claude_hook_event": event_type,
                 "raw_hook_hash": raw_ref["hash"],
             })
@@ -506,6 +507,19 @@ fn build_tally_record(
         "PostToolUse" => {
             let has_error =
                 first_string_by_key(payload, &["tool_error", "error", "exception"]).is_some();
+            let evidence_source = first_value_by_key(
+                payload,
+                &[
+                    "tool_response",
+                    "tool_result",
+                    "result",
+                    "output",
+                    "content",
+                ],
+            )
+            .unwrap_or(payload);
+            let evidence = server_evidence(evidence_source);
+            let summary = evidence_summary(&evidence, "Claude Code reported a tool result");
             json!({
                 "record_type": "RESULT_RECEIVED",
                 "schema_version": "0.2",
@@ -515,7 +529,7 @@ fn build_tally_record(
                 "result_uri": raw_ref["uri"],
                 "result_received_at": observed_at,
                 "result_interpretation": {
-                    "summary": "[ARB] Claude Code reported a tool result",
+                    "summary": format!("[ARB] {summary}"),
                     "detail_hash": raw_ref["hash"],
                     "detail_uri": raw_ref["uri"],
                 },
@@ -525,20 +539,35 @@ fn build_tally_record(
                     "description_hash": if has_error { raw_ref["hash"].clone() } else { Value::Null },
                     "description_uri": if has_error { raw_ref["uri"].clone() } else { Value::Null },
                 },
+                "server_evidence": evidence,
                 "claude_hook_event": event_type,
             })
         }
-        "Stop" => json!({
-            "record_type": "TURN_END",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "turn_id": turn_id(payload),
-            "outcome": "completed",
-            "outcome_hash": raw_ref["hash"],
-            "outcome_uri": raw_ref["uri"],
-            "turn_ended_at": observed_at,
-            "claude_hook_event": event_type,
-        }),
+        "Stop" => {
+            let evidence_source = first_value_by_key(
+                payload,
+                &[
+                    "last_assistant_message",
+                    "response",
+                    "result",
+                    "output",
+                    "content",
+                ],
+            )
+            .unwrap_or(payload);
+            json!({
+                "record_type": "TURN_END",
+                "schema_version": "0.2",
+                "session_id": session_id,
+                "turn_id": turn_id(payload),
+                "outcome": "completed",
+                "outcome_hash": raw_ref["hash"],
+                "outcome_uri": raw_ref["uri"],
+                "turn_ended_at": observed_at,
+                "server_evidence": server_evidence(evidence_source),
+                "claude_hook_event": event_type,
+            })
+        }
         "SessionEnd" => json!({
             "record_type": "SESSION_END",
             "schema_version": "0.2",

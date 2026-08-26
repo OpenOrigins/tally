@@ -12,6 +12,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::Result;
 
+pub use super::server_evidence::{evidence_summary, server_evidence};
+
 pub struct AuditSinkConfig<'a> {
     pub source: &'a str,
     pub log_root: PathBuf,
@@ -40,15 +42,17 @@ pub struct AuditSink {
 impl AuditSink {
     pub fn new(config: AuditSinkConfig<'_>) -> Result<Self> {
         let source = safe_slug(config.source, "source");
-        super::mark_tally_data_directory(&config.log_root)?;
-        let jsonl_dir = config.log_root.join("jsonl");
-        let tally_dir = config.log_root.join("tally").join(&source);
-        let private_dir = config
-            .log_root
-            .join("private")
-            .join(&config.run_id)
-            .join(&source);
-        let state_dir = config.log_root.join("state");
+        let log_root = config.log_root;
+        super::mark_tally_data_directory(&log_root)?;
+        if let Err(error) =
+            super::maybe_prune_local_storage(&log_root, &config.forwarding_state_dir, false)
+        {
+            eprintln!("Warning: local evidence cleanup could not run: {error}");
+        }
+        let jsonl_dir = log_root.join("jsonl");
+        let tally_dir = log_root.join("tally").join(&source);
+        let private_dir = log_root.join("private").join("objects");
+        let state_dir = log_root.join("state");
         for path in [&jsonl_dir, &tally_dir, &private_dir, &state_dir] {
             super::create_private_dir(path)?;
         }
@@ -87,23 +91,24 @@ impl AuditSink {
         Ok(next)
     }
 
-    pub fn private_payload(&self, label: &str, payload: &Value) -> Result<Value> {
+    pub fn private_payload(&self, payload: &Value) -> Result<Value> {
+        let hash = sha256_value(payload);
+        let digest = hash.trim_start_matches("sha256:");
         let path = self
             .private_dir
-            .join(format!("{}.json", safe_slug(label, "payload")));
+            .join(&digest[..2])
+            .join(format!("{digest}.json"));
         write_json_atomic(&path, payload)?;
-        let filename = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .unwrap_or("payload.json");
         Ok(json!({
-            "hash": sha256_value(payload),
-            "uri": format!("private://{}/{}/{}", self.run_id, self.source, filename),
-            "path": path.display().to_string(),
+            "hash": hash,
+            "uri": format!("private://sha256/{digest}"),
         }))
     }
 
     pub fn append_jsonl(&self, stream_name: &str, event: &Value) -> Result<()> {
+        if !env_enabled("TALLY_DEBUG_JSONL", false) {
+            return Ok(());
+        }
         append_jsonl_locked(
             &self
                 .jsonl_dir
@@ -422,6 +427,24 @@ pub fn first_mapping_by_key<'a>(value: &'a Value, names: &[&str]) -> Option<&'a 
         Value::Array(items) => items
             .iter()
             .find_map(|value| first_mapping_by_key(value, names)),
+        _ => None,
+    }
+}
+
+pub fn first_value_by_key<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name).filter(|value| !value.is_null()) {
+                    return Some(value);
+                }
+            }
+            map.values()
+                .find_map(|value| first_value_by_key(value, names))
+        }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| first_value_by_key(value, names)),
         _ => None,
     }
 }
@@ -805,7 +828,7 @@ pub fn set_default(key: &str, value: &str) {
 mod tests {
     use super::{
         claim_heartbeat_daemon, first_string_by_key, heartbeat_due, heartbeat_stop_requested,
-        parse_payload, safe_slug, sha256_str, stable_id, unique_suffix,
+        parse_payload, safe_slug, sha256_str, stable_id, unique_suffix, AuditSink, AuditSinkConfig,
     };
     use fs2::FileExt;
     use serde_json::json;
@@ -833,6 +856,39 @@ mod tests {
         assert!(sha256_str("value").starts_with("sha256:"));
         assert_eq!(safe_slug("hello world!", "fallback"), "hello_world");
         assert_eq!(safe_slug("!!!", "fallback"), "fallback");
+    }
+
+    #[test]
+    fn private_payloads_use_one_content_addressed_object() {
+        let directory = env::temp_dir().join(format!("tally-objects-{}", unique_suffix()));
+        let log_root = directory.join("logs");
+        let forwarding_state_dir = directory.join("forwarding");
+        let sink = AuditSink::new(AuditSinkConfig {
+            source: "test",
+            log_root: log_root.clone(),
+            run_id: "run-a".to_string(),
+            workspace: directory.clone(),
+            forwarding_state_dir,
+            agent_id: "agent-a".to_string(),
+            heartbeat_client: "test",
+            event_schema: "test.v1",
+        })
+        .unwrap();
+        let first = sink.private_payload(&json!({"same": true})).unwrap();
+        let second = sink.private_payload(&json!({"same": true})).unwrap();
+
+        assert_eq!(first["hash"], second["hash"]);
+        assert_eq!(first["uri"], second["uri"]);
+        assert!(first["uri"]
+            .as_str()
+            .unwrap()
+            .starts_with("private://sha256/"));
+        let objects = fs::read_dir(log_root.join("private/objects"))
+            .unwrap()
+            .flat_map(|entry| fs::read_dir(entry.unwrap().path()).unwrap())
+            .count();
+        assert_eq!(objects, 1);
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[test]

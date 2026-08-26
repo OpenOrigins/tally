@@ -1,6 +1,8 @@
 # macOS junk
 .DS_Store
 **/.DS_Store
+**/__pycache__/
+*.py[cod]
 ._.DS_Store
 **/._.DS_Store
 

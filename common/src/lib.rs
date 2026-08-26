@@ -1,6 +1,7 @@
 use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
+use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
 use std::io::{self, IsTerminal, Write};
@@ -12,6 +13,7 @@ use url::Url;
 
 pub mod agent_runtime;
 mod installer_gui;
+mod server_evidence;
 
 pub use installer_gui::{run_installer_gui, GuiClient};
 
@@ -19,9 +21,13 @@ pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
 
 pub const DEFAULT_API_URL: &str = "https://api.prod.openorigins.com/v1/tally/logs";
 pub const DEFAULT_HEARTBEAT_INTERVAL_SECONDS: u64 = 600;
+pub const DEFAULT_PRIVATE_RETENTION_DAYS: u64 = 30;
+pub const DEFAULT_PRIVATE_STORAGE_LIMIT_MIB: u64 = 256;
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 const TALLY_DATA_MARKER: &str = ".openorigins-tally-data";
 const FORWARD_CLAIM_STALE_AFTER: Duration = Duration::from_secs(30);
+const FORWARD_QUEUE_VERSION: u64 = 1;
+const STORAGE_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 #[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
 
@@ -568,12 +574,42 @@ pub fn enqueue_record(state_dir: &Path, record_path: &Path, executable: &Path) -
     create_private_dir(&queue_dir)?;
     let contents = fs::read(record_path)?;
     let queue_name = forward_queue_name(&contents);
+    let record: Value = serde_json::from_slice(&contents)?;
+    let log_root = log_root_for_record_path(record_path);
+    let private_paths = log_root
+        .as_deref()
+        .map(|root| private_paths_for_record(root, &record))
+        .unwrap_or_default();
+    let envelope = json!({
+        "tally_forward_queue_version": FORWARD_QUEUE_VERSION,
+        "record": record,
+        "local": {
+            "log_root": log_root,
+            "private_paths": private_paths,
+        },
+    });
+    let queued_contents = format!("{}\n", serde_json::to_string_pretty(&envelope)?);
+    let mut durable_envelope = false;
     if !forward_record_is_pending(&queue_dir, &queue_name)? {
         let queued = queue_dir.join(&queue_name);
-        if let Err(error) = atomic_write(&queued, &contents, 0o600) {
+        if let Err(error) = atomic_write(&queued, queued_contents.as_bytes(), 0o600) {
             if !forward_record_is_pending(&queue_dir, &queue_name)? {
                 return Err(error.into());
             }
+        } else {
+            durable_envelope = true;
+        }
+    } else {
+        durable_envelope = pending_forward_record_is_envelope(&queue_dir, &queue_name)?;
+    }
+    if durable_envelope {
+        match fs::remove_file(record_path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => eprintln!(
+                "Warning: queued record but could not remove redundant local copy {}: {error}",
+                record_path.display()
+            ),
         }
     }
 
@@ -593,6 +629,63 @@ fn forward_record_is_pending(queue_dir: &Path, queue_name: &str) -> io::Result<b
         .filter_map(std::result::Result::ok)
         .filter_map(|entry| entry.file_name().into_string().ok())
         .any(|name| name.starts_with(&claim_prefix)))
+}
+
+fn forward_queue_file_is_envelope(path: &Path) -> bool {
+    fs::read_to_string(path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .is_some_and(|value| {
+            value["tally_forward_queue_version"].as_u64() == Some(FORWARD_QUEUE_VERSION)
+                && value.get("record").is_some()
+        })
+}
+
+fn pending_forward_record_is_envelope(queue_dir: &Path, queue_name: &str) -> io::Result<bool> {
+    let queued = queue_dir.join(queue_name);
+    if queued.is_file() {
+        return Ok(forward_queue_file_is_envelope(&queued));
+    }
+    let claim_prefix = format!("{queue_name}.sending-");
+    for entry in fs::read_dir(queue_dir)?.filter_map(std::result::Result::ok) {
+        let path = entry.path();
+        let matches_claim = path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with(&claim_prefix));
+        if matches_claim {
+            return Ok(forward_queue_file_is_envelope(&path));
+        }
+    }
+    // A matching item observed immediately before this check can disappear only
+    // after the forwarder has accepted it, so its original local copy is redundant.
+    Ok(true)
+}
+
+struct QueuedRecord {
+    body: String,
+    log_root: Option<PathBuf>,
+}
+
+fn decode_forward_queue_item(contents: &str) -> Result<QueuedRecord> {
+    let value: Value = serde_json::from_str(contents)?;
+    let Some(version) = value.get("tally_forward_queue_version") else {
+        return Ok(QueuedRecord {
+            body: contents.to_string(),
+            log_root: None,
+        });
+    };
+    if version.as_u64() != Some(FORWARD_QUEUE_VERSION) {
+        return Err(format!("unsupported forwarding queue version: {version}").into());
+    }
+    let record = value
+        .get("record")
+        .ok_or("forwarding queue envelope does not contain a record")?;
+    let log_root = value["local"]["log_root"].as_str().map(PathBuf::from);
+    Ok(QueuedRecord {
+        body: serde_json::to_string(record)?,
+        log_root,
+    })
 }
 
 pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
@@ -761,6 +854,7 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
         .filter(|path| path.is_file() && path.extension().is_some_and(|value| value == "json"))
         .collect::<Vec<_>>();
     records.sort();
+    let mut log_roots = BTreeSet::new();
     for path in records {
         let Some(claimed) = claim_forward_record(&path)? else {
             continue;
@@ -772,16 +866,30 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
                 return Err(error.into());
             }
         };
-        if let Err(error) = serde_json::from_str::<Value>(&body) {
-            restore_forward_claim(&path, &claimed)?;
-            return Err(error.into());
-        }
-        if let Err(error) = post_json(api_url, &api_key, &body) {
+        let queued = match decode_forward_queue_item(&body) {
+            Ok(queued) => queued,
+            Err(error) => {
+                restore_forward_claim(&path, &claimed)?;
+                return Err(error);
+            }
+        };
+        if let Err(error) = post_json(api_url, &api_key, &queued.body) {
             restore_forward_claim(&path, &claimed)?;
             write_forward_status(state_dir, false, Some(&error))?;
             return Err(error.into());
         }
         fs::remove_file(claimed)?;
+        if let Some(log_root) = queued.log_root {
+            log_roots.insert(log_root);
+        }
+    }
+    for log_root in log_roots {
+        if let Err(error) = maybe_prune_local_storage(&log_root, state_dir, true) {
+            eprintln!(
+                "Warning: records were forwarded but local evidence cleanup failed for {}: {error}",
+                log_root.display()
+            );
+        }
     }
     write_forward_status(state_dir, true, None)?;
     FileExt::unlock(&lock)?;
@@ -830,6 +938,342 @@ fn recover_stale_forward_claims(queue_dir: &Path) -> io::Result<()> {
         restore_forward_claim(&original, &claimed)?;
     }
     Ok(())
+}
+
+pub(crate) fn maybe_prune_local_storage(
+    log_root: &Path,
+    forwarding_state_dir: &Path,
+    force: bool,
+) -> Result<()> {
+    if !log_root.join(TALLY_DATA_MARKER).is_file() {
+        return Ok(());
+    }
+    let state_dir = log_root.join("state");
+    create_private_dir(&state_dir)?;
+    let lock = open_private_lock(&state_dir.join("storage-gc.lock"))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if lock_is_contended(&error) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+
+    let status_path = state_dir.join("storage-gc.json");
+    let now = unix_now_seconds();
+    let gc_interval = env::var("TALLY_STORAGE_GC_INTERVAL_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(STORAGE_GC_INTERVAL.as_secs());
+    let previous = fs::read_to_string(&status_path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .and_then(|value| value["updated_at_unix"].as_u64())
+        .unwrap_or_default();
+    if !force && now.saturating_sub(previous) < gc_interval {
+        FileExt::unlock(&lock)?;
+        return Ok(());
+    }
+
+    let retention_seconds = configured_private_retention_seconds();
+    let storage_limit_bytes = configured_private_storage_limit_bytes();
+    let report = prune_local_storage(
+        log_root,
+        forwarding_state_dir,
+        retention_seconds,
+        storage_limit_bytes,
+    )?;
+    let status = format!(
+        "{}\n",
+        serde_json::to_string_pretty(&json!({
+            "updated_at_unix": now,
+            "retention_seconds": retention_seconds,
+            "storage_limit_bytes": storage_limit_bytes,
+            "removed_files": report.removed_files,
+            "removed_bytes": report.removed_bytes,
+            "retained_bytes": report.retained_bytes,
+            "protected_files": report.protected_files,
+        }))?
+    );
+    atomic_write(&status_path, status.as_bytes(), 0o600)?;
+    FileExt::unlock(&lock)?;
+    Ok(())
+}
+
+#[derive(Default)]
+struct StoragePruneReport {
+    removed_files: u64,
+    removed_bytes: u64,
+    retained_bytes: u64,
+    protected_files: u64,
+}
+
+fn prune_local_storage(
+    log_root: &Path,
+    forwarding_state_dir: &Path,
+    retention_seconds: u64,
+    storage_limit_bytes: u64,
+) -> Result<StoragePruneReport> {
+    let private_root = log_root.join("private");
+    let protected = protected_private_paths(log_root, forwarding_state_dir)?;
+    let now = SystemTime::now();
+    let managed_roots = [
+        private_root.clone(),
+        log_root.join("jsonl"),
+        log_root.join("claude-stdio"),
+        log_root.join("codex-stdio"),
+        forwarding_state_dir.join("desktop-notifications"),
+    ];
+    let mut files = managed_roots
+        .iter()
+        .map(|root| files_below(root))
+        .collect::<io::Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .filter_map(|path| {
+            let metadata = fs::metadata(&path).ok()?;
+            if !metadata.is_file() {
+                return None;
+            }
+            let modified = metadata.modified().unwrap_or(UNIX_EPOCH);
+            Some((path, metadata.len(), modified))
+        })
+        .collect::<Vec<_>>();
+    files.sort_by_key(|(_, _, modified)| *modified);
+    let mut report = StoragePruneReport {
+        retained_bytes: files.iter().map(|(_, size, _)| *size).sum(),
+        protected_files: files
+            .iter()
+            .filter(|(path, _, _)| protected.contains(path))
+            .count() as u64,
+        ..StoragePruneReport::default()
+    };
+
+    for (path, size, modified) in files {
+        if protected.contains(&path) {
+            continue;
+        }
+        let expired =
+            now.duration_since(modified).unwrap_or_default().as_secs() >= retention_seconds;
+        let over_limit = report.retained_bytes > storage_limit_bytes;
+        if !expired && !over_limit {
+            continue;
+        }
+        match fs::remove_file(&path) {
+            Ok(()) => {
+                report.removed_files += 1;
+                report.removed_bytes += size;
+                report.retained_bytes = report.retained_bytes.saturating_sub(size);
+            }
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    for root in managed_roots {
+        remove_empty_directories(&root, &root)?;
+    }
+    Ok(report)
+}
+
+fn protected_private_paths(
+    log_root: &Path,
+    forwarding_state_dir: &Path,
+) -> Result<HashSet<PathBuf>> {
+    let private_root = log_root.join("private");
+    let mut protected = HashSet::new();
+    for path in files_below(&log_root.join("tally"))? {
+        collect_private_paths_from_file(log_root, &private_root, &path, &mut protected);
+    }
+    for path in files_below(&forwarding_state_dir.join("forward-queue"))? {
+        let Ok(contents) = fs::read_to_string(path) else {
+            continue;
+        };
+        let Ok(value) = serde_json::from_str::<Value>(&contents) else {
+            continue;
+        };
+        if value["tally_forward_queue_version"].as_u64() == Some(FORWARD_QUEUE_VERSION) {
+            if let Some(paths) = value["local"]["private_paths"].as_array() {
+                for path in paths.iter().filter_map(Value::as_str).map(PathBuf::from) {
+                    if path.starts_with(&private_root) {
+                        protected.insert(path);
+                    }
+                }
+            }
+            if let Some(record) = value.get("record") {
+                collect_private_paths(log_root, &private_root, record, &mut protected);
+            }
+        } else {
+            collect_private_paths(log_root, &private_root, &value, &mut protected);
+        }
+    }
+    Ok(protected)
+}
+
+fn collect_private_paths_from_file(
+    log_root: &Path,
+    private_root: &Path,
+    path: &Path,
+    protected: &mut HashSet<PathBuf>,
+) {
+    let Ok(contents) = fs::read_to_string(path) else {
+        return;
+    };
+    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
+        return;
+    };
+    collect_private_paths(log_root, private_root, &value, protected);
+}
+
+fn collect_private_paths(
+    log_root: &Path,
+    private_root: &Path,
+    value: &Value,
+    protected: &mut HashSet<PathBuf>,
+) {
+    match value {
+        Value::String(value) => {
+            if let Some(path) = resolve_private_uri(log_root, value) {
+                if path.starts_with(private_root) {
+                    protected.insert(path);
+                }
+            }
+        }
+        Value::Array(values) => {
+            for value in values {
+                collect_private_paths(log_root, private_root, value, protected);
+            }
+        }
+        Value::Object(values) => {
+            for value in values.values() {
+                collect_private_paths(log_root, private_root, value, protected);
+            }
+        }
+        _ => {}
+    }
+}
+
+fn private_paths_for_record(log_root: &Path, record: &Value) -> Vec<PathBuf> {
+    let private_root = log_root.join("private");
+    let mut paths = HashSet::new();
+    collect_private_paths(log_root, &private_root, record, &mut paths);
+    let mut paths = paths.into_iter().collect::<Vec<_>>();
+    paths.sort();
+    paths
+}
+
+fn resolve_private_uri(log_root: &Path, uri: &str) -> Option<PathBuf> {
+    let components = uri
+        .strip_prefix("private://")?
+        .split('/')
+        .collect::<Vec<_>>();
+    if components.iter().any(|part| {
+        part.is_empty()
+            || *part == "."
+            || *part == ".."
+            || part.contains('\\')
+            || part.contains(':')
+    }) {
+        return None;
+    }
+    if components.len() == 2 && components[0] == "sha256" {
+        let digest = components[1];
+        if digest.len() != 64 || !digest.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return None;
+        }
+        return Some(
+            log_root
+                .join("private")
+                .join("objects")
+                .join(&digest[..2])
+                .join(format!("{digest}.json")),
+        );
+    }
+    if components.len() == 3 {
+        return Some(
+            log_root
+                .join("private")
+                .join(components[0])
+                .join(components[1])
+                .join(components[2]),
+        );
+    }
+    None
+}
+
+fn log_root_for_record_path(record_path: &Path) -> Option<PathBuf> {
+    let source_dir = record_path.parent()?;
+    let tally_dir = source_dir.parent()?;
+    if tally_dir.file_name().and_then(|name| name.to_str()) != Some("tally") {
+        return None;
+    }
+    tally_dir.parent().map(Path::to_path_buf)
+}
+
+fn files_below(root: &Path) -> io::Result<Vec<PathBuf>> {
+    if !root.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    let mut directories = vec![root.to_path_buf()];
+    while let Some(directory) = directories.pop() {
+        for entry in fs::read_dir(directory)? {
+            let entry = entry?;
+            let path = entry.path();
+            if entry.file_type()?.is_dir() {
+                directories.push(path);
+            } else {
+                files.push(path);
+            }
+        }
+    }
+    Ok(files)
+}
+
+fn remove_empty_directories(root: &Path, directory: &Path) -> io::Result<bool> {
+    if !directory.is_dir() {
+        return Ok(false);
+    }
+    for entry in fs::read_dir(directory)?.filter_map(std::result::Result::ok) {
+        if entry.file_type()?.is_dir() {
+            remove_empty_directories(root, &entry.path())?;
+        }
+    }
+    let empty = fs::read_dir(directory)?.next().is_none();
+    if empty && directory != root {
+        fs::remove_dir(directory)?;
+    }
+    Ok(empty)
+}
+
+fn configured_private_retention_seconds() -> u64 {
+    env::var("TALLY_PRIVATE_RETENTION_SECONDS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            env::var("TALLY_PRIVATE_RETENTION_DAYS")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_PRIVATE_RETENTION_DAYS)
+                .saturating_mul(24 * 60 * 60)
+        })
+}
+
+fn configured_private_storage_limit_bytes() -> u64 {
+    env::var("TALLY_PRIVATE_STORAGE_LIMIT_BYTES")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or_else(|| {
+            env::var("TALLY_PRIVATE_STORAGE_LIMIT_MIB")
+                .ok()
+                .and_then(|value| value.parse::<u64>().ok())
+                .unwrap_or(DEFAULT_PRIVATE_STORAGE_LIMIT_MIB)
+                .saturating_mul(1024 * 1024)
+        })
+}
+
+fn unix_now_seconds() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_secs()
 }
 
 pub fn heartbeat_interval_seconds(requested_seconds: u64) -> u64 {
@@ -1097,11 +1541,13 @@ mod tests {
     #[cfg(unix)]
     use super::spawn_background;
     use super::{
-        atomic_write, claim_agent_heartbeat, claim_forward_record, executable_is_in_app_bundle,
-        forward_queue_name, forward_record_is_pending, heartbeat_interval_seconds, install_options,
-        mark_tally_data_directory, record_agent_activity, remove_tally_data, response_body_error,
-        restore_forward_claim, restore_snapshots, FileSnapshot, DEFAULT_API_URL,
-        DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        atomic_write, claim_agent_heartbeat, claim_forward_record, decode_forward_queue_item,
+        executable_is_in_app_bundle, forward_queue_name, forward_record_is_pending,
+        heartbeat_interval_seconds, install_options, mark_tally_data_directory,
+        pending_forward_record_is_envelope, prune_local_storage, record_agent_activity,
+        remove_tally_data, resolve_private_uri, response_body_error, restore_forward_claim,
+        restore_snapshots, FileSnapshot, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
+        DEFAULT_PRIVATE_RETENTION_DAYS, DEFAULT_PRIVATE_STORAGE_LIMIT_MIB,
     };
     use std::fs;
     use std::path::{Path, PathBuf};
@@ -1297,11 +1743,108 @@ mod tests {
             queued.file_name().unwrap().to_str().unwrap()
         )
         .unwrap());
+        assert!(!pending_forward_record_is_envelope(
+            &directory,
+            queued.file_name().unwrap().to_str().unwrap()
+        )
+        .unwrap());
 
         restore_forward_claim(&queued, &claimed).unwrap();
         assert!(queued.exists());
         assert!(!claimed.exists());
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn private_cache_prunes_only_unreachable_objects() {
+        let directory = test_directory("private-gc");
+        let log_root = directory.join("logs");
+        let forwarding_state = directory.join("forwarding");
+        mark_tally_data_directory(&log_root).unwrap();
+        let protected = log_root
+            .join("private/objects/aa")
+            .join(format!("{}.json", "a".repeat(64)));
+        let orphan = log_root
+            .join("private/objects/bb")
+            .join(format!("{}.json", "b".repeat(64)));
+        atomic_write(&protected, b"protected", 0o600).unwrap();
+        atomic_write(&orphan, b"orphan", 0o600).unwrap();
+        let duplicate_jsonl = log_root.join("jsonl/debug.jsonl");
+        atomic_write(&duplicate_jsonl, b"duplicate\n", 0o600).unwrap();
+        let record = log_root.join("tally/test/000001_RECORD.json");
+        atomic_write(
+            &record,
+            format!(
+                "{{\"payload_uri\":\"private://sha256/{}\"}}\n",
+                "a".repeat(64)
+            )
+            .as_bytes(),
+            0o600,
+        )
+        .unwrap();
+
+        let report = prune_local_storage(&log_root, &forwarding_state, 0, 0).unwrap();
+        assert!(protected.exists());
+        assert!(!orphan.exists());
+        assert!(!duplicate_jsonl.exists());
+        assert_eq!(report.protected_files, 1);
+
+        fs::remove_file(record).unwrap();
+        prune_local_storage(&log_root, &forwarding_state, 0, 0).unwrap();
+        assert!(!protected.exists());
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn private_cache_defaults_are_bounded() {
+        assert_eq!(DEFAULT_PRIVATE_RETENTION_DAYS, 30);
+        assert_eq!(DEFAULT_PRIVATE_STORAGE_LIMIT_MIB, 256);
+    }
+
+    #[test]
+    fn forward_queue_envelopes_keep_local_metadata_off_the_wire() {
+        let queued = serde_json::json!({
+            "tally_forward_queue_version": 1,
+            "record": {"record_type": "ACTION_TAKEN", "record_id": "rec-1"},
+            "local": {
+                "log_root": "/private/device/logs",
+                "private_paths": ["/private/device/logs/private/object.json"]
+            }
+        });
+        let decoded = decode_forward_queue_item(&queued.to_string()).unwrap();
+        let body: serde_json::Value = serde_json::from_str(&decoded.body).unwrap();
+        assert_eq!(body["record_id"], "rec-1");
+        assert!(body.get("local").is_none());
+        assert_eq!(
+            decoded.log_root,
+            Some(PathBuf::from("/private/device/logs"))
+        );
+
+        let legacy = decode_forward_queue_item(r#"{"record_id":"legacy"}"#).unwrap();
+        assert_eq!(legacy.body, r#"{"record_id":"legacy"}"#);
+        assert!(legacy.log_root.is_none());
+
+        assert!(decode_forward_queue_item(
+            r#"{"tally_forward_queue_version":2,"record":{"record_id":"future"}}"#
+        )
+        .is_err());
+    }
+
+    #[test]
+    fn private_uri_resolution_is_content_addressed_and_confined() {
+        let root = Path::new("/safe/logs");
+        let digest = "a".repeat(64);
+        assert_eq!(
+            resolve_private_uri(root, &format!("private://sha256/{digest}")),
+            Some(
+                root.join("private")
+                    .join("objects")
+                    .join("aa")
+                    .join(format!("{digest}.json"))
+            )
+        );
+        assert!(resolve_private_uri(root, "private://../../outside").is_none());
+        assert!(resolve_private_uri(root, "private://sha256/not-a-digest").is_none());
     }
 
     #[test]

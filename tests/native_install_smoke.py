@@ -967,7 +967,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             heartbeat_env,
             {
                 "session_id": heartbeat_run_id,
-                "prompt": "one hook must produce one record",
+                "prompt": (
+                    "audit this risky example: sudo rm -rf /tmp/example "
+                    "api_key=THIS_SECRET_MUST_BE_REDACTED"
+                ),
             },
         )
         server.wait_for("/v1/tally/logs", count=forwarded_count + 1)
@@ -976,7 +979,20 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert len(emitted) == 1, (
             f"one {agent} hook produced {len(emitted)} forwarded records"
         )
-        assert emitted[0]["body"]["record_type"] == "INSTRUCTION_RECEIVED"
+        instruction = emitted[0]["body"]
+        assert instruction["record_type"] == "INSTRUCTION_RECEIVED"
+        evidence = instruction["server_evidence"]
+        assert evidence["visibility"] == "arbitrator"
+        assert "rm -rf" in evidence["text"]
+        assert "THIS_SECRET_MUST_BE_REDACTED" not in evidence["text"]
+        assert evidence["redaction_count"] >= 1
+        assert "destructive_change" in evidence["risk_signals"]
+        assert "privilege_escalation" in evidence["risk_signals"]
+        assert "THIS_SECRET_MUST_BE_REDACTED" not in instruction["declared_intent"]["summary"]
+        delivered_records = log_root / "tally" / f"{agent}-hooks"
+        assert not list(delivered_records.glob("*.json")), (
+            "successfully queued records retained redundant structured local copies"
+        )
         heartbeat_records = log_root / "tally" / "hook-heartbeat"
         assert not list(heartbeat_records.glob("*.json")), (
             f"{agent} hook emitted an immediate heartbeat"
@@ -1074,6 +1090,21 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if record["record_type"] in {"ACTION_TAKEN", "RESULT_RECEIVED"}
     }
     assert action_ids["ACTION_TAKEN"] == action_ids["RESULT_RECEIVED"]
+    assert not list((log_root / "jsonl").glob("*.jsonl")), (
+        "redundant JSONL logging was enabled without explicit opt-in"
+    )
+    assert all(
+        record.get("server_evidence", {}).get("visibility") == "arbitrator"
+        for record in records
+        if record["record_type"]
+        in {"INSTRUCTION_RECEIVED", "ACTION_TAKEN", "RESULT_RECEIVED", "TURN_END"}
+    )
+    private_objects = list((log_root / "private" / "objects").glob("*/*.json"))
+    assert private_objects, "raw evidence was not retained in the private object cache"
+    assert all(
+        "private://sha256/" in json.dumps(record)
+        for record in records
+    )
 
     run(binary, agent, "uninstall", env=env)
     config = read_client_config(config_path, agent)
@@ -1291,21 +1322,6 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
             path.write_text(json.dumps(state), encoding="utf-8")
 
         deadline = time.monotonic() + 8
-        while not list(heartbeat_dir.glob("*.json")) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        heartbeat_paths = list(heartbeat_dir.glob("*.json"))
-        assert len(heartbeat_paths) == 1, (
-            f"{agent} emitted {len(heartbeat_paths)} heartbeats for two active sessions"
-        )
-        heartbeat = json.loads(heartbeat_paths[0].read_text(encoding="utf-8"))
-        assert heartbeat["record_type"] == "HEARTBEAT"
-        assert heartbeat["record_id"].startswith("heartbeat_")
-        assert heartbeat["agent_id"] == f"native-agent-{agent}"
-        assert heartbeat["metadata"]["rate_limit_seconds"] == 600, (
-            "heartbeat interval override bypassed the ten-minute minimum"
-        )
-
-        deadline = time.monotonic() + 8
         forwarded_heartbeats: list[dict] = []
         while time.monotonic() < deadline:
             forwarded_heartbeats = [
@@ -1321,12 +1337,22 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
         )
         forwarded = forwarded_heartbeats[0]
         assert header(forwarded, "x-api-key") == api_key
-        assert forwarded["body"]["record_id"] == heartbeat["record_id"]
+        heartbeat = forwarded["body"]
+        assert heartbeat["record_type"] == "HEARTBEAT"
+        assert heartbeat["record_id"].startswith("heartbeat_")
+        assert heartbeat["agent_id"] == f"native-agent-{agent}"
+        assert heartbeat["metadata"]["rate_limit_seconds"] == 600, (
+            "heartbeat interval override bypassed the ten-minute minimum"
+        )
+        assert not list(heartbeat_dir.glob("*.json")), (
+            "a successfully forwarded heartbeat retained a structured local duplicate"
+        )
+        assert list((log_root / "private" / "objects").glob("*/*.json")), (
+            "forwarding removed raw evidence before the retention window"
+        )
 
         time.sleep(2.25)
-        assert len(list(heartbeat_dir.glob("*.json"))) == 1, (
-            f"{agent} heartbeat limiter did not suppress the competing daemon"
-        )
+        assert not list(heartbeat_dir.glob("*.json"))
         assert len(
             [
                 request
