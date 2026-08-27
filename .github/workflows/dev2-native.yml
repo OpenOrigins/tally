@@ -1,9 +1,9 @@
-name: Dev2 macOS Test Build
+name: Dev2 Native Build
 
 on:
   push:
     branches:
-      - dev2-macos-build
+      - dev2-all-platforms
   workflow_dispatch:
   workflow_call:
     secrets:
@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: dev2-macos-${{ github.ref }}
+  group: dev2-native-${{ github.ref }}
   cancel-in-progress: true
 
 env:
@@ -39,14 +39,26 @@ jobs:
       fail-fast: false
       matrix:
         include:
+          - os: ubuntu-24.04
+            target: x86_64-unknown-linux-musl
+            label: linux-x86_64
+            deployment_target: ""
+            executable_suffix: ""
+          - os: windows-2025
+            target: x86_64-pc-windows-msvc
+            label: windows-x86_64
+            deployment_target: ""
+            executable_suffix: .exe
           - os: macos-15
             target: aarch64-apple-darwin
             label: macos-arm64
             deployment_target: "11.0"
+            executable_suffix: ""
           - os: macos-15-intel
             target: x86_64-apple-darwin
             label: macos-x86_64
             deployment_target: "10.15"
+            executable_suffix: ""
     runs-on: ${{ matrix.os }}
     env:
       MACOSX_DEPLOYMENT_TARGET: ${{ matrix.deployment_target }}
@@ -56,6 +68,10 @@ jobs:
 
       - name: Install Rust target
         run: rustup target add ${{ matrix.target }}
+
+      - name: Install Linux static linker
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: ./scripts/install-musl-tools.sh
 
       - name: Install Python
         uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
@@ -71,9 +87,13 @@ jobs:
       - name: Verify Dev2 build and installation
         run: >-
           python tests/native_install_smoke.py
-          --tally target/${{ matrix.target }}/release/tally
+          --tally target/${{ matrix.target }}/release/tally${{ matrix.executable_suffix }}
+
+      - name: Preserve push-test ingest behavior
+        run: python tests/test_push_test_logs.py
 
       - name: Prepare Apple signing and notarization
+        if: startsWith(matrix.label, 'macos-')
         shell: bash
         env:
           APPLE_CERTIFICATE_BASE64: ${{ secrets.APPLE_DEVELOPER_ID_CERTIFICATE_BASE64 }}
@@ -140,14 +160,23 @@ jobs:
             echo "APPLE_NOTARY_ISSUER_ID=$APPLE_NOTARY_ISSUER_ID"
           } >> "$GITHUB_ENV"
 
-      - name: Package signed and notarized installer
+      - name: Package signed and notarized macOS installer
+        if: startsWith(matrix.label, 'macos-')
         run: >-
           python scripts/package_release.py
           --target ${{ matrix.target }}
           --label ${{ matrix.label }}
           --require-macos-notarization
 
+      - name: Package graphical installer
+        if: ${{ !startsWith(matrix.label, 'macos-') }}
+        run: >-
+          python scripts/package_release.py
+          --target ${{ matrix.target }}
+          --label ${{ matrix.label }}
+
       - name: Test packaged application hooks
+        if: startsWith(matrix.label, 'macos-')
         run: >-
           python tests/macos_dmg_install_smoke.py
           --dmg dist/tally-${{ matrix.label }}.dmg
@@ -155,20 +184,31 @@ jobs:
       - name: Name Dev2 artifact and write checksum
         shell: bash
         run: |
-          mv "dist/tally-${{ matrix.label }}.dmg" "dist/tally-dev2-${{ matrix.label }}.dmg"
-          (cd dist && shasum -a 256 "tally-dev2-${{ matrix.label }}.dmg" > "tally-dev2-${{ matrix.label }}.sha256")
+          suffix="${{ startsWith(matrix.label, 'macos-') && '.dmg' || matrix.executable_suffix }}"
+          source="dist/tally-${{ matrix.label }}${suffix}"
+          destination="dist/tally-dev2-${{ matrix.label }}${suffix}"
+          mv "$source" "$destination"
+          python - "$destination" <<'PY'
+          import hashlib
+          import sys
+          from pathlib import Path
+
+          artifact = Path(sys.argv[1])
+          digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+          artifact.with_suffix(artifact.suffix + ".sha256").write_bytes(
+              f"{digest}  {artifact.name}\n".encode("ascii")
+          )
+          PY
 
       - name: Upload Dev2 installer
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: tally-dev2-${{ matrix.label }}
-          path: |
-            dist/tally-dev2-${{ matrix.label }}.dmg
-            dist/tally-dev2-${{ matrix.label }}.sha256
+          path: dist/tally-dev2-${{ matrix.label }}*
           if-no-files-found: error
 
       - name: Remove temporary Apple signing keychain
-        if: always()
+        if: always() && startsWith(matrix.label, 'macos-')
         shell: bash
         run: |
           if [[ -f "${APPLE_ORIGINAL_KEYCHAINS:-}" ]]; then

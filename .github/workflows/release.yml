@@ -202,15 +202,15 @@ jobs:
           path: dist/*
           if-no-files-found: error
 
-  build-dev2-macos:
-    name: Build Dev2 macOS installers
-    uses: ./.github/workflows/dev2-macos.yml
+  build-dev2:
+    name: Build Dev2 native installers
+    uses: ./.github/workflows/dev2-native.yml
     secrets: inherit
 
   publish:
     needs:
       - build
-      - build-dev2-macos
+      - build-dev2
     runs-on: ubuntu-24.04
     permissions:
       contents: write
