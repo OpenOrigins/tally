@@ -195,9 +195,8 @@ jobs:
 
           artifact = Path(sys.argv[1])
           digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
-          artifact.with_suffix(artifact.suffix + ".sha256").write_text(
-              f"{digest}  {artifact.name}\n",
-              encoding="ascii",
+          artifact.with_suffix(artifact.suffix + ".sha256").write_bytes(
+              f"{digest}  {artifact.name}\n".encode("ascii")
           )
           PY
 
