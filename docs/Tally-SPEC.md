@@ -62,7 +62,10 @@ A log that only records what happened is insufficient. The spec requires recordi
 Each party's Anchor independently records the handoff event using the same `handoff_id`. OpenOrigins matches them. If the payload hashes differ, this is a material finding.
 
 **5. Timestamps must be externally attested.**  
-Anchor attaches an OpenOrigins receipt to each transmitted record, carrying an external time attestation.
+Anchor associates an OpenOrigins receipt with each transmitted record, carrying
+an external time attestation. Because the logical record is immutable, a receipt
+returned after ingestion may be stored in a separate append-only outcome journal
+keyed by record ID and sequence rather than inserted into the original record.
 
 **6. The logical log is append-only.**
 No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery spool may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
@@ -121,6 +124,12 @@ and size policy. Content-addressed storage is recommended so repeated payloads
 share one immutable object. An implementation claiming Level 2 must configure
 private retention long enough to keep its URIs resolvable for the organisation's
 dispute window.
+
+Implementations must not fabricate unavailable capture semantics. When a client
+hook does not expose a principal identity, signature, declared intent, or
+deviation evaluation, the corresponding value is `null` and an adjacent status
+field records `unavailable`. An instruction excerpt or post-hoc summary is not a
+declared intent, and a content hash is not a cryptographic signature.
 
 ---
 

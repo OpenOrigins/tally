@@ -8,12 +8,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use tally_common::agent_runtime::{
-    backup_if_exists, env_enabled, evidence_summary, expand_home, first_mapping_by_key,
-    first_string_by_key, first_value_by_key, home_dir, hook_command, light_git_state,
-    parse_payload, random_hex, read_json_file, read_stdin, remove_file_if_exists, run_id,
-    safe_slug, server_evidence, set_default, sha256_str, sha256_value, stable_id, unique_suffix,
-    utc_now, workspace_path, write_json_atomic, write_text_atomic, AuditSink, AuditSinkConfig,
-    HeartbeatFiles,
+    backup_if_exists, env_enabled, expand_home, first_string_by_key, home_dir, hook_command,
+    light_git_state, parse_payload, random_hex, read_json_file, read_stdin, remove_file_if_exists,
+    run_id, safe_slug, set_default, sha256_str, stable_id, unique_suffix, utc_now, workspace_path,
+    write_json_atomic, write_text_atomic, AuditSink, AuditSinkConfig, HeartbeatFiles,
 };
 use toml_edit::{
     value as toml_value, Array as TomlArray, ArrayOfTables, DocumentMut, Item as TomlItem,
@@ -137,7 +135,7 @@ fn record_payload_event(
         "environment": scrub_environment(),
         "git_state": light_git_state(&workspace_path()),
     });
-    let event_id = format!("evt_{}", random_hex(8));
+    let event_id = format!("evt_{}", random_hex(16));
     let event = json!({
         "schema_version": "tally-codex.v1",
         "event_id": event_id,
@@ -160,7 +158,7 @@ fn record_payload_event(
         )?;
     }
 
-    let mut record = build_tally_record(&sink, event_type, payload, &raw_ref, &metadata);
+    let mut record = build_tally_record(&sink, event_type, payload, &raw_ref, &metadata)?;
     record["record_id"] = Value::String(format!(
         "rec_{}",
         event["event_id"]
@@ -571,7 +569,6 @@ pub fn install_desktop_hooks(
 
     let codex_cli = codex_cli_status()?;
     let config_path = effective_config_path(options.config_path.as_deref());
-    let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
     let state_dir = state_dir_for_config_path(&config_path);
     let installed_binary_path = installed_binary_path_for_config_path(&config_path);
     let previous_notify_path = previous_notify_path(&state_dir);
@@ -585,32 +582,21 @@ pub fn install_desktop_hooks(
     remove_tally_config_hooks(&mut document)?;
     install_tally_config_hooks(&mut document, &hook_bin, &state_dir)?;
 
-    let mut legacy_config = read_legacy_hooks(&legacy_hooks_path)?;
-    let legacy_removed = legacy_config.as_mut().map(remove_tally_hooks).unwrap_or(0);
     let backup = backup_if_exists(&config_path)?;
-    let legacy_backup = (legacy_removed > 0)
-        .then(|| backup_if_exists(&legacy_hooks_path))
-        .transpose()?
-        .flatten();
     let config_snapshot = tally_common::FileSnapshot::capture(&config_path)?;
-    let legacy_snapshot = tally_common::FileSnapshot::capture(&legacy_hooks_path)?;
     let previous_notify_snapshot = tally_common::FileSnapshot::capture(&previous_notify_path)?;
     let key_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
     let api_config_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::config_path(&state_dir))?;
+    let agent_id_snapshot = tally_common::FileSnapshot::capture(&state_dir.join("agent-id.txt"))?;
     let binary_snapshot = tally_common::FileSnapshot::capture(&installed_binary_path)?;
 
     let install_result = (|| -> Result<()> {
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
+        tally_common::load_or_create_agent_id(&state_dir, "codex")?;
         tally_common::write_credentials(&state_dir, &options)?;
         write_text_atomic(&config_path, &document.to_string())?;
-        if legacy_removed > 0 {
-            write_json_atomic(
-                &legacy_hooks_path,
-                legacy_config.as_ref().expect("legacy config was loaded"),
-            )?;
-        }
         install_desktop_notify(
             &config_path,
             &installed_binary_path,
@@ -618,11 +604,6 @@ pub fn install_desktop_hooks(
             &previous_notify_path,
             config_existed,
         )?;
-        if let Err(error) =
-            tally_common::remove_legacy_installed_executable(&config_path, "tally-codex")
-        {
-            eprintln!("Warning: could not remove the previous hook executable: {error}");
-        }
         Ok(())
     })();
     if let Err(error) = install_result {
@@ -630,10 +611,10 @@ pub fn install_desktop_hooks(
             error,
             &[
                 &config_snapshot,
-                &legacy_snapshot,
                 &previous_notify_snapshot,
                 &key_snapshot,
                 &api_config_snapshot,
+                &agent_id_snapshot,
                 &binary_snapshot,
             ],
         ));
@@ -641,12 +622,6 @@ pub fn install_desktop_hooks(
     println!("Installed Tally Codex hooks into {}", config_path.display());
     if let Some(backup) = backup.as_ref() {
         println!("Backed up previous Codex config to {}", backup.display());
-    }
-    if let Some(backup) = legacy_backup.as_ref() {
-        println!(
-            "Backed up previous legacy hooks file to {}",
-            backup.display()
-        );
     }
     println!(
         "Codex CLI: {} ({})",
@@ -697,7 +672,6 @@ pub fn uninstall_desktop_hooks_with_options(
 ) -> Result<tally_common::UninstallReport> {
     set_runtime_defaults();
     let config_path = effective_config_path(config_path.as_deref());
-    let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
     let state_dir = state_dir_for_config_path(&config_path);
     let logs_path = log_root();
     uninstall_desktop_notify(
@@ -725,30 +699,13 @@ pub fn uninstall_desktop_hooks_with_options(
     } else {
         println!("No Codex config found at {}", config_path.display());
     }
-    if let Some(mut legacy_config) = read_legacy_hooks(&legacy_hooks_path)? {
-        let removed = remove_tally_hooks(&mut legacy_config);
-        if removed > 0 {
-            let backup = backup_if_exists(&legacy_hooks_path)?;
-            write_json_atomic(&legacy_hooks_path, &legacy_config)?;
-            println!(
-                "Removed {removed} legacy Tally hook handler(s) from {}",
-                legacy_hooks_path.display()
-            );
-            if let Some(backup) = backup {
-                println!(
-                    "Backed up previous legacy hooks file to {}",
-                    backup.display()
-                );
-            }
-        }
-    }
     remove_local_credentials_for_config_path(&config_path)?;
     if remove_data {
         tally_common::remove_tally_data(&state_dir, &logs_path)?;
     }
     Ok(tally_common::UninstallReport {
         config_path,
-        queue_path: state_dir.join("forward-queue"),
+        journal_path: state_dir.join("journal"),
         state_dir,
         logs_path,
         data_removed: remove_data,
@@ -761,173 +718,41 @@ fn build_tally_record(
     payload: &Value,
     raw_ref: &Value,
     metadata: &Value,
-) -> Value {
+) -> Result<Value> {
     let session_id = extract_session_id(payload).unwrap_or_else(|| sink.run_id.clone());
-    let prompt = first_string_by_key(
-        payload,
-        &["prompt", "user_prompt", "input", "text", "content"],
-    );
-    let raw_hash = raw_ref["hash"].clone();
-    let raw_uri = raw_ref["uri"].clone();
-    let observed_at = metadata["observed_at"].clone();
-
-    match event_type {
-        "SessionStart" => json!({
-            "record_type": "SESSION_START",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "agent_id": agent_id(),
-            "agent_version": agent_version(),
-            "principal": {"type": "human", "id": "[ARB] codex-user"},
-            "authority_scope_hash": sha256_value(metadata),
-            "authority_scope_uri": raw_uri,
-            "authority_granted_at": observed_at,
-            "session_started_at": metadata["observed_at"],
-            "codex_hook_event": event_type,
-            "raw_hook_hash": raw_hash,
-        }),
-        "UserPromptSubmit" => {
-            let evidence =
-                server_evidence(&prompt.map(Value::String).unwrap_or_else(|| payload.clone()));
-            let summary = evidence_summary(&evidence, "User prompt submitted to Codex");
-            json!({
-                "record_type": "INSTRUCTION_RECEIVED",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "instruction_id": stable_id("instr", payload),
-                "sender": {"id": "[ARB] user", "signature": sha256_value(payload)},
-                "instruction_hash": raw_hash,
-                "instruction_uri": raw_uri,
-                "instruction_received_at": observed_at,
-                "context_snapshot_hash": sha256_value(&metadata["git_state"]),
-                "context_snapshot_uri": raw_ref["uri"],
-                "declared_intent": {
-                    "summary": format!("[ARB] {summary}"),
-                    "detail_hash": raw_ref["hash"],
-                    "detail_uri": raw_ref["uri"],
-                },
-                "server_evidence": evidence,
-                "codex_hook_event": event_type,
-            })
-        }
-        "PreToolUse" | "PermissionRequest" => {
-            let tool_params =
-                first_mapping_by_key(payload, &["arguments", "args", "params", "input"])
-                    .cloned()
-                    .unwrap_or_else(|| payload.clone());
-            let evidence = server_evidence(&tool_params);
-            json!({
-                "record_type": "ACTION_TAKEN",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "action_id": action_id(payload),
-                "instruction_id": first_string_by_key(payload, &["instruction_id", "turn_id", "turnId"])
-                    .unwrap_or_else(|| stable_id("instr", &Value::String(session_id.clone()))),
-                "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
-                "tool": {
-                    "server": first_string_by_key(payload, &["server", "server_name", "mcp_server", "recipient_namespace"])
-                        .unwrap_or_else(|| "codex".to_string()),
-                    "name": first_string_by_key(payload, &["tool_name", "toolName", "name", "command", "mcp_tool_name", "recipient_name"])
-                        .unwrap_or_else(|| event_type.to_string()),
-                    "params_hash": sha256_value(&tool_params),
-                    "params_uri": raw_ref["uri"],
-                },
-                "pre_state_hash": sha256_value(&metadata["git_state"]),
-                "pre_state_uri": raw_ref["uri"],
-                "post_state_hash": Value::Null,
-                "post_state_uri": Value::Null,
-                "action_timestamp": observed_at,
-                "deviance_flag": {"deviated": false, "delta_category": Value::Null, "delta_hash": Value::Null, "delta_uri": Value::Null},
-                "server_evidence": evidence,
-                "codex_hook_event": event_type,
-                "raw_hook_hash": raw_ref["hash"],
-            })
-        }
-        "PostToolUse" => {
-            let has_error = first_string_by_key(payload, &["error", "exception"]).is_some();
-            let evidence_source = first_value_by_key(
-                payload,
-                &[
-                    "tool_response",
-                    "tool_result",
-                    "result",
-                    "output",
-                    "content",
-                ],
-            )
-            .unwrap_or(payload);
-            let evidence = server_evidence(evidence_source);
-            let summary = evidence_summary(&evidence, "Codex reported a tool result");
-            json!({
-                "record_type": "RESULT_RECEIVED",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "action_id": action_id(payload),
-                "result_hash": raw_ref["hash"],
-                "result_uri": raw_ref["uri"],
-                "result_received_at": observed_at,
-                "result_interpretation": {
-                    "summary": format!("[ARB] {summary}"),
-                    "detail_hash": raw_ref["hash"],
-                    "detail_uri": raw_ref["uri"],
-                },
-                "exception": {
-                    "occurred": has_error,
-                    "type": first_string_by_key(payload, &["error_type", "type"]),
-                    "description_hash": if has_error { raw_ref["hash"].clone() } else { Value::Null },
-                    "description_uri": if has_error { raw_ref["uri"].clone() } else { Value::Null },
-                },
-                "server_evidence": evidence,
-                "codex_hook_event": event_type,
-            })
-        }
-        "Stop" => {
-            let evidence_source = first_value_by_key(
-                payload,
-                &[
-                    "last_assistant_message",
-                    "response",
-                    "result",
-                    "output",
-                    "content",
-                ],
-            )
-            .unwrap_or(payload);
-            json!({
-                "record_type": "TURN_END",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "turn_id": turn_id(payload),
-                "outcome": "completed",
-                "outcome_hash": raw_ref["hash"],
-                "outcome_uri": raw_ref["uri"],
-                "turn_ended_at": observed_at,
-                "server_evidence": server_evidence(evidence_source),
-                "codex_hook_event": event_type,
-            })
-        }
-        "SessionEnd" => json!({
-            "record_type": "SESSION_END",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "outcome": "partial",
-            "outcome_hash": raw_ref["hash"],
-            "outcome_uri": raw_ref["uri"],
-            "session_ended_at": observed_at,
-            "session_end_reason": first_string_by_key(payload, &["reason"]),
-            "codex_hook_event": event_type,
-        }),
-        _ => json!({
-            "record_type": "CODEX_LIFECYCLE",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "codex_hook_event": event_type,
-            "event_hash": raw_ref["hash"],
-            "event_uri": raw_ref["uri"],
-            "observed_at": observed_at,
-            "metadata": metadata,
-        }),
-    }
+    let installation_agent_id = agent_id()?;
+    let version = agent_version();
+    let action = action_id(payload);
+    let turn = turn_id(payload);
+    let profile = tally_common::records::HookRecordProfile {
+        hook_field: "codex_hook_event",
+        lifecycle_record_type: "CODEX_LIFECYCLE",
+        default_tool_server: "codex",
+        prompt_summary_label: "User prompt submitted to Codex",
+        result_summary_label: "Codex reported a tool result",
+        tool_param_keys: &["arguments", "args", "params", "input"],
+        instruction_id_keys: &["instruction_id", "turn_id", "turnId"],
+        tool_server_keys: &["server", "server_name", "mcp_server", "recipient_namespace"],
+        tool_name_keys: &[
+            "tool_name",
+            "toolName",
+            "name",
+            "command",
+            "mcp_tool_name",
+            "recipient_name",
+        ],
+        error_keys: &["error", "exception"],
+    };
+    let identity = tally_common::records::HookRecordIdentity {
+        session_id: &session_id,
+        agent_id: &installation_agent_id,
+        agent_version: &version,
+        action_id: &action,
+        turn_id: &turn,
+    };
+    tally_common::records::build_hook_record(
+        sink, &profile, &identity, event_type, payload, raw_ref, metadata,
+    )
 }
 
 #[cfg(test)]
@@ -939,6 +764,7 @@ fn record_type_for_hook(event_type: &str) -> &'static str {
         "PostToolUse" => "RESULT_RECEIVED",
         "Stop" => "TURN_END",
         "SessionEnd" => "SESSION_END",
+        "SubagentStart" | "SubagentStop" => "HANDOFF",
         _ => "CODEX_LIFECYCLE",
     }
 }
@@ -962,17 +788,10 @@ fn audit_sink(source: &str) -> Result<AuditSink> {
         run_id: run_id(),
         workspace: workspace_path(),
         forwarding_state_dir: onboarding_state_dir(),
-        agent_id: agent_id(),
+        agent_id: agent_id()?,
         heartbeat_client: "codex",
         event_schema: "tally-codex.v1",
     })
-}
-
-fn legacy_hooks_path_for_config_path(config_path: &Path) -> PathBuf {
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("hooks.json")
 }
 
 fn previous_notify_path(state_dir: &Path) -> PathBuf {
@@ -1024,21 +843,6 @@ fn read_codex_config(path: &Path) -> Result<DocumentMut> {
         return Ok(DocumentMut::new());
     }
     Ok(fs::read_to_string(path)?.parse::<DocumentMut>()?)
-}
-
-fn read_legacy_hooks(path: &Path) -> Result<Option<Value>> {
-    if !path.exists() {
-        return Ok(None);
-    }
-    let config = read_json_file(path)?;
-    if !config.is_object() || config.get("hooks").is_some_and(|hooks| !hooks.is_object()) {
-        return Err(format!(
-            "refusing to modify {}: unexpected legacy hooks file shape",
-            path.display()
-        )
-        .into());
-    }
-    Ok(Some(config))
 }
 
 fn install_tally_config_hooks(
@@ -1140,8 +944,7 @@ fn remove_tally_config_hooks(document: &mut DocumentMut) -> Result<usize> {
 fn is_tally_hook_command(command: &str) -> bool {
     let current = command.contains("tally-codex") && command.contains(" hook ");
     let unified = command.contains("tally") && command.contains(" codex hook ");
-    let legacy = command.contains("tally-host-hook") || command.contains("codex_hook_logger.py");
-    current || unified || legacy
+    current || unified
 }
 
 fn install_desktop_notify(
@@ -1268,39 +1071,6 @@ fn mark_turn_complete(state_dir: &Path, kind: &str, payload: &Value) -> Result<(
         return Ok(());
     };
     write_json_atomic(&path, &json!({"observed_at": utc_now()}))
-}
-
-fn remove_tally_hooks(config: &mut Value) -> usize {
-    let Some(hooks) = config.get_mut("hooks").and_then(Value::as_object_mut) else {
-        return 0;
-    };
-    let mut removed = 0;
-    let mut empty_events = Vec::new();
-
-    for (event, groups) in hooks.iter_mut() {
-        let Some(groups_array) = groups.as_array_mut() else {
-            continue;
-        };
-        groups_array.retain_mut(|group| {
-            let Some(handlers) = group.get_mut("hooks").and_then(Value::as_array_mut) else {
-                return true;
-            };
-            let before = handlers.len();
-            handlers.retain(|handler| {
-                let command = handler.get("command").and_then(Value::as_str).unwrap_or("");
-                !is_tally_hook_command(command)
-            });
-            removed += before - handlers.len();
-            !handlers.is_empty()
-        });
-        if groups_array.is_empty() {
-            empty_events.push(event.clone());
-        }
-    }
-    for event in empty_events {
-        hooks.remove(&event);
-    }
-    removed
 }
 
 fn set_runtime_defaults() {
@@ -1471,6 +1241,19 @@ pub fn default_installed_binary_path() -> PathBuf {
     installed_binary_path_for_config_path(&default_config_path())
 }
 
+pub fn installation_snapshot_paths(config_path: Option<&Path>) -> Vec<PathBuf> {
+    let config_path = effective_config_path(config_path);
+    let state_dir = state_dir_for_config_path(&config_path);
+    vec![
+        config_path.clone(),
+        previous_notify_path(&state_dir),
+        tally_common::api_key_path(&state_dir),
+        tally_common::config_path(&state_dir),
+        state_dir.join("agent-id.txt"),
+        installed_binary_path_for_config_path(&config_path),
+    ]
+}
+
 fn installed_binary_path_for_config_path(path: &Path) -> PathBuf {
     tally_common::installed_executable_path(path, "tally-codex")
 }
@@ -1482,7 +1265,6 @@ fn remove_local_credentials_for_config_path(path: &Path) -> Result<()> {
         tally_common::config_path(&state_dir),
         previous_notify_path(&state_dir),
         installed_binary_path_for_config_path(path),
-        tally_common::legacy_installed_executable_path(path, "tally-codex"),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -1493,8 +1275,8 @@ fn remove_local_credentials_for_config_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn agent_id() -> String {
-    env::var("TALLY_AGENT_ID").unwrap_or_else(|_| "codex-desktop".to_string())
+fn agent_id() -> Result<String> {
+    tally_common::load_or_create_agent_id(&onboarding_state_dir(), "codex")
 }
 
 fn agent_version() -> String {
@@ -1651,31 +1433,6 @@ trusted_hash = "sha256:keep"
         let post = json!({"tool_call_id": "tool-123", "result": {"stdout": ""}});
         assert_eq!(action_id(&pre), "act_tool-123");
         assert_eq!(action_id(&pre), action_id(&post));
-    }
-
-    #[test]
-    fn removes_current_and_legacy_tally_hooks_only() {
-        let mut config = json!({
-            "hooks": {
-                "SessionStart": [{
-                    "hooks": [
-                        {"type": "command", "command": "/bin/echo keep"},
-                        {"type": "command", "command": "/tmp/acme codex hook SessionStart"},
-                        {"type": "command", "command": "/tmp/tally-codex hook SessionStart"},
-                        {"type": "command", "command": "/tmp/tally codex hook SessionStart"},
-                        {"type": "command", "command": "/tmp/tally-host-hook SessionStart"},
-                        {"type": "command", "command": "python3 codex_hook_logger.py SessionStart"}
-                    ]
-                }]
-            }
-        });
-        assert_eq!(remove_tally_hooks(&mut config), 4);
-        let handlers = config["hooks"]["SessionStart"][0]["hooks"]
-            .as_array()
-            .unwrap();
-        assert_eq!(handlers.len(), 2);
-        assert_eq!(handlers[0]["command"], "/bin/echo keep");
-        assert_eq!(handlers[1]["command"], "/tmp/acme codex hook SessionStart");
     }
 
     #[test]

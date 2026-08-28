@@ -19,13 +19,15 @@ pub fn server_evidence(value: &Value) -> Value {
             "disabled": true,
         });
     }
+    let max_chars = env_u64("TALLY_SERVER_EVIDENCE_MAX_CHARS", 8_192).clamp(256, 32_768) as usize;
+    let mut projection_budget = max_chars.saturating_mul(4);
+    let projected = bounded_projection(value, 0, &mut projection_budget);
     let mut redaction_count = 0_u64;
-    let redacted = redact_sensitive_value(value, None, &mut redaction_count);
+    let redacted = redact_sensitive_value(&projected, None, &mut redaction_count);
     let text = match &redacted {
         Value::String(value) => value.clone(),
         _ => serde_json::to_string(&redacted).unwrap_or_default(),
     };
-    let max_chars = env_u64("TALLY_SERVER_EVIDENCE_MAX_CHARS", 8_192).clamp(256, 32_768) as usize;
     let (text, truncated) = truncate_chars(&text, max_chars);
     json!({
         "schema_version": "tally-server-evidence.v1",
@@ -36,6 +38,55 @@ pub fn server_evidence(value: &Value) -> Value {
         "truncated": truncated,
         "redaction_count": redaction_count,
     })
+}
+
+fn bounded_projection(value: &Value, depth: usize, budget: &mut usize) -> Value {
+    if *budget == 0 || depth > 32 {
+        return Value::String("[TRUNCATED]".to_string());
+    }
+    *budget = budget.saturating_sub(1);
+    match value {
+        Value::String(value) => {
+            let mut chars = value.chars();
+            let projected = chars.by_ref().take(*budget).collect::<String>();
+            let consumed = projected.chars().count();
+            *budget = budget.saturating_sub(consumed);
+            if chars.next().is_some() {
+                Value::String(format!("{projected}[TRUNCATED]"))
+            } else {
+                Value::String(projected)
+            }
+        }
+        Value::Array(items) => {
+            let mut projected = Vec::new();
+            for item in items {
+                if *budget == 0 {
+                    projected.push(Value::String("[TRUNCATED]".to_string()));
+                    break;
+                }
+                projected.push(bounded_projection(item, depth + 1, budget));
+            }
+            Value::Array(projected)
+        }
+        Value::Object(map) => {
+            let mut projected = serde_json::Map::new();
+            for (key, item) in map {
+                if *budget == 0 {
+                    projected.insert("_tally_truncated".to_string(), Value::Bool(true));
+                    break;
+                }
+                let key_chars = key.chars().take((*budget).saturating_add(1)).count();
+                if key_chars > *budget {
+                    projected.insert("_tally_truncated".to_string(), Value::Bool(true));
+                    break;
+                }
+                *budget -= key_chars;
+                projected.insert(key.clone(), bounded_projection(item, depth + 1, budget));
+            }
+            Value::Object(projected)
+        }
+        _ => value.clone(),
+    }
 }
 
 pub fn evidence_summary(evidence: &Value, fallback: &str) -> String {

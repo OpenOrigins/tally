@@ -1,8 +1,8 @@
 # Tally
 
-Tally connects Codex and Claude Code to OpenOrigins. It durably queues structured
-audit records and forwards them using an Agent API key from your OpenOrigins
-dashboard.
+Tally connects Codex and Claude Code to OpenOrigins. It writes structured audit
+records to a small append-only segmented journal, then forwards them in capture
+order using an Agent API key from your OpenOrigins dashboard.
 
 ## Install
 
@@ -81,18 +81,15 @@ Codex, quit Codex Desktop, run `codex` in Terminal or PowerShell, choose
 all hooks. Quit the CLI and reopen Codex Desktop.
 
 Select **Remove Tally** to remove hooks, credentials, and installed hook helpers.
-Pending records are retained until the server accepts them. Raw private evidence
-uses a deduplicated, bounded local cache; successfully delivered structured
-copies do not accumulate forever. Select **Delete queued records and local logs**
+Pending journal records are retained until the server accepts them or rejects a
+malformed record into the local dead-letter journal. Server receipts are kept in
+an append-only local outcome journal. Raw private evidence uses a deduplicated,
+bounded local cache; completed closed journal segments do not accumulate forever.
+Select **Delete local journal and logs**
 on the confirmation screen for immediate permanent local-data removal. The
 installer app/file is separate; delete it afterward, or run
 `brew uninstall --cask tally` for Homebrew. The storage and server-evidence
 policy is documented under [docs](docs/storage-and-detection.md).
-
-After upgrading from Tally 0.1.3 through 0.1.6, open Tally, choose the clients
-again, paste the Agent API key, and select **Install Tally** once. This refreshes
-the installed hook helpers; it also updates 0.1.4's former Dev2 default to
-Production. Re-enter an intentional custom API URL under **Advanced settings**.
 
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).

@@ -4,7 +4,7 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeSet, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, IsTerminal, Write};
+use std::io::{self, IsTerminal, Read, Write};
 use std::path::{Path, PathBuf};
 #[cfg(not(windows))]
 use std::process::{Command, Stdio};
@@ -13,6 +13,8 @@ use url::Url;
 
 pub mod agent_runtime;
 mod installer_gui;
+mod journal;
+pub mod records;
 mod server_evidence;
 
 pub use installer_gui::{run_installer_gui, GuiClient};
@@ -28,8 +30,6 @@ pub const DEFAULT_PRIVATE_RETENTION_DAYS: u64 = 30;
 pub const DEFAULT_PRIVATE_STORAGE_LIMIT_MIB: u64 = 256;
 const HANDSHAKE_PATH: &str = "/v1/tally/onboarding/client-connected";
 const TALLY_DATA_MARKER: &str = ".openorigins-tally-data";
-const FORWARD_CLAIM_STALE_AFTER: Duration = Duration::from_secs(30);
-const FORWARD_QUEUE_VERSION: u64 = 1;
 const STORAGE_GC_INTERVAL: Duration = Duration::from_secs(60 * 60);
 #[cfg(target_os = "macos")]
 const MACOS_HOOK_HELPER: &str = "tally-hook";
@@ -89,7 +89,7 @@ pub struct UninstallReport {
     pub config_path: PathBuf,
     pub state_dir: PathBuf,
     pub logs_path: PathBuf,
-    pub queue_path: PathBuf,
+    pub journal_path: PathBuf,
     pub data_removed: bool,
 }
 
@@ -407,6 +407,19 @@ pub fn validate_api_url(api_url: &str) -> Result<()> {
     if !matches!(parsed.scheme(), "http" | "https") || parsed.host_str().is_none() {
         return Err("API URL must be an absolute HTTP or HTTPS URL".into());
     }
+    if parsed.scheme() == "http" {
+        let loopback = parsed.host_str().is_some_and(|host| {
+            host.eq_ignore_ascii_case("localhost")
+                || host
+                    .parse::<std::net::IpAddr>()
+                    .is_ok_and(|address| address.is_loopback())
+        });
+        if !loopback {
+            return Err(
+                "unencrypted HTTP is allowed only for loopback development endpoints".into(),
+            );
+        }
+    }
     Ok(())
 }
 
@@ -418,6 +431,33 @@ pub fn config_path(state_dir: &Path) -> PathBuf {
     state_dir.join("config.json")
 }
 
+pub fn load_or_create_agent_id(state_dir: &Path, client: &str) -> Result<String> {
+    if let Ok(value) = env::var("TALLY_AGENT_ID") {
+        let value = value.trim();
+        if !value.is_empty() {
+            return Ok(value.to_string());
+        }
+    }
+    create_private_dir(state_dir)?;
+    let path = state_dir.join("agent-id.txt");
+    let lock = open_private_lock(&state_dir.join("agent-id.lock"))?;
+    lock.lock_exclusive()?;
+    let result = (|| -> Result<String> {
+        if let Ok(value) = fs::read_to_string(&path) {
+            let value = value.trim();
+            if !value.is_empty() && value.len() <= 256 && !value.chars().any(char::is_control) {
+                return Ok(value.to_string());
+            }
+        }
+        let client = agent_runtime::safe_slug(client, "client");
+        let value = format!("tally:{client}:{}", agent_runtime::secure_random_hex(16)?);
+        atomic_write(&path, value.as_bytes(), 0o600)?;
+        Ok(value)
+    })();
+    FileExt::unlock(&lock)?;
+    result
+}
+
 pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<()> {
     let key_path = api_key_path(state_dir);
     let config_path = config_path(state_dir);
@@ -425,6 +465,7 @@ pub fn write_credentials(state_dir: &Path, options: &InstallOptions) -> Result<(
     let config_snapshot = FileSnapshot::capture(&config_path)?;
     let result = (|| -> Result<()> {
         create_private_dir(state_dir)?;
+        harden_private_directory(state_dir)?;
         atomic_write(&key_path, options.api_key.as_bytes(), 0o600)?;
         let config = format!(
             "{}\n",
@@ -530,29 +571,6 @@ pub fn installed_executable_path(config_path: &Path, binary_name: &str) -> PathB
         .join(format!("{binary_name}{suffix}"))
 }
 
-pub fn legacy_installed_executable_path(config_path: &Path, binary_name: &str) -> PathBuf {
-    let suffix = if cfg!(windows) { ".exe" } else { "" };
-    config_path
-        .parent()
-        .unwrap_or_else(|| Path::new("."))
-        .join("tally")
-        .join("bin")
-        .join(format!("{binary_name}{suffix}"))
-}
-
-pub fn remove_legacy_installed_executable(config_path: &Path, binary_name: &str) -> Result<()> {
-    let legacy = legacy_installed_executable_path(config_path, binary_name);
-    let current = installed_executable_path(config_path, binary_name);
-    if legacy == current {
-        return Ok(());
-    }
-    match fs::remove_file(legacy) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(error.into()),
-    }
-}
-
 pub fn notify_client_connected(
     api_key: &str,
     api_url: &str,
@@ -569,131 +587,46 @@ pub fn handshake_warning(error: &str) -> String {
     )
 }
 
-pub fn enqueue_record(state_dir: &Path, record_path: &Path, executable: &Path) -> Result<()> {
-    if env_disabled("TALLY_FORWARDING_ENABLED") || !api_key_path(state_dir).exists() {
-        return Ok(());
-    }
-    let queue_dir = state_dir.join("forward-queue");
-    create_private_dir(&queue_dir)?;
-    let contents = fs::read(record_path)?;
-    let queue_name = forward_queue_name(&contents);
-    let record: Value = serde_json::from_slice(&contents)?;
-    let log_root = log_root_for_record_path(record_path);
-    let private_paths = log_root
-        .as_deref()
-        .map(|root| private_paths_for_record(root, &record))
-        .unwrap_or_default();
-    let envelope = json!({
-        "tally_forward_queue_version": FORWARD_QUEUE_VERSION,
-        "record": record,
-        "local": {
-            "log_root": log_root,
-            "private_paths": private_paths,
-        },
-    });
-    let queued_contents = format!("{}\n", serde_json::to_string_pretty(&envelope)?);
-    let mut durable_envelope = false;
-    if !forward_record_is_pending(&queue_dir, &queue_name)? {
-        let queued = queue_dir.join(&queue_name);
-        if let Err(error) = atomic_write(&queued, queued_contents.as_bytes(), 0o600) {
-            if !forward_record_is_pending(&queue_dir, &queue_name)? {
-                return Err(error.into());
+pub fn schedule_forwarder(state_dir: &Path, executable: &Path) -> Result<()> {
+    create_private_dir(state_dir)?;
+    let lock = open_private_lock(&state_dir.join("forward-worker-start.lock"))?;
+    lock.lock_exclusive()?;
+    let result = (|| -> Result<()> {
+        let pid_path = state_dir.join("forward-worker.json");
+        if let Ok(value) = fs::read_to_string(&pid_path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .ok_or(())
+        {
+            if value["pid"]
+                .as_u64()
+                .is_some_and(|pid| agent_runtime::process_is_alive(&pid.to_string()))
+            {
+                return Ok(());
             }
-        } else {
-            durable_envelope = true;
         }
-    } else {
-        durable_envelope = pending_forward_record_is_envelope(&queue_dir, &queue_name)?;
-    }
-    if durable_envelope {
-        match fs::remove_file(record_path) {
-            Ok(()) => {}
-            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
-            Err(error) => eprintln!(
-                "Warning: queued record but could not remove redundant local copy {}: {error}",
-                record_path.display()
-            ),
-        }
-    }
-
-    spawn_background(executable, &["forward-pending"])
-}
-
-fn forward_queue_name(contents: &[u8]) -> String {
-    format!("{:x}.json", Sha256::digest(contents))
-}
-
-fn forward_record_is_pending(queue_dir: &Path, queue_name: &str) -> io::Result<bool> {
-    if queue_dir.join(queue_name).exists() {
-        return Ok(true);
-    }
-    let claim_prefix = format!("{queue_name}.sending-");
-    Ok(fs::read_dir(queue_dir)?
-        .filter_map(std::result::Result::ok)
-        .filter_map(|entry| entry.file_name().into_string().ok())
-        .any(|name| name.starts_with(&claim_prefix)))
-}
-
-fn forward_queue_file_is_envelope(path: &Path) -> bool {
-    fs::read_to_string(path)
-        .ok()
-        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
-        .is_some_and(|value| {
-            value["tally_forward_queue_version"].as_u64() == Some(FORWARD_QUEUE_VERSION)
-                && value.get("record").is_some()
-        })
-}
-
-fn pending_forward_record_is_envelope(queue_dir: &Path, queue_name: &str) -> io::Result<bool> {
-    let queued = queue_dir.join(queue_name);
-    if queued.is_file() {
-        return Ok(forward_queue_file_is_envelope(&queued));
-    }
-    let claim_prefix = format!("{queue_name}.sending-");
-    for entry in fs::read_dir(queue_dir)?.filter_map(std::result::Result::ok) {
-        let path = entry.path();
-        let matches_claim = path
-            .file_name()
-            .and_then(|name| name.to_str())
-            .is_some_and(|name| name.starts_with(&claim_prefix));
-        if matches_claim {
-            return Ok(forward_queue_file_is_envelope(&path));
-        }
-    }
-    // A matching item observed immediately before this check can disappear only
-    // after the forwarder has accepted it, so its original local copy is redundant.
-    Ok(true)
-}
-
-struct QueuedRecord {
-    body: String,
-    log_root: Option<PathBuf>,
-}
-
-fn decode_forward_queue_item(contents: &str) -> Result<QueuedRecord> {
-    let value: Value = serde_json::from_str(contents)?;
-    let Some(version) = value.get("tally_forward_queue_version") else {
-        return Ok(QueuedRecord {
-            body: contents.to_string(),
-            log_root: None,
-        });
-    };
-    if version.as_u64() != Some(FORWARD_QUEUE_VERSION) {
-        return Err(format!("unsupported forwarding queue version: {version}").into());
-    }
-    let record = value
-        .get("record")
-        .ok_or("forwarding queue envelope does not contain a record")?;
-    let log_root = value["local"]["log_root"].as_str().map(PathBuf::from);
-    Ok(QueuedRecord {
-        body: serde_json::to_string(record)?,
-        log_root,
-    })
+        let pid = spawn_background_pid(executable, &["forward-pending"])?;
+        let status = format!(
+            "{}\n",
+            serde_json::to_string_pretty(&json!({
+                "pid": pid,
+                "started_at_unix_millis": agent_runtime::unix_now_millis(),
+            }))?
+        );
+        atomic_write(&pid_path, status.as_bytes(), 0o600)?;
+        Ok(())
+    })();
+    FileExt::unlock(&lock)?;
+    result
 }
 
 pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
+    spawn_background_pid(executable, args).map(|_| ())
+}
+
+fn spawn_background_pid(executable: &Path, args: &[&str]) -> Result<u32> {
     #[cfg(windows)]
-    spawn_background_windows(executable, args)?;
+    return Ok(spawn_background_windows(executable, args)?);
 
     #[cfg(unix)]
     {
@@ -714,22 +647,21 @@ pub fn spawn_background(executable: &Path, args: &[&str]) -> Result<()> {
                 Ok(())
             });
         }
-        command.spawn()?;
+        Ok(command.spawn()?.id())
     }
 
     #[cfg(all(not(unix), not(windows)))]
-    Command::new(executable)
+    return Ok(Command::new(executable)
         .args(args)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
-        .spawn()?;
-
-    Ok(())
+        .spawn()?
+        .id());
 }
 
 #[cfg(windows)]
-fn spawn_background_windows(executable: &Path, args: &[&str]) -> io::Result<()> {
+fn spawn_background_windows(executable: &Path, args: &[&str]) -> io::Result<u32> {
     use std::iter;
     use std::mem::{size_of, zeroed};
     use std::os::windows::ffi::OsStrExt;
@@ -767,11 +699,12 @@ fn spawn_background_windows(executable: &Path, args: &[&str]) -> io::Result<()> 
         return Err(io::Error::last_os_error());
     }
 
+    let pid = process_info.dwProcessId;
     unsafe {
         CloseHandle(process_info.hThread);
         CloseHandle(process_info.hProcess);
     }
-    Ok(())
+    Ok(pid)
 }
 
 #[cfg(windows)]
@@ -825,19 +758,21 @@ fn append_windows_argument(command_line: &mut Vec<u16>, argument: &[u16]) {
 }
 
 pub fn forward_pending(state_dir: &Path) -> Result<()> {
-    let queue_dir = state_dir.join("forward-queue");
-    if !queue_dir.exists() {
+    let _worker_registration = ForwardWorkerRegistration::new(state_dir);
+    create_private_dir(state_dir)?;
+    let lock = open_private_lock(&state_dir.join("forward.lock"))?;
+    match lock.try_lock_exclusive() {
+        Ok(()) => {}
+        Err(error) if lock_is_contended(&error) => return Ok(()),
+        Err(error) => return Err(error.into()),
+    }
+    let forwarding_enabled =
+        !env_disabled("TALLY_FORWARDING_ENABLED") && api_key_path(state_dir).exists();
+    if !forwarding_enabled {
+        finalize_materialization_worker(state_dir)?;
+        FileExt::unlock(&lock)?;
         return Ok(());
     }
-    create_private_dir(state_dir)?;
-    let lock = OpenOptions::new()
-        .create(true)
-        .read(true)
-        .write(true)
-        .truncate(false)
-        .open(state_dir.join("forward.lock"))?;
-    lock.lock_exclusive()?;
-    recover_stale_forward_claims(&queue_dir)?;
 
     let api_key = fs::read_to_string(api_key_path(state_dir))?
         .trim()
@@ -851,47 +786,74 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
         .ok_or("stored config does not contain apiUrl")?;
     validate_api_url(api_url)?;
 
-    let mut records = fs::read_dir(&queue_dir)?
-        .filter_map(std::result::Result::ok)
-        .map(|entry| entry.path())
-        .filter(|path| path.is_file() && path.extension().is_some_and(|value| value == "json"))
-        .collect::<Vec<_>>();
-    records.sort();
-    let mut log_roots = BTreeSet::new();
-    for path in records {
-        let Some(claimed) = claim_forward_record(&path)? else {
-            continue;
-        };
-        let body = match fs::read_to_string(&claimed) {
-            Ok(body) => body,
-            Err(error) => {
-                restore_forward_claim(&path, &claimed)?;
-                return Err(error.into());
+    let agent = http_agent();
+    let mut log_roots = BTreeSet::<PathBuf>::new();
+    loop {
+        let mut records = journal::pending_records(state_dir)?;
+        if records.is_empty() {
+            journal::prune_completed_segments(state_dir)?;
+            for log_root in std::mem::take(&mut log_roots) {
+                if let Err(error) = maybe_prune_local_storage(&log_root, state_dir, true) {
+                    eprintln!(
+                        "Warning: records were forwarded but local evidence cleanup failed for {}: {error}",
+                        log_root.display()
+                    );
+                }
             }
-        };
-        let queued = match decode_forward_queue_item(&body) {
-            Ok(queued) => queued,
-            Err(error) => {
-                restore_forward_claim(&path, &claimed)?;
-                return Err(error);
+            records = pending_records_or_finish_worker(state_dir)?;
+            if records.is_empty() {
+                break;
             }
-        };
-        if let Err(error) = post_json(api_url, &api_key, &queued.body) {
-            restore_forward_claim(&path, &claimed)?;
-            write_forward_status(state_dir, false, Some(&error))?;
-            return Err(error.into());
         }
-        fs::remove_file(claimed)?;
-        if let Some(log_root) = queued.log_root {
-            log_roots.insert(log_root);
-        }
-    }
-    for log_root in log_roots {
-        if let Err(error) = maybe_prune_local_storage(&log_root, state_dir, true) {
-            eprintln!(
-                "Warning: records were forwarded but local evidence cleanup failed for {}: {error}",
-                log_root.display()
-            );
+        for record in records {
+            materialize_private_objects(&record)?;
+            let body = serde_json::to_string(&record.record)?;
+            let mut attempt = 0_u32;
+            loop {
+                match post_json_with_agent(
+                    &agent,
+                    api_url,
+                    &api_key,
+                    &body,
+                    Some(&record.record_id),
+                ) {
+                    Ok(response) => journal::append_delivery_outcome(
+                        state_dir,
+                        &record,
+                        "delivered",
+                        response.receipt.as_ref(),
+                        None,
+                    )?,
+                    Err(error) if error.permanent_record_failure => {
+                        journal::append_dead_letter(state_dir, &record, &error.message)?;
+                        journal::append_delivery_outcome(
+                            state_dir,
+                            &record,
+                            "dead_letter",
+                            None,
+                            Some(&error.message),
+                        )?;
+                        break;
+                    }
+                    Err(error) if error.retryable && attempt < configured_forward_retries() => {
+                        write_forward_status(state_dir, false, Some(&error.message))?;
+                        let delay = error
+                            .retry_after
+                            .unwrap_or_else(|| forward_retry_delay(attempt, &record.record_id));
+                        attempt += 1;
+                        std::thread::sleep(delay);
+                        continue;
+                    }
+                    Err(error) => {
+                        write_forward_status(state_dir, false, Some(&error.message))?;
+                        return Err(error.message.into());
+                    }
+                }
+                break;
+            }
+            if let Some(log_root) = record.log_root {
+                log_roots.insert(log_root);
+            }
         }
     }
     write_forward_status(state_dir, true, None)?;
@@ -899,46 +861,165 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
     Ok(())
 }
 
-fn claim_forward_record(path: &Path) -> io::Result<Option<PathBuf>> {
-    let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
-        return Ok(None);
-    };
-    let claimed = path.with_file_name(format!("{name}.sending-{}", std::process::id()));
-    match fs::rename(path, &claimed) {
-        Ok(()) => Ok(Some(claimed)),
-        Err(error) if error.kind() == io::ErrorKind::NotFound => Ok(None),
-        Err(error) => Err(error),
+fn pending_records_or_finish_worker(state_dir: &Path) -> Result<Vec<journal::JournalRecord>> {
+    let records = journal::pending_records(state_dir)?;
+    if !records.is_empty() {
+        return Ok(records);
     }
+    let start_lock = open_private_lock(&state_dir.join("forward-worker-start.lock"))?;
+    start_lock.lock_exclusive()?;
+    let records = journal::pending_records(state_dir)?;
+    if records.is_empty() {
+        clear_current_forward_worker(state_dir)?;
+    }
+    FileExt::unlock(&start_lock)?;
+    Ok(records)
 }
 
-fn restore_forward_claim(path: &Path, claimed: &Path) -> io::Result<()> {
-    if path.exists() {
-        fs::remove_file(claimed)
-    } else {
-        fs::rename(claimed, path)
-    }
-}
-
-fn recover_stale_forward_claims(queue_dir: &Path) -> io::Result<()> {
-    for entry in fs::read_dir(queue_dir)?.filter_map(std::result::Result::ok) {
-        let claimed = entry.path();
-        let Some(name) = claimed.file_name().and_then(|value| value.to_str()) else {
-            continue;
-        };
-        let Some((original_name, _)) = name.rsplit_once(".sending-") else {
-            continue;
-        };
-        let stale = claimed
-            .metadata()
-            .and_then(|metadata| metadata.modified())
-            .ok()
-            .and_then(|modified| modified.elapsed().ok())
-            .is_some_and(|elapsed| elapsed >= FORWARD_CLAIM_STALE_AFTER);
-        if !stale {
-            continue;
+fn finalize_materialization_worker(state_dir: &Path) -> Result<()> {
+    let coalesce_millis = env::var("TALLY_JOURNAL_COALESCE_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(100)
+        .min(1_000);
+    std::thread::sleep(Duration::from_millis(coalesce_millis));
+    let mut log_roots = BTreeSet::<PathBuf>::new();
+    for record in journal::pending_records(state_dir)? {
+        materialize_private_objects(&record)?;
+        if let Some(log_root) = record.log_root {
+            log_roots.insert(log_root);
         }
-        let original = queue_dir.join(original_name);
-        restore_forward_claim(&original, &claimed)?;
+    }
+    for log_root in log_roots {
+        if let Err(error) = maybe_prune_local_storage(&log_root, state_dir, false) {
+            eprintln!(
+                "Warning: local evidence cleanup failed for {}: {error}",
+                log_root.display()
+            );
+        }
+    }
+    let start_lock = open_private_lock(&state_dir.join("forward-worker-start.lock"))?;
+    start_lock.lock_exclusive()?;
+    for record in journal::pending_records(state_dir)? {
+        materialize_private_objects(&record)?;
+    }
+    clear_current_forward_worker(state_dir)?;
+    FileExt::unlock(&start_lock)?;
+    Ok(())
+}
+
+fn clear_current_forward_worker(state_dir: &Path) -> Result<()> {
+    let path = state_dir.join("forward-worker.json");
+    let owned = fs::read_to_string(&path)
+        .ok()
+        .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+        .and_then(|value| value["pid"].as_u64())
+        == Some(u64::from(std::process::id()));
+    if owned {
+        match fs::remove_file(&path) {
+            Ok(()) => sync_parent_directory(&path)?,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
+        }
+    }
+    Ok(())
+}
+
+fn configured_forward_retries() -> u32 {
+    env::var("TALLY_FORWARD_MAX_RETRIES")
+        .ok()
+        .and_then(|value| value.parse::<u32>().ok())
+        .unwrap_or(5)
+        .min(10)
+}
+
+fn forward_retry_delay(attempt: u32, record_id: &str) -> Duration {
+    let base = env::var("TALLY_FORWARD_RETRY_BASE_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(500)
+        .clamp(50, 10_000);
+    let maximum = env::var("TALLY_FORWARD_RETRY_MAX_MILLIS")
+        .ok()
+        .and_then(|value| value.parse::<u64>().ok())
+        .unwrap_or(30_000)
+        .clamp(base, 300_000);
+    let exponential = base.saturating_mul(1_u64 << attempt.min(16)).min(maximum);
+    let digest = Sha256::digest(format!("{record_id}:{attempt}").as_bytes());
+    let jitter = u64::from(digest[0]).saturating_mul(base) / 1024;
+    Duration::from_millis(exponential.saturating_add(jitter).min(maximum))
+}
+
+struct ForwardWorkerRegistration {
+    path: PathBuf,
+    pid: u32,
+}
+
+impl ForwardWorkerRegistration {
+    fn new(state_dir: &Path) -> Self {
+        Self {
+            path: state_dir.join("forward-worker.json"),
+            pid: std::process::id(),
+        }
+    }
+}
+
+impl Drop for ForwardWorkerRegistration {
+    fn drop(&mut self) {
+        let owned = fs::read_to_string(&self.path)
+            .ok()
+            .and_then(|contents| serde_json::from_str::<Value>(&contents).ok())
+            .and_then(|value| value["pid"].as_u64())
+            == Some(u64::from(self.pid));
+        if owned {
+            let _ = fs::remove_file(&self.path);
+            let _ = sync_parent_directory(&self.path);
+        }
+    }
+}
+
+fn materialize_private_objects(record: &journal::JournalRecord) -> Result<()> {
+    let private_root = record
+        .log_root
+        .as_deref()
+        .map(|root| root.join("private").join("objects"));
+    for (path, value) in &record.private_objects {
+        let Some(private_root) = private_root.as_deref() else {
+            return Err("journal contains private evidence without a log root".into());
+        };
+        if !path.starts_with(private_root) || !record.private_paths.contains(path) {
+            return Err(format!(
+                "journal private object path is outside its declared evidence set: {}",
+                path.display()
+            )
+            .into());
+        }
+        let digest = agent_runtime::sha256_value(value);
+        let digest = digest.trim_start_matches("sha256:");
+        let expected = private_root
+            .join(&digest[..2])
+            .join(format!("{digest}.json"));
+        if &expected != path {
+            return Err(format!(
+                "journal private object content does not match its path {}",
+                path.display()
+            )
+            .into());
+        }
+        let valid_existing = fs::read(path)
+            .ok()
+            .and_then(|contents| serde_json::from_slice::<Value>(&contents).ok())
+            .is_some_and(|existing| {
+                agent_runtime::sha256_value(&existing) == format!("sha256:{digest}")
+            });
+        if !valid_existing {
+            atomic_write(path, &serde_json::to_vec(value)?, 0o600)?;
+        }
+    }
+    for path in &record.private_paths {
+        if !path.is_file() {
+            return Err(format!("private evidence is missing at {}", path.display()).into());
+        }
     }
     Ok(())
 }
@@ -1082,47 +1163,12 @@ fn protected_private_paths(
 ) -> Result<HashSet<PathBuf>> {
     let private_root = log_root.join("private");
     let mut protected = HashSet::new();
-    for path in files_below(&log_root.join("tally"))? {
-        collect_private_paths_from_file(log_root, &private_root, &path, &mut protected);
-    }
-    for path in files_below(&forwarding_state_dir.join("forward-queue"))? {
-        let Ok(contents) = fs::read_to_string(path) else {
-            continue;
-        };
-        let Ok(value) = serde_json::from_str::<Value>(&contents) else {
-            continue;
-        };
-        if value["tally_forward_queue_version"].as_u64() == Some(FORWARD_QUEUE_VERSION) {
-            if let Some(paths) = value["local"]["private_paths"].as_array() {
-                for path in paths.iter().filter_map(Value::as_str).map(PathBuf::from) {
-                    if path.starts_with(&private_root) {
-                        protected.insert(path);
-                    }
-                }
-            }
-            if let Some(record) = value.get("record") {
-                collect_private_paths(log_root, &private_root, record, &mut protected);
-            }
-        } else {
-            collect_private_paths(log_root, &private_root, &value, &mut protected);
-        }
-    }
+    protected.extend(
+        journal::protected_private_paths(forwarding_state_dir)?
+            .into_iter()
+            .filter(|path| path.starts_with(&private_root)),
+    );
     Ok(protected)
-}
-
-fn collect_private_paths_from_file(
-    log_root: &Path,
-    private_root: &Path,
-    path: &Path,
-    protected: &mut HashSet<PathBuf>,
-) {
-    let Ok(contents) = fs::read_to_string(path) else {
-        return;
-    };
-    let Ok(value) = serde_json::from_str::<Value>(&contents) else {
-        return;
-    };
-    collect_private_paths(log_root, private_root, &value, protected);
 }
 
 fn collect_private_paths(
@@ -1201,24 +1247,23 @@ fn resolve_private_uri(log_root: &Path, uri: &str) -> Option<PathBuf> {
     None
 }
 
-fn log_root_for_record_path(record_path: &Path) -> Option<PathBuf> {
-    let source_dir = record_path.parent()?;
-    let tally_dir = source_dir.parent()?;
-    if tally_dir.file_name().and_then(|name| name.to_str()) != Some("tally") {
-        return None;
-    }
-    tally_dir.parent().map(Path::to_path_buf)
-}
-
 fn files_below(root: &Path) -> io::Result<Vec<PathBuf>> {
     if !root.exists() {
         return Ok(Vec::new());
     }
     let mut files = Vec::new();
     let mut directories = vec![root.to_path_buf()];
+    let limit = storage_gc_entry_limit();
+    let mut visited = 0_usize;
     while let Some(directory) = directories.pop() {
         for entry in fs::read_dir(directory)? {
             let entry = entry?;
+            visited += 1;
+            if visited > limit {
+                return Err(io::Error::other(format!(
+                    "local storage traversal exceeded the configured {limit}-entry limit"
+                )));
+            }
             let path = entry.path();
             if entry.file_type()?.is_dir() {
                 directories.push(path);
@@ -1234,16 +1279,39 @@ fn remove_empty_directories(root: &Path, directory: &Path) -> io::Result<bool> {
     if !directory.is_dir() {
         return Ok(false);
     }
-    for entry in fs::read_dir(directory)?.filter_map(std::result::Result::ok) {
-        if entry.file_type()?.is_dir() {
-            remove_empty_directories(root, &entry.path())?;
+    let limit = storage_gc_entry_limit();
+    let mut visited = 0_usize;
+    let mut stack = vec![(directory.to_path_buf(), false)];
+    while let Some((path, expanded)) = stack.pop() {
+        if expanded {
+            if path != root && fs::read_dir(&path)?.next().is_none() {
+                fs::remove_dir(path)?;
+            }
+            continue;
+        }
+        visited += 1;
+        if visited > limit {
+            return Err(io::Error::other(format!(
+                "local storage cleanup exceeded the configured {limit}-directory limit"
+            )));
+        }
+        stack.push((path.clone(), true));
+        for entry in fs::read_dir(path)? {
+            let entry = entry?;
+            if entry.file_type()?.is_dir() {
+                stack.push((entry.path(), false));
+            }
         }
     }
-    let empty = fs::read_dir(directory)?.next().is_none();
-    if empty && directory != root {
-        fs::remove_dir(directory)?;
-    }
-    Ok(empty)
+    Ok(fs::read_dir(root)?.next().is_none())
+}
+
+fn storage_gc_entry_limit() -> usize {
+    env::var("TALLY_STORAGE_GC_MAX_ENTRIES")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .unwrap_or(250_000)
+        .clamp(1_000, 2_000_000)
 }
 
 fn configured_private_retention_seconds() -> u64 {
@@ -1327,16 +1395,46 @@ pub fn claim_agent_heartbeat(
     let last_heartbeat = state["last_heartbeat_unix_millis"]
         .as_u64()
         .unwrap_or_default();
+    let pending_claim = state["heartbeat_claim_unix_millis"]
+        .as_u64()
+        .unwrap_or_default();
+    let claim_lease_millis = interval_millis.min(60_000);
+    if pending_claim > 0 && now_unix_millis.saturating_sub(pending_claim) < claim_lease_millis {
+        FileExt::unlock(&lock)?;
+        return Ok(None);
+    }
     let last_signal = last_activity.max(last_heartbeat);
     if last_signal > 0 && now_unix_millis.saturating_sub(last_signal) < interval_millis {
         FileExt::unlock(&lock)?;
         return Ok(None);
     }
 
-    state["last_heartbeat_unix_millis"] = Value::from(now_unix_millis);
+    state["heartbeat_claim_unix_millis"] = Value::from(now_unix_millis);
     write_heartbeat_limiter_state(&state_path, &state)?;
     FileExt::unlock(&lock)?;
     Ok(Some(interval_seconds))
+}
+
+pub fn commit_agent_heartbeat(
+    state_dir: &Path,
+    agent_id: &str,
+    emitted_at_unix_millis: u64,
+) -> Result<()> {
+    let (state_path, lock_path) = heartbeat_limiter_paths(state_dir, agent_id);
+    create_private_dir(state_dir)?;
+    let lock = open_private_lock(&lock_path)?;
+    lock.lock_exclusive()?;
+    let mut state = read_heartbeat_limiter_state(&state_path)?;
+    let previous = state["last_heartbeat_unix_millis"]
+        .as_u64()
+        .unwrap_or_default();
+    state["last_heartbeat_unix_millis"] = Value::from(previous.max(emitted_at_unix_millis));
+    state
+        .as_object_mut()
+        .map(|state| state.remove("heartbeat_claim_unix_millis"));
+    write_heartbeat_limiter_state(&state_path, &state)?;
+    FileExt::unlock(&lock)?;
+    Ok(())
 }
 
 fn heartbeat_limiter_paths(state_dir: &Path, agent_id: &str) -> (PathBuf, PathBuf) {
@@ -1348,7 +1446,7 @@ fn heartbeat_limiter_paths(state_dir: &Path, agent_id: &str) -> (PathBuf, PathBu
     )
 }
 
-fn open_private_lock(path: &Path) -> io::Result<fs::File> {
+pub(crate) fn open_private_lock(path: &Path) -> io::Result<fs::File> {
     let mut options = OpenOptions::new();
     options.create(true).read(true).write(true).truncate(false);
     #[cfg(unix)]
@@ -1392,24 +1490,128 @@ fn endpoint_for(api_url: &str, path: &str) -> Result<String> {
     Ok(url.to_string())
 }
 
-fn post_json(url: &str, api_key: &str, body: &str) -> std::result::Result<(), String> {
-    let agent = ureq::AgentBuilder::new()
+struct PostResponse {
+    receipt: Option<Value>,
+}
+
+struct PostFailure {
+    message: String,
+    permanent_record_failure: bool,
+    retryable: bool,
+    retry_after: Option<Duration>,
+}
+
+fn http_agent() -> ureq::Agent {
+    ureq::AgentBuilder::new()
         .timeout_connect(Duration::from_secs(5))
         .timeout_read(Duration::from_secs(5))
         .timeout_write(Duration::from_secs(5))
-        .build();
-    match agent
+        .build()
+}
+
+fn post_json(url: &str, api_key: &str, body: &str) -> std::result::Result<(), String> {
+    post_json_with_agent(&http_agent(), url, api_key, body, None)
+        .map(|_| ())
+        .map_err(|error| error.message)
+}
+
+fn post_json_with_agent(
+    agent: &ureq::Agent,
+    url: &str,
+    api_key: &str,
+    body: &str,
+    idempotency_key: Option<&str>,
+) -> std::result::Result<PostResponse, PostFailure> {
+    let mut request = agent
         .post(url)
         .set("x-api-key", api_key)
-        .set("content-type", "application/json")
-        .send_string(body)
-    {
+        .set("content-type", "application/json");
+    if let Some(idempotency_key) = idempotency_key {
+        request = request
+            .set("idempotency-key", idempotency_key)
+            .set("x-tally-record-id", idempotency_key);
+    }
+    match request.send_string(body) {
         Ok(response) if (200..300).contains(&response.status()) => {
-            response_body_error(response.into_string().unwrap_or_default().trim())
+            let response_body = read_response_body(response).map_err(|error| PostFailure {
+                message: error,
+                permanent_record_failure: false,
+                retryable: true,
+                retry_after: None,
+            })?;
+            response_body_error(response_body.trim()).map_err(|message| PostFailure {
+                message,
+                permanent_record_failure: false,
+                retryable: false,
+                retry_after: None,
+            })?;
+            let receipt = serde_json::from_str::<Value>(response_body.trim())
+                .ok()
+                .and_then(|value| {
+                    value
+                        .get("receipt")
+                        .or_else(|| value.get("anchor_receipt"))
+                        .cloned()
+                        .or(Some(value))
+                });
+            Ok(PostResponse { receipt })
         }
-        Ok(response) => Err(format!("server returned HTTP {}", response.status())),
-        Err(ureq::Error::Status(status, _)) => Err(format!("server returned HTTP {status}")),
-        Err(ureq::Error::Transport(error)) => Err(error.to_string()),
+        Ok(response) => {
+            let retry_after = retry_after(&response);
+            Err(status_failure(response.status(), None, retry_after))
+        }
+        Err(ureq::Error::Status(status, response)) => {
+            let retry_after = retry_after(&response);
+            let detail = read_response_body(response).ok();
+            Err(status_failure(status, detail.as_deref(), retry_after))
+        }
+        Err(ureq::Error::Transport(error)) => Err(PostFailure {
+            message: error.to_string(),
+            permanent_record_failure: false,
+            retryable: true,
+            retry_after: None,
+        }),
+    }
+}
+
+fn read_response_body(response: ureq::Response) -> std::result::Result<String, String> {
+    const MAX_RESPONSE_BYTES: u64 = 64 * 1024;
+    let mut bytes = Vec::new();
+    response
+        .into_reader()
+        .take(MAX_RESPONSE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .map_err(|error| error.to_string())?;
+    if bytes.len() as u64 > MAX_RESPONSE_BYTES {
+        return Err("server response body exceeded 64 KiB".to_string());
+    }
+    String::from_utf8(bytes).map_err(|error| error.to_string())
+}
+
+fn retry_after(response: &ureq::Response) -> Option<Duration> {
+    response
+        .header("retry-after")
+        .and_then(|value| value.trim().parse::<u64>().ok())
+        .map(|seconds| Duration::from_secs(seconds.min(300)))
+}
+
+fn status_failure(status: u16, body: Option<&str>, retry_after: Option<Duration>) -> PostFailure {
+    let body = body.map(str::trim).filter(|body| !body.is_empty());
+    let message = body
+        .and_then(|body| serde_json::from_str::<Value>(body).ok())
+        .and_then(|value| {
+            value["message"]
+                .as_str()
+                .or_else(|| value["error"].as_str())
+                .map(str::to_string)
+        })
+        .map(|detail| format!("server returned HTTP {status}: {detail}"))
+        .unwrap_or_else(|| format!("server returned HTTP {status}"));
+    PostFailure {
+        message,
+        permanent_record_failure: matches!(status, 400 | 413 | 415 | 422),
+        retryable: status >= 500 || matches!(status, 408 | 425 | 429),
+        retry_after,
     }
 }
 
@@ -1460,17 +1662,67 @@ fn env_disabled(key: &str) -> bool {
     )
 }
 
-fn create_private_dir(path: &Path) -> io::Result<()> {
+pub(crate) fn create_private_dir(path: &Path) -> io::Result<()> {
+    #[cfg(windows)]
+    let existed = path.is_dir();
     fs::create_dir_all(path)?;
     #[cfg(unix)]
     {
         use std::os::unix::fs::PermissionsExt;
         fs::set_permissions(path, fs::Permissions::from_mode(0o700))?;
     }
+    #[cfg(windows)]
+    if !existed {
+        harden_private_directory(path)?;
+    }
     Ok(())
 }
 
-fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
+#[cfg(not(windows))]
+fn harden_private_directory(_path: &Path) -> io::Result<()> {
+    Ok(())
+}
+
+#[cfg(windows)]
+fn harden_private_directory(path: &Path) -> io::Result<()> {
+    let identity = std::process::Command::new("whoami")
+        .args(["/user", "/fo", "csv", "/nh"])
+        .output()?;
+    if !identity.status.success() {
+        return Err(io::Error::other(
+            "could not determine the current Windows user SID",
+        ));
+    }
+    let output = String::from_utf8_lossy(&identity.stdout);
+    let sid = output
+        .split(',')
+        .nth(1)
+        .map(|value| value.trim().trim_matches('"'))
+        .filter(|value| value.starts_with("S-1-"))
+        .ok_or_else(|| io::Error::other("whoami returned an invalid Windows user SID"))?;
+    let user_grant = format!("*{sid}:(OI)(CI)(F)");
+    let system_grant = "*S-1-5-18:(OI)(CI)(F)";
+    let result = std::process::Command::new("icacls")
+        .arg(path)
+        .args([
+            "/inheritance:r",
+            "/grant:r",
+            user_grant.as_str(),
+            system_grant,
+        ])
+        .output()?;
+    if result.status.success() {
+        Ok(())
+    } else {
+        Err(io::Error::other(format!(
+            "could not restrict Windows permissions on {}: {}",
+            path.display(),
+            String::from_utf8_lossy(&result.stderr).trim()
+        )))
+    }
+}
+
+pub(crate) fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -1499,6 +1751,20 @@ fn atomic_write(path: &Path, contents: &[u8], _mode: u32) -> io::Result<()> {
         let _ = fs::remove_file(tmp);
         return Err(error);
     }
+    sync_parent_directory(path)?;
+    Ok(())
+}
+
+#[cfg(unix)]
+pub(crate) fn sync_parent_directory(path: &Path) -> io::Result<()> {
+    if let Some(parent) = path.parent() {
+        fs::File::open(parent)?.sync_all()?;
+    }
+    Ok(())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn sync_parent_directory(_path: &Path) -> io::Result<()> {
     Ok(())
 }
 
@@ -1544,17 +1810,19 @@ mod tests {
     #[cfg(unix)]
     use super::spawn_background;
     use super::{
-        atomic_write, claim_agent_heartbeat, claim_forward_record, decode_forward_queue_item,
-        executable_is_in_app_bundle, forward_queue_name, forward_record_is_pending,
-        heartbeat_interval_seconds, install_options, mark_tally_data_directory,
-        pending_forward_record_is_envelope, prune_local_storage, record_agent_activity,
-        remove_tally_data, resolve_private_uri, response_body_error, restore_forward_claim,
-        restore_snapshots, FileSnapshot, DEFAULT_API_URL, DEFAULT_HEARTBEAT_INTERVAL_SECONDS,
-        DEFAULT_PRIVATE_RETENTION_DAYS, DEFAULT_PRIVATE_STORAGE_LIMIT_MIB,
+        atomic_write, claim_agent_heartbeat, commit_agent_heartbeat, executable_is_in_app_bundle,
+        forward_pending, heartbeat_interval_seconds, install_options, mark_tally_data_directory,
+        prune_local_storage, record_agent_activity, remove_tally_data, resolve_private_uri,
+        response_body_error, restore_snapshots, FileSnapshot, DEFAULT_API_URL,
+        DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_PRIVATE_RETENTION_DAYS,
+        DEFAULT_PRIVATE_STORAGE_LIMIT_MIB,
     };
+    use serde_json::Value;
     use std::fs;
     use std::path::{Path, PathBuf};
+    use std::thread;
     use std::time::{SystemTime, UNIX_EPOCH};
+    use tiny_http::{Header, Response, Server, StatusCode};
 
     fn test_directory(label: &str) -> PathBuf {
         let suffix = SystemTime::now()
@@ -1693,6 +1961,7 @@ mod tests {
             claim_agent_heartbeat(&directory, "agent-a", 601_000, 1).unwrap(),
             Some(600)
         );
+        commit_agent_heartbeat(&directory, "agent-a", 601_000).unwrap();
         assert_eq!(
             claim_agent_heartbeat(&directory, "agent-a", 1_200_999, 1).unwrap(),
             None
@@ -1701,6 +1970,7 @@ mod tests {
             claim_agent_heartbeat(&directory, "agent-a", 1_201_000, 1).unwrap(),
             Some(600)
         );
+        commit_agent_heartbeat(&directory, "agent-a", 1_201_000).unwrap();
         assert_eq!(
             claim_agent_heartbeat(&directory, "agent-a", 500, 1).unwrap(),
             None
@@ -1725,36 +1995,149 @@ mod tests {
     }
 
     #[test]
-    fn forwarding_queue_coalesces_and_atomically_claims_records() {
-        let directory = test_directory("forward-claim");
-        fs::create_dir_all(&directory).unwrap();
-        let body = br#"{"record_id":"rec-1"}"#;
-        assert_eq!(forward_queue_name(body), forward_queue_name(body));
-        assert_ne!(
-            forward_queue_name(body),
-            forward_queue_name(br#"{"record_id":"rec-2"}"#)
+    fn journal_delivery_preserves_order_quarantines_poison_and_persists_receipts() {
+        let directory = test_directory("journal-delivery");
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let api_url = format!("http://{address}/v1/tally/logs");
+        let options = install_options("test-key".to_string(), Some(api_url), None).unwrap();
+        super::write_credentials(&directory, &options).unwrap();
+        super::journal::append_record(
+            &directory,
+            &serde_json::json!({"record_id": "one", "record_type": "SESSION_START", "schema_version": "0.2"}),
+            None,
+            &[],
+            &[],
+        )
+        .unwrap();
+        super::journal::append_record(
+            &directory,
+            &serde_json::json!({"record_id": "two", "record_type": "SESSION_END", "schema_version": "0.2"}),
+            None,
+            &[],
+            &[],
+        )
+        .unwrap();
+
+        let capture = thread::spawn(move || {
+            let mut received = Vec::new();
+            for index in 0..2 {
+                let mut request = server.recv().unwrap();
+                let idempotency = request
+                    .headers()
+                    .iter()
+                    .find(|header| header.field.equiv("idempotency-key"))
+                    .map(|header| header.value.as_str().to_string())
+                    .unwrap();
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                received.push((idempotency, serde_json::from_str::<Value>(&body).unwrap()));
+                if index == 0 {
+                    request
+                        .respond(
+                            Response::from_string(r#"{"message":"invalid record"}"#)
+                                .with_status_code(StatusCode(400))
+                                .with_header(
+                                    Header::from_bytes("content-type", "application/json").unwrap(),
+                                ),
+                        )
+                        .unwrap();
+                } else {
+                    request
+                        .respond(
+                            Response::from_string(r#"{"receipt":"receipt-two"}"#).with_header(
+                                Header::from_bytes("content-type", "application/json").unwrap(),
+                            ),
+                        )
+                        .unwrap();
+                }
+            }
+            received
+        });
+
+        forward_pending(&directory).unwrap();
+        let received = capture.join().unwrap();
+        assert_eq!(
+            received
+                .iter()
+                .map(|(key, _)| key.as_str())
+                .collect::<Vec<_>>(),
+            ["one", "two"]
         );
+        assert_eq!(received[0].1["journal_sequence"], 1);
+        assert_eq!(received[1].1["journal_sequence"], 2);
+        assert!(super::journal::pending_records(&directory)
+            .unwrap()
+            .is_empty());
+        let outcomes =
+            fs::read_to_string(directory.join("journal/delivery-outcomes.jsonl")).unwrap();
+        assert!(outcomes.contains("dead_letter"));
+        assert!(outcomes.contains("receipt-two"));
+        let dead_letters =
+            fs::read_to_string(directory.join("journal/dead-letters.jsonl")).unwrap();
+        assert!(dead_letters.contains("invalid record"));
+        fs::remove_dir_all(directory).unwrap();
+    }
 
-        let queued = directory.join(forward_queue_name(body));
-        fs::write(&queued, body).unwrap();
-        let claimed = claim_forward_record(&queued).unwrap().unwrap();
-        assert!(!queued.exists());
-        assert!(claimed.exists());
-        assert!(claim_forward_record(&queued).unwrap().is_none());
-        assert!(forward_record_is_pending(
+    #[test]
+    fn journal_delivery_retries_transient_failures_with_the_same_idempotency_key() {
+        let directory = test_directory("journal-retry");
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let address = server.server_addr().to_ip().unwrap();
+        let api_url = format!("http://{address}/v1/tally/logs");
+        let options = install_options("test-key".to_string(), Some(api_url), None).unwrap();
+        super::write_credentials(&directory, &options).unwrap();
+        super::journal::append_record(
             &directory,
-            queued.file_name().unwrap().to_str().unwrap()
+            &serde_json::json!({"record_id": "retry-me", "record_type": "SESSION_START", "schema_version": "0.2"}),
+            None,
+            &[],
+            &[],
         )
-        .unwrap());
-        assert!(!pending_forward_record_is_envelope(
-            &directory,
-            queued.file_name().unwrap().to_str().unwrap()
-        )
-        .unwrap());
+        .unwrap();
 
-        restore_forward_claim(&queued, &claimed).unwrap();
-        assert!(queued.exists());
-        assert!(!claimed.exists());
+        let capture = thread::spawn(move || {
+            let mut keys = Vec::new();
+            for attempt in 0..2 {
+                let mut request = server
+                    .recv_timeout(std::time::Duration::from_secs(3))
+                    .unwrap()
+                    .expect("delivery attempt timed out");
+                keys.push(
+                    request
+                        .headers()
+                        .iter()
+                        .find(|header| header.field.equiv("idempotency-key"))
+                        .map(|header| header.value.as_str().to_string())
+                        .unwrap(),
+                );
+                let mut body = String::new();
+                request.as_reader().read_to_string(&mut body).unwrap();
+                if attempt == 0 {
+                    request
+                        .respond(
+                            Response::from_string(r#"{"message":"temporarily unavailable"}"#)
+                                .with_status_code(StatusCode(503))
+                                .with_header(Header::from_bytes("retry-after", "0").unwrap()),
+                        )
+                        .unwrap();
+                } else {
+                    request
+                        .respond(Response::from_string(r#"{"receipt":"retry-receipt"}"#))
+                        .unwrap();
+                }
+            }
+            keys
+        });
+
+        forward_pending(&directory).unwrap();
+        assert_eq!(capture.join().unwrap(), ["retry-me", "retry-me"]);
+        assert!(super::journal::pending_records(&directory)
+            .unwrap()
+            .is_empty());
+        let outcomes =
+            fs::read_to_string(directory.join("journal/delivery-outcomes.jsonl")).unwrap();
+        assert!(outcomes.contains("retry-receipt"));
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1774,15 +2157,19 @@ mod tests {
         atomic_write(&orphan, b"orphan", 0o600).unwrap();
         let duplicate_jsonl = log_root.join("jsonl/debug.jsonl");
         atomic_write(&duplicate_jsonl, b"duplicate\n", 0o600).unwrap();
-        let record = log_root.join("tally/test/000001_RECORD.json");
-        atomic_write(
-            &record,
-            format!(
-                "{{\"payload_uri\":\"private://sha256/{}\"}}\n",
-                "a".repeat(64)
-            )
-            .as_bytes(),
-            0o600,
+        let digest = "a".repeat(64);
+        super::journal::append_record(
+            &forwarding_state,
+            &serde_json::json!({
+                "record_id": "protected-record",
+                "record_type": "SESSION_START",
+                "schema_version": "0.2",
+                "payload_hash": format!("sha256:{digest}"),
+                "payload_uri": format!("private://sha256/{digest}"),
+            }),
+            Some(&log_root),
+            std::slice::from_ref(&protected),
+            &[],
         )
         .unwrap();
 
@@ -1792,7 +2179,7 @@ mod tests {
         assert!(!duplicate_jsonl.exists());
         assert_eq!(report.protected_files, 1);
 
-        fs::remove_file(record).unwrap();
+        fs::remove_dir_all(forwarding_state.join("journal")).unwrap();
         prune_local_storage(&log_root, &forwarding_state, 0, 0).unwrap();
         assert!(!protected.exists());
         fs::remove_dir_all(directory).unwrap();
@@ -1802,35 +2189,6 @@ mod tests {
     fn private_cache_defaults_are_bounded() {
         assert_eq!(DEFAULT_PRIVATE_RETENTION_DAYS, 30);
         assert_eq!(DEFAULT_PRIVATE_STORAGE_LIMIT_MIB, 256);
-    }
-
-    #[test]
-    fn forward_queue_envelopes_keep_local_metadata_off_the_wire() {
-        let queued = serde_json::json!({
-            "tally_forward_queue_version": 1,
-            "record": {"record_type": "ACTION_TAKEN", "record_id": "rec-1"},
-            "local": {
-                "log_root": "/private/device/logs",
-                "private_paths": ["/private/device/logs/private/object.json"]
-            }
-        });
-        let decoded = decode_forward_queue_item(&queued.to_string()).unwrap();
-        let body: serde_json::Value = serde_json::from_str(&decoded.body).unwrap();
-        assert_eq!(body["record_id"], "rec-1");
-        assert!(body.get("local").is_none());
-        assert_eq!(
-            decoded.log_root,
-            Some(PathBuf::from("/private/device/logs"))
-        );
-
-        let legacy = decode_forward_queue_item(r#"{"record_id":"legacy"}"#).unwrap();
-        assert_eq!(legacy.body, r#"{"record_id":"legacy"}"#);
-        assert!(legacy.log_root.is_none());
-
-        assert!(decode_forward_queue_item(
-            r#"{"tally_forward_queue_version":2,"record":{"record_id":"future"}}"#
-        )
-        .is_err());
     }
 
     #[test]
@@ -1855,8 +2213,8 @@ mod tests {
         let directory = test_directory("full-removal");
         let state_dir = directory.join("config/tally/logs/.state");
         let logs_dir = directory.join("custom-logs");
-        fs::create_dir_all(state_dir.join("forward-queue")).unwrap();
-        fs::write(state_dir.join("forward-queue/record.json"), b"{}\n").unwrap();
+        fs::create_dir_all(state_dir.join("journal/segments")).unwrap();
+        fs::write(state_dir.join("journal/segments/segment.jsonl"), b"{}\n").unwrap();
         fs::create_dir_all(&logs_dir).unwrap();
         fs::write(logs_dir.join("record.json"), b"{}\n").unwrap();
 

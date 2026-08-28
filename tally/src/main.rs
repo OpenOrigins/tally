@@ -103,6 +103,11 @@ fn run_gui() -> Result<()> {
             }
             _ => Err(format!("unknown client: {client}").into()),
         },
+        |client, config_path| match client {
+            "codex" => Ok(tally_codex::installation_snapshot_paths(config_path)),
+            "claude" => Ok(tally_claude::installation_snapshot_paths(config_path)),
+            _ => Err(format!("unknown client: {client}").into()),
+        },
     )
 }
 

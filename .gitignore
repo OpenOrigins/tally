@@ -18,6 +18,10 @@ codex-container/logs/
 codex-host/target/
 codex-audit/target/
 
+# Generated reports and local review artifacts
+/output/
+/tmp/
+
 # Claude Code wrapper logs
 .tally-claude-logs*/
 claude-container/logs/
