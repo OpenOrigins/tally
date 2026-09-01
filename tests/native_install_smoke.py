@@ -1155,7 +1155,7 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
     thread.start()
     try:
         key = secrets.token_urlsafe(32)
-        gui_install(
+        result = gui_install(
             source_binary,
             ["codex", "claude"],
             env,
@@ -1164,6 +1164,13 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
             server.api_url,
             expect_connected=True,
         )
+        clients = {client["id"]: client for client in result["clients"]}
+        assert Path(clients["codex"]["logsPath"]).resolve() == (
+            home / ".tally-codex" / "logs"
+        ).resolve()
+        assert Path(clients["claude"]["logsPath"]).resolve() == (
+            home / ".tally-claude" / "logs"
+        ).resolve()
         handshakes = server.wait_for("/v1/tally/onboarding/client-connected", count=2)
         assert {request["body"]["source"] for request in handshakes[-2:]} == {
             "codex", "claude-code"

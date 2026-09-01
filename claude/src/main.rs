@@ -258,8 +258,6 @@ fn run_heartbeat_daemon() -> Result<()> {
 pub fn install_desktop_hooks(
     options: tally_common::InstallOptions,
 ) -> Result<tally_common::InstallReport> {
-    set_runtime_defaults();
-
     let settings_path = effective_settings_path(options.config_path.as_deref());
     let state_dir = state_dir_for_settings_path(&settings_path);
     let installed_binary_path = installed_binary_path_for_settings_path(&settings_path);
@@ -375,7 +373,6 @@ pub fn uninstall_desktop_hooks_with_options(
     config_path: Option<PathBuf>,
     remove_data: bool,
 ) -> Result<tally_common::UninstallReport> {
-    set_runtime_defaults();
     let settings_path = effective_settings_path(config_path.as_deref());
     let state_dir = state_dir_for_settings_path(&settings_path);
     let logs_path = log_root();
