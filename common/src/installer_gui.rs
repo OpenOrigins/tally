@@ -28,14 +28,16 @@ pub struct GuiClient {
     pub detected_version: Option<String>,
 }
 
-pub fn run_installer_gui<I, U>(
+pub fn run_installer_gui<I, U, S>(
     clients: Vec<GuiClient>,
     mut install: I,
     mut uninstall: U,
+    mut snapshot_paths: S,
 ) -> Result<()>
 where
     I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
     U: FnMut(&str, Option<PathBuf>, bool) -> Result<UninstallReport>,
+    S: FnMut(&str, Option<&std::path::Path>) -> Result<Vec<PathBuf>>,
 {
     if clients.is_empty() {
         return Err("installer requires at least one client".into());
@@ -74,6 +76,7 @@ where
             &clients,
             &mut install,
             &mut uninstall,
+            &mut snapshot_paths,
         );
         if shutdown {
             return Ok(());
@@ -81,17 +84,19 @@ where
     }
 }
 
-fn handle_request<I, U>(
+fn handle_request<I, U, S>(
     mut request: Request,
     origin: &str,
     token: &str,
     clients: &[GuiClient],
     install: &mut I,
     uninstall: &mut U,
+    snapshot_paths: &mut S,
 ) -> bool
 where
     I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
     U: FnMut(&str, Option<PathBuf>, bool) -> Result<UninstallReport>,
+    S: FnMut(&str, Option<&std::path::Path>) -> Result<Vec<PathBuf>>,
 {
     let method = request.method().clone();
     let path = request.url().split('?').next().unwrap_or(request.url());
@@ -179,7 +184,7 @@ where
                         json!({
                             "id": selection.id,
                             "configPath": report.config_path,
-                            "queuePath": report.queue_path,
+                            "journalPath": report.journal_path,
                             "logsPath": report.logs_path,
                             "dataRemoved": report.data_removed,
                         })
@@ -210,25 +215,10 @@ where
     }
 
     if method == Method::Post && path == "/api/install" {
-        let result = read_json_body(&mut request)
-            .and_then(|value| parse_install_request(value, clients))
-            .and_then(|request| {
-                request
-                    .clients
-                    .iter()
-                    .map(|selection| {
-                        let options = install_options(
-                            request.api_key.clone(),
-                            request.api_url.clone(),
-                            selection
-                                .config_path
-                                .as_ref()
-                                .map(|path| path.display().to_string()),
-                        )?;
-                        install(selection.id, options).map(|report| (selection.id, report))
-                    })
-                    .collect::<Result<Vec<_>>>()
-            });
+        let result = (|| -> Result<Vec<(&str, InstallReport)>> {
+            let parsed = parse_install_request(read_json_body(&mut request)?, clients)?;
+            install_selected_clients(parsed, install, snapshot_paths)
+        })();
         let (response, shutdown_after_response) = match result {
             Ok(reports) => {
                 let connected = reports
@@ -282,6 +272,48 @@ where
         json!({"ok": false, "error": "Not found"}),
     ));
     false
+}
+
+fn install_selected_clients<I, S>(
+    parsed: InstallRequest,
+    install: &mut I,
+    snapshot_paths: &mut S,
+) -> Result<Vec<(&'static str, InstallReport)>>
+where
+    I: FnMut(&str, InstallOptions) -> Result<InstallReport>,
+    S: FnMut(&str, Option<&std::path::Path>) -> Result<Vec<PathBuf>>,
+{
+    let snapshots = parsed
+        .clients
+        .iter()
+        .map(|selection| snapshot_paths(selection.id, selection.config_path.as_deref()))
+        .collect::<Result<Vec<_>>>()?
+        .into_iter()
+        .flatten()
+        .map(|path| crate::FileSnapshot::capture(&path))
+        .collect::<std::io::Result<Vec<_>>>()?;
+    let install_result = parsed
+        .clients
+        .iter()
+        .map(|selection| {
+            let options = install_options(
+                parsed.api_key.clone(),
+                parsed.api_url.clone(),
+                selection
+                    .config_path
+                    .as_ref()
+                    .map(|path| path.display().to_string()),
+            )?;
+            install(selection.id, options).map(|report| (selection.id, report))
+        })
+        .collect::<Result<Vec<_>>>();
+    match install_result {
+        Ok(reports) => Ok(reports),
+        Err(error) => {
+            let snapshots = snapshots.iter().collect::<Vec<_>>();
+            Err(crate::install_error_with_rollback(error, &snapshots))
+        }
+    }
 }
 
 struct InstallRequest {
@@ -469,4 +501,72 @@ fn open_browser(url: &str) -> Result<()> {
             format!("could not open the installer in a browser: {error}").into()
         })?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{install_selected_clients, ClientRequest, InstallRequest};
+    use crate::InstallReport;
+    use std::fs;
+    use std::path::PathBuf;
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    #[test]
+    fn multi_client_install_rolls_back_every_selected_client() {
+        let suffix = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir().join(format!(
+            "tally-installer-transaction-{}-{suffix}",
+            std::process::id()
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let first = root.join("first.json");
+        let second = root.join("second.json");
+        fs::write(&first, b"first-before").unwrap();
+        fs::write(&second, b"second-before").unwrap();
+        let parsed = InstallRequest {
+            api_key: "test-key".to_string(),
+            api_url: Some("http://127.0.0.1:8080/v1/tally/logs".to_string()),
+            clients: vec![
+                ClientRequest {
+                    id: "first",
+                    config_path: Some(first.clone()),
+                },
+                ClientRequest {
+                    id: "second",
+                    config_path: Some(second.clone()),
+                },
+            ],
+        };
+        let mut snapshot_paths =
+            |_: &str, path: Option<&std::path::Path>| Ok(vec![path.unwrap().to_path_buf()]);
+        let mut install = |id: &str, options: crate::InstallOptions| {
+            let path = options.config_path.unwrap();
+            fs::write(&path, format!("{id}-after"))?;
+            if id == "second" {
+                return Err("second client failed".into());
+            }
+            Ok(InstallReport {
+                config_path: path,
+                state_dir: PathBuf::new(),
+                logs_path: PathBuf::new(),
+                installed_binary_path: PathBuf::new(),
+                backup_path: None,
+                handshake_error: None,
+                approval_required: false,
+                approval_instructions: None,
+                client_version: None,
+            })
+        };
+
+        let error = install_selected_clients(parsed, &mut install, &mut snapshot_paths)
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("second client failed"));
+        assert_eq!(fs::read(&first).unwrap(), b"first-before");
+        assert_eq!(fs::read(&second).unwrap(), b"second-before");
+        fs::remove_dir_all(root).unwrap();
+    }
 }

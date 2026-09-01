@@ -4,6 +4,46 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Added a durable append-only segmented delivery journal with ordered sequence
+  numbers, torn-tail repair, terminal outcome records, dead letters, and receipt
+  persistence.
+- Added idempotent ordered delivery, a reusable HTTP client, bounded exponential
+  retries with jitter and `Retry-After`, and a coalesced single-worker model.
+- Added bounded hook input, JSON traversal, Git capture, response-body, and local
+  storage traversal limits, plus fault tests for journal recovery, transient and
+  permanent delivery failures, corrupt heartbeat state, evidence integrity, and
+  multi-client installer rollback.
+
+### Changed
+
+- Stage content-addressed private evidence in the journal and materialize it in
+  the background, reducing synchronous hook durability work to one append.
+- Share hook-to-record construction between Codex and Claude Code and capture
+  one bounded Git status snapshot instead of running three Git processes.
+- Give installations persistent random agent IDs, use 128-bit record IDs, emit
+  real `HANDOFF` records, and explicitly mark unsupported signatures, declared
+  intent, principal identity, and deviation evaluation as unavailable.
+
+### Removed
+
+- Removed pre-journal queue migration, retired hook command detection, and old
+  installed-helper cleanup paths.
+
+### Fixed
+
+- Preserve capture order instead of hash-sorting records, prevent retry storms
+  and poison-record blockage, retain server receipts, and close worker wakeup
+  races during bursts.
+- Validate evidence hash/URI pairs and ensure action parameters, pre-state,
+  post-state, results, and raw hooks reference the correct private objects.
+- Stop heartbeat daemons on corrupt or implausibly future state, sync parent
+  directories after atomic filesystem changes, restrict Windows private ACLs,
+  and roll back all selected GUI clients when any installation fails.
+- Publish release artifacts from the workflow's exact commit SHA and ignore
+  generated output directories.
+
 ## 0.1.9 - 2026-08-24
 
 ### Added

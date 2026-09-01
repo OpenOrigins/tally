@@ -45,6 +45,33 @@ PACKAGE_VERSION = tomllib.loads(
 )["workspace"]["package"]["version"]
 
 
+def jsonl_values(path: Path) -> list[dict]:
+    try:
+        lines = path.read_bytes().split(b"\n")[:-1]
+    except FileNotFoundError:
+        return []
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def journal_records(state_dir: Path) -> list[dict]:
+    records: list[dict] = []
+    for segment in sorted((state_dir / "journal" / "segments").glob("segment-*.jsonl")):
+        records.extend(value["record"] for value in jsonl_values(segment))
+    return records
+
+
+def pending_journal_records(state_dir: Path) -> list[dict]:
+    terminal: set[int] = set()
+    outcomes = state_dir / "journal" / "delivery-outcomes.jsonl"
+    if outcomes.exists():
+        terminal = {value["sequence"] for value in jsonl_values(outcomes)}
+    return [
+        record
+        for record in journal_records(state_dir)
+        if record["journal_sequence"] not in terminal
+    ]
+
+
 def run(
     binary: Path,
     *args: str,
@@ -327,7 +354,7 @@ def gui_install(
             assert "Approve the hooks in Codex CLI" in html
             assert "Review hooks" in html
             assert "Press <kbd>t</kbd> to trust all hooks" in html
-            assert "Delete queued records and local logs" in html
+            assert "Delete local journal and logs" in html
             assert 'id="version"' in html
             assert 'src="/oo-logo-horizontal.png"' in html
             assert api_key not in html
@@ -558,15 +585,6 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     if agent == "codex":
         env["TALLY_CODEX_CLI"] = str(fake_codex_cli(root / "fake-codex-cli"))
     installed_binary = installed_binary_path(config_path, agent, env)
-    legacy_installed_binary = (
-        config_path.parent
-        / "tally"
-        / "bin"
-        / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
-    )
-    if os.name == "nt":
-        legacy_installed_binary.parent.mkdir(parents=True)
-        legacy_installed_binary.write_bytes(b"legacy unsigned hook executable")
 
     api_key = secrets.token_urlsafe(32)
     expected_install_files = [config_path, api_key_path, api_config_path, installed_binary]
@@ -628,7 +646,6 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if os.name == "nt":
             assert config_path.parent not in installed_binary.parents
             assert "Programs" in installed_binary.parts
-            assert not legacy_installed_binary.exists()
         assert json.loads(api_config_path.read_text(encoding="utf-8")) == {
             "apiUrl": server.api_url
         }
@@ -865,10 +882,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         )
         assert gui_result["clients"][0]["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
 
-        custom_gui_queue = custom_gui_state_dir / "forward-queue"
-        custom_gui_queue.mkdir(parents=True)
-        queued_record = custom_gui_queue / "queued-record.json"
-        queued_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        custom_gui_journal = custom_gui_state_dir / "journal"
+        journal_record = custom_gui_journal / "segments" / "segment-00000000000000000001.jsonl"
+        journal_record.parent.mkdir(parents=True)
+        journal_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
         retained_log = log_root / "retained-during-uninstall.txt"
         retained_log.parent.mkdir(parents=True, exist_ok=True)
         retained_log.write_text("retained\n", encoding="utf-8")
@@ -881,9 +898,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             remove_data=False,
         )
         retained_detail = retained_result["clients"][0]
-        assert retained_detail["queuePath"] == str(custom_gui_queue)
+        assert retained_detail["journalPath"] == str(custom_gui_journal)
         assert retained_detail["logsPath"] == str(log_root)
-        assert queued_record.exists(), "normal uninstall deleted a queued record"
+        assert journal_record.exists(), "normal uninstall deleted the local journal"
         assert retained_log.exists(), "normal uninstall deleted local logs"
         assert not custom_gui_installed_binary.exists()
         assert not (custom_gui_state_dir / "api_key.txt").exists()
@@ -905,7 +922,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             expect_connected=True,
             config_path=custom_gui_config_path,
         )
-        queued_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        journal_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
         retained_log.write_text("delete me\n", encoding="utf-8")
         removed_result = gui_uninstall(
             binary,
@@ -915,8 +932,8 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_gui_config_path,
             remove_data=True,
         )
-        assert removed_result["clients"][0]["queuePath"] == str(custom_gui_queue)
-        assert not custom_gui_state_dir.exists(), "full uninstall retained queued state"
+        assert removed_result["clients"][0]["journalPath"] == str(custom_gui_journal)
+        assert not custom_gui_state_dir.exists(), "full uninstall retained journal state"
         assert not log_root.exists(), "full uninstall retained local logs"
         assert custom_gui_config_path.exists(), "full uninstall deleted the client settings file"
         assert not tally_commands(read_client_config(custom_gui_config_path, agent))
@@ -989,10 +1006,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert evidence["redaction_count"] >= 1
         assert "destructive_change" in evidence["risk_signals"]
         assert "privilege_escalation" in evidence["risk_signals"]
-        assert "THIS_SECRET_MUST_BE_REDACTED" not in instruction["declared_intent"]["summary"]
+        assert instruction["declared_intent"]["summary"] is None
+        assert instruction["declared_intent"]["capture_status"] == "unavailable"
+        assert "THIS_SECRET_MUST_BE_REDACTED" not in instruction["instruction_summary"]
         delivered_records = log_root / "tally" / f"{agent}-hooks"
         assert not list(delivered_records.glob("*.json")), (
-            "successfully queued records retained redundant structured local copies"
+            "delivered records retained redundant structured local copies"
         )
         heartbeat_records = log_root / "tally" / "hook-heartbeat"
         assert not list(heartbeat_records.glob("*.json")), (
@@ -1081,10 +1100,24 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     for event in EVENTS[1:]:
         run(binary, agent, "hook", event, env=offline_env, payload=payloads[event])
 
-    record_dir = log_root / "tally" / f"{agent}-hooks"
-    records = [json.loads(path.read_text(encoding="utf-8")) for path in record_dir.glob("*.json")]
+    records = pending_journal_records(state_dir)
     assert sorted(record["record_type"] for record in records) == EXPECTED_TYPES
     assert all(record["schema_version"] == "0.2" for record in records)
+    records_by_type = {record["record_type"]: record for record in records}
+    session_start_record = records_by_type["SESSION_START"]
+    assert session_start_record["principal"]["id"] is None
+    assert session_start_record["principal"]["type"] is None
+    assert session_start_record["principal"]["capture_status"] == "unavailable"
+    assert session_start_record["authority_scope_hash"] is None
+    assert session_start_record["authority_scope_uri"] is None
+    assert session_start_record["authority_granted_at"] is None
+    assert records_by_type["ACTION_TAKEN"]["deviance_flag"]["deviated"] is None
+    assert (
+        records_by_type["ACTION_TAKEN"]["deviance_flag"]["evaluation_status"]
+        == "unavailable"
+    )
+    assert records_by_type["SESSION_END"]["outcome"] is None
+    assert records_by_type["SESSION_END"]["outcome_capture_status"] == "unavailable"
     action_ids = {
         record["record_type"]: record.get("action_id")
         for record in records
@@ -1100,7 +1133,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if record["record_type"]
         in {"INSTRUCTION_RECEIVED", "ACTION_TAKEN", "RESULT_RECEIVED", "TURN_END"}
     )
-    private_objects = list((log_root / "private" / "objects").glob("*/*.json"))
+    private_objects: list[Path] = []
+    materialization_deadline = time.monotonic() + 3
+    while time.monotonic() < materialization_deadline:
+        private_objects = list((log_root / "private" / "objects").glob("*/*.json"))
+        if private_objects:
+            break
+        time.sleep(0.025)
     assert private_objects, "raw evidence was not retained in the private object cache"
     assert all(
         "private://sha256/" in json.dumps(record)
@@ -1236,10 +1275,15 @@ def smoke_heartbeat_session_lifecycle(binary: Path, root: Path, agent: str) -> N
         assert state["last_hook_event"] == "SessionEnd"
         assert state["stop_requested"] is True
 
-        record_dir = log_root / "tally" / f"{agent}-hooks"
+        forwarding_state = (
+            home
+            / (".codex" if agent == "codex" else ".claude")
+            / "tally"
+            / "logs"
+            / ".state"
+        )
         record_types = {
-            json.loads(path.read_text(encoding="utf-8"))["record_type"]
-            for path in record_dir.glob("*.json")
+            record["record_type"] for record in pending_journal_records(forwarding_state)
         }
         assert {"SESSION_START", "TURN_END", "SESSION_END"} <= record_types
     finally:
@@ -1292,7 +1336,6 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
             "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "600",
         }
     )
-    heartbeat_dir = log_root / "tally" / "hook-heartbeat"
     state_dir = log_root / "state"
 
     try:
@@ -1345,15 +1388,20 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
         assert heartbeat["metadata"]["rate_limit_seconds"] == 600, (
             "heartbeat interval override bypassed the ten-minute minimum"
         )
-        assert not list(heartbeat_dir.glob("*.json")), (
-            "a successfully forwarded heartbeat retained a structured local duplicate"
+        deadline = time.monotonic() + 8
+        pending = pending_journal_records(forwarding_state_dir)
+        while pending and time.monotonic() < deadline:
+            time.sleep(0.1)
+            pending = pending_journal_records(forwarding_state_dir)
+        assert not pending, (
+            "a successfully forwarded heartbeat remained pending"
         )
         assert list((log_root / "private" / "objects").glob("*/*.json")), (
             "forwarding removed raw evidence before the retention window"
         )
 
         time.sleep(2.25)
-        assert not list(heartbeat_dir.glob("*.json"))
+        assert not pending_journal_records(forwarding_state_dir)
         assert len(
             [
                 request
@@ -1369,11 +1417,6 @@ def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
             "heartbeat daemons did not stop after their idle timeout"
         )
 
-        queue_dir = forwarding_state_dir / "forward-queue"
-        deadline = time.monotonic() + 8
-        while list(queue_dir.glob("*")) and time.monotonic() < deadline:
-            time.sleep(0.1)
-        assert not list(queue_dir.glob("*")), "forwarding queue was not drained"
     finally:
         server.shutdown()
         server.server_close()

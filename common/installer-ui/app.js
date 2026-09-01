@@ -111,7 +111,7 @@ function showResultDetails(resultClients, removal = null) {
   const dataRow = document.getElementById("doneDataRow");
   dataRow.hidden = removal === null;
   if (removal !== null) {
-    const paths = [...new Set(resultClients.flatMap((result) => [result.queuePath, result.logsPath]).filter(Boolean))];
+    const paths = [...new Set(resultClients.flatMap((result) => [result.journalPath, result.logsPath]).filter(Boolean))];
     document.getElementById("doneData").textContent = removal
       ? "Deleted"
       : `Retained at ${paths.join("; ")}`;
@@ -229,8 +229,8 @@ document.getElementById("confirmUninstallButton").addEventListener("click", asyn
   document.getElementById("resultMark").classList.remove("warning-mark");
   document.getElementById("progressTitle").textContent = "Removing Tally";
   document.getElementById("progressMessage").textContent = removeData
-    ? "Removing hooks, credentials, queued records, and local logs."
-    : "Removing hooks and local credentials while retaining queued records and logs.";
+    ? "Removing hooks, credentials, the local journal, and logs."
+    : "Removing hooks and local credentials while retaining the journal and logs.";
   document.getElementById("status").textContent = "Removing";
   show("installing");
   try {
@@ -243,8 +243,8 @@ document.getElementById("confirmUninstallButton").addEventListener("click", asyn
       ? "Tally integrations and data are removed"
       : "Tally integrations are removed";
     document.getElementById("doneMessage").textContent = result.dataRemoved
-      ? "Hooks, local credentials, installed hook helpers, queued records, and local logs were removed."
-      : "Hooks, local credentials, and installed hook helpers were removed. Queued records and local logs were retained.";
+      ? "Hooks, local credentials, installed hook helpers, the local journal, and logs were removed."
+      : "Hooks, local credentials, and installed hook helpers were removed. The local journal and logs were retained.";
     showResultDetails(result.clients, result.dataRemoved);
     document.getElementById("warning").hidden = true;
     document.getElementById("approval").hidden = true;

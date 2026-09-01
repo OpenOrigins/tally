@@ -7,11 +7,10 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use tally_common::agent_runtime::{
-    backup_if_exists, env_enabled, evidence_summary, expand_home, first_mapping_by_key,
-    first_string_by_key, first_value_by_key, home_dir, hook_command, light_git_state,
-    parse_payload, random_hex, read_json_file, read_stdin, run_id, safe_slug, server_evidence,
-    set_default, sha256_str, sha256_value, stable_id, utc_now, workspace_path, write_json_atomic,
-    AuditSink, AuditSinkConfig, HeartbeatFiles,
+    backup_if_exists, env_enabled, expand_home, first_string_by_key, home_dir, hook_command,
+    light_git_state, parse_payload, random_hex, read_json_file, read_stdin, run_id, safe_slug,
+    set_default, sha256_str, stable_id, utc_now, workspace_path, write_json_atomic, AuditSink,
+    AuditSinkConfig, HeartbeatFiles,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -127,7 +126,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         "environment": scrub_environment(),
         "git_state": light_git_state(&workspace_path()),
     });
-    let event_id = format!("evt_{}", random_hex(8));
+    let event_id = format!("evt_{}", random_hex(16));
     let event = json!({
         "schema_version": "tally-claude.v1",
         "event_id": event_id,
@@ -148,7 +147,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         event["observed_at"].as_str().unwrap_or(&utc_now()),
     )?;
 
-    let mut record = build_tally_record(&sink, event_type, &payload, &raw_ref, &metadata);
+    let mut record = build_tally_record(&sink, event_type, &payload, &raw_ref, &metadata)?;
     record["record_id"] = Value::String(format!(
         "rec_{}",
         event["event_id"]
@@ -290,6 +289,7 @@ pub fn install_desktop_hooks(
         tally_common::FileSnapshot::capture(&tally_common::api_key_path(&state_dir))?;
     let api_config_snapshot =
         tally_common::FileSnapshot::capture(&tally_common::config_path(&state_dir))?;
+    let agent_id_snapshot = tally_common::FileSnapshot::capture(&state_dir.join("agent-id.txt"))?;
     let binary_snapshot = tally_common::FileSnapshot::capture(&installed_binary_path)?;
     remove_tally_hooks(&mut config);
     let hooks = config["hooks"]
@@ -306,13 +306,9 @@ pub fn install_desktop_hooks(
 
     let install_result = (|| -> Result<()> {
         tally_common::install_executable(&source_binary, &installed_binary_path)?;
+        tally_common::load_or_create_agent_id(&state_dir, "claude")?;
         tally_common::write_credentials(&state_dir, &options)?;
         write_json_atomic(&settings_path, &config)?;
-        if let Err(error) =
-            tally_common::remove_legacy_installed_executable(&settings_path, "tally-claude")
-        {
-            eprintln!("Warning: could not remove the previous hook executable: {error}");
-        }
         Ok(())
     })();
     if let Err(error) = install_result {
@@ -322,6 +318,7 @@ pub fn install_desktop_hooks(
                 &settings_snapshot,
                 &key_snapshot,
                 &api_config_snapshot,
+                &agent_id_snapshot,
                 &binary_snapshot,
             ],
         ));
@@ -407,7 +404,7 @@ pub fn uninstall_desktop_hooks_with_options(
     }
     Ok(tally_common::UninstallReport {
         config_path: settings_path,
-        queue_path: state_dir.join("forward-queue"),
+        journal_path: state_dir.join("journal"),
         state_dir,
         logs_path,
         data_removed: remove_data,
@@ -420,176 +417,34 @@ fn build_tally_record(
     payload: &Value,
     raw_ref: &Value,
     metadata: &Value,
-) -> Value {
+) -> Result<Value> {
     let session_id = extract_session_id(payload).unwrap_or_else(|| sink.run_id.clone());
-    let prompt = first_string_by_key(
-        payload,
-        &["prompt", "user_prompt", "input", "text", "content"],
-    );
-    let raw_hash = raw_ref["hash"].clone();
-    let raw_uri = raw_ref["uri"].clone();
-    let observed_at = metadata["observed_at"].clone();
-
-    match event_type {
-        "SessionStart" => json!({
-            "record_type": "SESSION_START",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "agent_id": agent_id(),
-            "agent_version": agent_version(),
-            "principal": {"type": "human", "id": "[ARB] claude-user"},
-            "authority_scope_hash": sha256_value(metadata),
-            "authority_scope_uri": raw_uri,
-            "authority_granted_at": observed_at,
-            "session_started_at": metadata["observed_at"],
-            "claude_hook_event": event_type,
-            "raw_hook_hash": raw_hash,
-        }),
-        "UserPromptSubmit" => {
-            let evidence =
-                server_evidence(&prompt.map(Value::String).unwrap_or_else(|| payload.clone()));
-            let summary = evidence_summary(&evidence, "User prompt submitted to Claude Code");
-            json!({
-                "record_type": "INSTRUCTION_RECEIVED",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "instruction_id": stable_id("instr", payload),
-                "sender": {"id": "[ARB] user", "signature": sha256_value(payload)},
-                "instruction_hash": raw_hash,
-                "instruction_uri": raw_uri,
-                "instruction_received_at": observed_at,
-                "context_snapshot_hash": sha256_value(&metadata["git_state"]),
-                "context_snapshot_uri": raw_ref["uri"],
-                "declared_intent": {
-                    "summary": format!("[ARB] {summary}"),
-                    "detail_hash": raw_ref["hash"],
-                    "detail_uri": raw_ref["uri"],
-                },
-                "server_evidence": evidence,
-                "claude_hook_event": event_type,
-            })
-        }
-        "PreToolUse" | "PermissionRequest" => {
-            let tool_params = first_mapping_by_key(
-                payload,
-                &["tool_input", "arguments", "args", "params", "input"],
-            )
-            .cloned()
-            .unwrap_or_else(|| payload.clone());
-            let evidence = server_evidence(&tool_params);
-            json!({
-                "record_type": "ACTION_TAKEN",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "action_id": action_id(payload),
-                "instruction_id": first_string_by_key(payload, &["instruction_id", "prompt_id", "turn_id", "turnId"])
-                    .unwrap_or_else(|| stable_id("instr", &Value::String(session_id.clone()))),
-                "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
-                "tool": {
-                    "server": first_string_by_key(payload, &["server", "server_name", "mcp_server"])
-                        .unwrap_or_else(|| "claude-code".to_string()),
-                    "name": first_string_by_key(payload, &["tool_name", "toolName", "name", "command"])
-                        .unwrap_or_else(|| event_type.to_string()),
-                    "params_hash": sha256_value(&tool_params),
-                    "params_uri": raw_ref["uri"],
-                },
-                "pre_state_hash": sha256_value(&metadata["git_state"]),
-                "pre_state_uri": raw_ref["uri"],
-                "post_state_hash": Value::Null,
-                "post_state_uri": Value::Null,
-                "action_timestamp": observed_at,
-                "deviance_flag": {"deviated": false, "delta_category": Value::Null, "delta_hash": Value::Null, "delta_uri": Value::Null},
-                "server_evidence": evidence,
-                "claude_hook_event": event_type,
-                "raw_hook_hash": raw_ref["hash"],
-            })
-        }
-        "PostToolUse" => {
-            let has_error =
-                first_string_by_key(payload, &["tool_error", "error", "exception"]).is_some();
-            let evidence_source = first_value_by_key(
-                payload,
-                &[
-                    "tool_response",
-                    "tool_result",
-                    "result",
-                    "output",
-                    "content",
-                ],
-            )
-            .unwrap_or(payload);
-            let evidence = server_evidence(evidence_source);
-            let summary = evidence_summary(&evidence, "Claude Code reported a tool result");
-            json!({
-                "record_type": "RESULT_RECEIVED",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "action_id": action_id(payload),
-                "result_hash": raw_ref["hash"],
-                "result_uri": raw_ref["uri"],
-                "result_received_at": observed_at,
-                "result_interpretation": {
-                    "summary": format!("[ARB] {summary}"),
-                    "detail_hash": raw_ref["hash"],
-                    "detail_uri": raw_ref["uri"],
-                },
-                "exception": {
-                    "occurred": has_error,
-                    "type": first_string_by_key(payload, &["error_type", "type"]),
-                    "description_hash": if has_error { raw_ref["hash"].clone() } else { Value::Null },
-                    "description_uri": if has_error { raw_ref["uri"].clone() } else { Value::Null },
-                },
-                "server_evidence": evidence,
-                "claude_hook_event": event_type,
-            })
-        }
-        "Stop" => {
-            let evidence_source = first_value_by_key(
-                payload,
-                &[
-                    "last_assistant_message",
-                    "response",
-                    "result",
-                    "output",
-                    "content",
-                ],
-            )
-            .unwrap_or(payload);
-            json!({
-                "record_type": "TURN_END",
-                "schema_version": "0.2",
-                "session_id": session_id,
-                "turn_id": turn_id(payload),
-                "outcome": "completed",
-                "outcome_hash": raw_ref["hash"],
-                "outcome_uri": raw_ref["uri"],
-                "turn_ended_at": observed_at,
-                "server_evidence": server_evidence(evidence_source),
-                "claude_hook_event": event_type,
-            })
-        }
-        "SessionEnd" => json!({
-            "record_type": "SESSION_END",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "outcome": "partial",
-            "outcome_hash": raw_ref["hash"],
-            "outcome_uri": raw_ref["uri"],
-            "session_ended_at": observed_at,
-            "session_end_reason": first_string_by_key(payload, &["reason"]),
-            "claude_hook_event": event_type,
-        }),
-        _ => json!({
-            "record_type": "CLAUDE_LIFECYCLE",
-            "schema_version": "0.2",
-            "session_id": session_id,
-            "claude_hook_event": event_type,
-            "event_hash": raw_ref["hash"],
-            "event_uri": raw_ref["uri"],
-            "observed_at": observed_at,
-            "metadata": metadata,
-        }),
-    }
+    let installation_agent_id = agent_id()?;
+    let version = agent_version();
+    let action = action_id(payload);
+    let turn = turn_id(payload);
+    let profile = tally_common::records::HookRecordProfile {
+        hook_field: "claude_hook_event",
+        lifecycle_record_type: "CLAUDE_LIFECYCLE",
+        default_tool_server: "claude-code",
+        prompt_summary_label: "User prompt submitted to Claude Code",
+        result_summary_label: "Claude Code reported a tool result",
+        tool_param_keys: &["tool_input", "arguments", "args", "params", "input"],
+        instruction_id_keys: &["instruction_id", "prompt_id", "turn_id", "turnId"],
+        tool_server_keys: &["server", "server_name", "mcp_server"],
+        tool_name_keys: &["tool_name", "toolName", "name", "command"],
+        error_keys: &["tool_error", "error", "exception"],
+    };
+    let identity = tally_common::records::HookRecordIdentity {
+        session_id: &session_id,
+        agent_id: &installation_agent_id,
+        agent_version: &version,
+        action_id: &action,
+        turn_id: &turn,
+    };
+    tally_common::records::build_hook_record(
+        sink, &profile, &identity, event_type, payload, raw_ref, metadata,
+    )
 }
 
 #[cfg(test)]
@@ -601,6 +456,7 @@ fn record_type_for_hook(event_type: &str) -> &'static str {
         "PostToolUse" => "RESULT_RECEIVED",
         "Stop" => "TURN_END",
         "SessionEnd" => "SESSION_END",
+        "SubagentStart" | "SubagentStop" => "HANDOFF",
         _ => "CLAUDE_LIFECYCLE",
     }
 }
@@ -646,7 +502,7 @@ fn audit_sink(source: &str) -> Result<AuditSink> {
         run_id: run_id(),
         workspace: workspace_path(),
         forwarding_state_dir: onboarding_state_dir(),
-        agent_id: agent_id(),
+        agent_id: agent_id()?,
         heartbeat_client: "claude-code",
         event_schema: "tally-claude.v1",
     })
@@ -834,6 +690,18 @@ pub fn default_installed_binary_path() -> PathBuf {
     installed_binary_path_for_settings_path(&default_config_path())
 }
 
+pub fn installation_snapshot_paths(config_path: Option<&Path>) -> Vec<PathBuf> {
+    let settings_path = effective_settings_path(config_path);
+    let state_dir = state_dir_for_settings_path(&settings_path);
+    vec![
+        settings_path.clone(),
+        tally_common::api_key_path(&state_dir),
+        tally_common::config_path(&state_dir),
+        state_dir.join("agent-id.txt"),
+        installed_binary_path_for_settings_path(&settings_path),
+    ]
+}
+
 fn installed_binary_path_for_settings_path(path: &Path) -> PathBuf {
     tally_common::installed_executable_path(path, "tally-claude")
 }
@@ -844,7 +712,6 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
         installed_binary_path_for_settings_path(path),
-        tally_common::legacy_installed_executable_path(path, "tally-claude"),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -855,8 +722,8 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn agent_id() -> String {
-    env::var("TALLY_AGENT_ID").unwrap_or_else(|_| "claude-desktop".to_string())
+fn agent_id() -> Result<String> {
+    tally_common::load_or_create_agent_id(&onboarding_state_dir(), "claude")
 }
 
 fn agent_version() -> String {
