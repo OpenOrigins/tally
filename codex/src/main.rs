@@ -567,8 +567,6 @@ fn run_codex_cli_with_home(
 pub fn install_desktop_hooks(
     options: tally_common::InstallOptions,
 ) -> Result<tally_common::InstallReport> {
-    set_runtime_defaults();
-
     let codex_cli = codex_cli_status()?;
     let config_path = effective_config_path(options.config_path.as_deref());
     let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
@@ -695,7 +693,6 @@ pub fn uninstall_desktop_hooks_with_options(
     config_path: Option<PathBuf>,
     remove_data: bool,
 ) -> Result<tally_common::UninstallReport> {
-    set_runtime_defaults();
     let config_path = effective_config_path(config_path.as_deref());
     let legacy_hooks_path = legacy_hooks_path_for_config_path(&config_path);
     let state_dir = state_dir_for_config_path(&config_path);
