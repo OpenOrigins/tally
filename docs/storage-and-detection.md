@@ -1,6 +1,6 @@
 # Local storage and detection
 
-Tally treats the local filesystem as a delivery spool and bounded evidence cache,
+Tally treats the local filesystem as a delivery journal and bounded evidence cache,
 not as the permanent system of record.
 
 ## Storage lifecycle
@@ -41,6 +41,21 @@ journal/
 Journal segments contain local-only metadata and staged private payloads. The
 wire request contains only the structured `record` object; local paths and raw
 private values are never included in the request body.
+
+## What the API receives
+
+Tally sends each structured record as one JSON request. For prompts, tool
+parameters, tool results, and turn results, the record contains:
+
+- a SHA-256 hash and `private://` URI for the complete raw hook payload; and
+- by default, an up-to-8,192-character projection in `server_evidence.text`.
+
+The projection is bounded and redacts credential-like keys and common secret
+formats before transmission, but this redaction is best effort rather than a
+complete data-loss-prevention boundary. Set `TALLY_SERVER_EVIDENCE_ENABLED=0`
+to send `text: null`, hashes, and private URIs without prompt or result
+plaintext. Raw evidence addressed by a `private://` URI remains on the local
+machine.
 
 The defaults can be changed for managed deployments:
 

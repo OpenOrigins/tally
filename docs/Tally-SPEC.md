@@ -4,7 +4,7 @@
 > **Status**: Draft. We welcome issues and pull requests.  
 > **Maintainer**: [OpenOrigins](https://openorigins.com)  
 > **License**: CC BY 4.0  
-> **Changelog**: v0.2 introduces three-tier field visibility (PUBLIC / ARBITRATOR / PRIVATE) and the Anchor local scanning model.
+> **Changelog**: v0.2 introduces three-tier field visibility (PUBLIC / ARBITRATOR / PRIVATE) and local Anchor collection.
 
 ---
 
@@ -21,7 +21,10 @@ Compatibility means that, in the event of a dispute between agents or between an
 
 ### How Anchor works
 
-**Anchor runs locally on each organisation's own infrastructure.** It is a lightweight daemon that scans a designated log directory for new records, hashes their contents, and transmits fields to OpenOrigins according to their visibility tier (see below).
+**Anchor runs locally on each organisation's own infrastructure.** It is a
+lightweight collector that receives agent events, journals structured records,
+hashes their private content, and transmits records to OpenOrigins according to
+their visibility tier (see below).
 
 Each organisation runs its own Anchor instance independently. This means:
 
@@ -52,8 +55,11 @@ Each organisation runs its own Anchor instance independently. This means:
 **1. Anchor runs independently on each party's infra.**  
 Neither party's log is authoritative on its own. OpenOrigins holds independently anchored records from both sides. The comparison is the evidence.
 
-**2. Hash content, don't transmit it by default.**  
-Raw prompt and response content is not transmitted to OpenOrigins unless the field's visibility tier requires it. Plaintext stays on company infrastructure and is retrieved only under dispute.
+**2. Hash complete content; bound any transmitted excerpt.**
+Complete raw prompt and response payloads remain on company infrastructure as
+PRIVATE evidence. An implementation may send a bounded, redacted excerpt as
+ARBITRATOR evidence for server-side detection, as described below. This must be
+explicitly disableable.
 
 **3. Record intent before action.**  
 A log that only records what happened is insufficient. The spec requires recording what the agent declared it would do before acting. The delta between declared intent and actual action is a primary signal in dispute resolution.
@@ -68,7 +74,7 @@ returned after ingestion may be stored in a separate append-only outcome journal
 keyed by record ID and sequence rather than inserted into the original record.
 
 **6. The logical log is append-only.**
-No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery spool may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
+No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery journal may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
 
 **7. Heartbeat ensures gap detection.**  
 Anchor emits one agent-scoped `HEARTBEAT` record every 10 minutes (600 seconds) whenever no other records are being written for that agent. Concurrent sessions share the same heartbeat window.
@@ -92,9 +98,11 @@ Only the SHA-256 hash and a company-held URI are transmitted to OpenOrigins. The
 
 ### Bounded server evidence
 
-Implementations may transmit a bounded, redacted plaintext excerpt as an
-ARBITRATOR field to support server-side anomaly detection. When present it uses
-this shape:
+Implementations may transmit a bounded, redacted plaintext excerpt of prompts,
+tool parameters, tool results, or turn results as an ARBITRATOR field to support
+server-side anomaly detection. This is plaintext derived from private content,
+not merely a hash; redaction is best effort and does not make the excerpt
+PUBLIC. When present it uses this shape:
 
 ```json
 {
@@ -416,13 +424,17 @@ Emitted by Anchor every 10 minutes (600 seconds) whenever no other records are b
 
 ## Anchoring
 
-Anchor transmits records to OpenOrigins in two passes:
+Anchor may transmit the PUBLIC and ARBITRATOR fields of a record in one
+authenticated request. The receiving service applies the field-tier controls:
 
-**Pass 1 — Public fields**: Transmitted immediately as plaintext on record creation.
+**Public fields**: Transmitted as plaintext on record creation.
 
-**Pass 2 — Arbitrator fields**: Transmitted as plaintext but stored encrypted at rest, inaccessible to OpenOrigins staff until a dispute is formally raised.
+**Arbitrator fields**: Transmitted as plaintext but stored encrypted at rest,
+inaccessible to OpenOrigins staff until a dispute is formally raised.
 
-**Private fields**: Only hash and URI are transmitted. Plaintext never leaves company infrastructure.
+**Private fields**: Only hash and URI are transmitted. Complete raw plaintext
+never leaves company infrastructure; a bounded excerpt is a separate
+ARBITRATOR field when enabled.
 
 ### Minimum anchoring requirement
 
