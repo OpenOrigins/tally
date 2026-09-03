@@ -1,0 +1,11 @@
+# Anchor hooks configuration. Values here can be overridden by environment
+# variables (ANCHOR_AGENT_ID, TALLY_USER_EMAIL, TALLY_API_URL, TALLY_API_KEY_FILE).
+agent_id: local-agent:medi-agent-langgraph
+principal_id: user:shuhood@openorigins.com
+log_dir: logs
+heartbeat_interval_seconds: 60
+heartbeat_max_hours: 6
+forwarder:
+  api_url: https://api.dev2.openorigins.com/v1/tally/logs
+  api_key_file: logs/.anchor_state/api_key.txt
+  max_hours: 24

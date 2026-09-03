@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "anchor-hooks"
+version = "0.1.0"
+description = "Anchor logging hooks (SESSION_START/INSTRUCTION_RECEIVED/ACTION_TAKEN/RESULT_RECEIVED/HANDOFF/SESSION_END/HEARTBEAT) for any LangGraph agent, with heartbeat + Tally log forwarding daemons."
+requires-python = ">=3.10"
+dependencies = [
+    "langchain-core>=1.0,<2",
+    "langgraph>=1.0,<2",
+    "pyyaml>=6,<7",
+    "requests>=2.31,<3",
+]
+
+[project.scripts]
+anchor-hooks = "anchor_hooks.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["anchor_hooks*"]
