@@ -708,7 +708,6 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
     for path in [
         tally_common::api_key_path(&state_dir),
         tally_common::config_path(&state_dir),
-        installed_binary_path_for_settings_path(path),
     ] {
         match fs::remove_file(path) {
             Ok(()) => {}
@@ -716,7 +715,7 @@ fn remove_local_credentials_for_settings_path(path: &Path) -> Result<()> {
             Err(error) => return Err(error.into()),
         }
     }
-    Ok(())
+    tally_common::remove_installed_executable(&installed_binary_path_for_settings_path(path))
 }
 
 fn agent_id() -> Result<String> {
