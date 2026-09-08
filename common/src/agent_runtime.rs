@@ -2,15 +2,14 @@ use chrono::{SecondsFormat, Utc};
 use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
-use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::thread;
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use super::Result;
 
@@ -32,14 +31,13 @@ pub struct AuditSink {
     pub run_id: String,
     pub workspace: PathBuf,
     pub state_dir: PathBuf,
-    log_root: PathBuf,
     jsonl_dir: PathBuf,
+    tally_dir: PathBuf,
     private_dir: PathBuf,
     forwarding_state_dir: PathBuf,
     agent_id: String,
     heartbeat_client: String,
     event_schema: String,
-    staged_private_objects: RefCell<BTreeMap<PathBuf, Value>>,
 }
 
 impl AuditSink {
@@ -47,10 +45,16 @@ impl AuditSink {
         let source = safe_slug(config.source, "source");
         let log_root = config.log_root;
         super::mark_tally_data_directory(&log_root)?;
+        if let Err(error) =
+            super::maybe_prune_local_storage(&log_root, &config.forwarding_state_dir, false)
+        {
+            eprintln!("Warning: local evidence cleanup could not run: {error}");
+        }
         let jsonl_dir = log_root.join("jsonl");
+        let tally_dir = log_root.join("tally").join(&source);
         let private_dir = log_root.join("private").join("objects");
         let state_dir = log_root.join("state");
-        for path in [&jsonl_dir, &private_dir, &state_dir] {
+        for path in [&jsonl_dir, &tally_dir, &private_dir, &state_dir] {
             super::create_private_dir(path)?;
         }
         Ok(Self {
@@ -58,15 +62,34 @@ impl AuditSink {
             run_id: config.run_id,
             workspace: config.workspace,
             state_dir,
-            log_root,
             jsonl_dir,
+            tally_dir,
             private_dir,
             forwarding_state_dir: config.forwarding_state_dir,
             agent_id: config.agent_id,
             heartbeat_client: config.heartbeat_client.to_string(),
             event_schema: config.event_schema.to_string(),
-            staged_private_objects: RefCell::new(BTreeMap::new()),
         })
+    }
+
+    fn next_sequence(&self) -> Result<u64> {
+        let counter = self.state_dir.join(format!("{}.counter", self.source));
+        let lock_path = self.state_dir.join(format!("{}.counter.lock", self.source));
+        let lock = private_open_options()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(lock_path)?;
+        lock.lock_exclusive()?;
+        let current = fs::read_to_string(&counter)
+            .ok()
+            .and_then(|value| value.trim().parse::<u64>().ok())
+            .unwrap_or(0);
+        let next = current + 1;
+        write_text_atomic(&counter, &next.to_string())?;
+        FileExt::unlock(&lock)?;
+        Ok(next)
     }
 
     pub fn private_payload(&self, payload: &Value) -> Result<Value> {
@@ -76,10 +99,7 @@ impl AuditSink {
             .private_dir
             .join(&digest[..2])
             .join(format!("{digest}.json"));
-        self.staged_private_objects
-            .borrow_mut()
-            .entry(path)
-            .or_insert_with(|| payload.clone());
+        write_json_atomic(&path, payload)?;
         Ok(json!({
             "hash": hash,
             "uri": format!("private://sha256/{digest}"),
@@ -98,34 +118,26 @@ impl AuditSink {
         )
     }
 
-    pub fn write_tally_record(&self, record: &Value) -> Result<u64> {
+    pub fn write_tally_record(&self, record: &Value) -> Result<PathBuf> {
+        let seq = self.next_sequence()?;
+        let record_type = record["record_type"].as_str().unwrap_or("RECORD");
+        let record_id = record["record_id"].as_str().unwrap_or("record");
+        let path = self.tally_dir.join(format!(
+            "{seq:06}_{}_{}.json",
+            safe_slug(record_type, "RECORD"),
+            safe_slug(record_id, "record")
+        ));
         let mut with_defaults = record.clone();
         with_defaults["run_id"] = Value::String(self.run_id.clone());
         if with_defaults.get("schema_version").is_none() {
             with_defaults["schema_version"] = Value::String("0.2".to_string());
         }
-        let private_paths = super::private_paths_for_record(&self.log_root, &with_defaults);
-        let private_objects = self
-            .staged_private_objects
-            .borrow()
-            .iter()
-            .map(|(path, value)| (path.clone(), value.clone()))
-            .collect::<Vec<_>>();
-        let sequence = super::journal::append_record(
-            &self.forwarding_state_dir,
-            &with_defaults,
-            Some(&self.log_root),
-            &private_paths,
-            &private_objects,
-        )?;
-        self.staged_private_objects.borrow_mut().clear();
+        write_json_atomic(&path, &with_defaults)?;
         let executable = env::current_exe()?;
-        if let Err(error) = super::schedule_forwarder(&self.forwarding_state_dir, &executable) {
-            eprintln!(
-                "Warning: record was journaled but the delivery worker could not start: {error}"
-            );
+        if let Err(error) = super::enqueue_record(&self.forwarding_state_dir, &path, &executable) {
+            eprintln!("Warning: record was saved locally but could not be queued: {error}");
         }
-        Ok(sequence)
+        Ok(path)
     }
 
     pub fn emit_heartbeat(
@@ -175,16 +187,11 @@ impl AuditSink {
             "schema_version": "0.2",
             "session_id": self.run_id,
             "agent_id": self.agent_id,
-            "anchor_instance_id": stable_id(
-                "anchor",
-                &Value::String(self.forwarding_state_dir.display().to_string()),
-            ),
             "active_sessions": active_sessions,
             "timestamp": timestamp,
             "source": self.source,
             "metadata": metadata,
         }))?;
-        super::commit_agent_heartbeat(&self.state_dir, &self.agent_id, emitted_at_unix_millis)?;
         Ok(())
     }
 }
@@ -234,6 +241,15 @@ pub fn update_heartbeat_state(
     if event_type != "SessionStart" {
         return Ok(());
     }
+    if files.pid.exists() {
+        let pid = fs::read_to_string(&files.pid).unwrap_or_default();
+        if process_is_alive(pid.trim()) {
+            return Ok(());
+        }
+        if let Err(error) = remove_file_if_exists(&files.pid) {
+            eprintln!("Warning: could not remove a stale heartbeat PID file: {error}");
+        }
+    }
 
     super::spawn_background(&env::current_exe()?, &[client_command, "heartbeat-daemon"])?;
     Ok(())
@@ -257,25 +273,11 @@ pub fn run_heartbeat_daemon(sink: &AuditSink, files: &HeartbeatFiles) -> Result<
 
     loop {
         thread::sleep(Duration::from_secs(poll_interval));
-        let state = match read_json_file(&files.state) {
-            Ok(state) => state,
-            Err(error) => {
-                eprintln!(
-                    "Warning: stopping heartbeat daemon because its state is unreadable: {error}"
-                );
-                break;
-            }
-        };
+        let state = read_json_file(&files.state).unwrap_or_else(|_| json!({}));
         if state["stop_requested"].as_bool().unwrap_or(false) {
             break;
         }
-        let quiet_seconds = match validated_heartbeat_quiet_seconds(&state) {
-            Ok(seconds) => seconds,
-            Err(error) => {
-                eprintln!("Warning: stopping heartbeat daemon because {error}");
-                break;
-            }
-        };
+        let quiet_seconds = seconds_since(state["updated_at"].as_str().unwrap_or(""));
         let heartbeat_kind = if quiet_seconds > idle_timeout {
             "hook-daemon-timeout"
         } else if heartbeat_due(quiet_seconds, interval) {
@@ -362,17 +364,6 @@ fn heartbeat_due(quiet_seconds: i64, interval_seconds: u64) -> bool {
     quiet_seconds >= 0 && quiet_seconds as u64 >= interval_seconds
 }
 
-fn validated_heartbeat_quiet_seconds(state: &Value) -> Result<i64> {
-    let quiet_seconds = state["updated_at"]
-        .as_str()
-        .and_then(seconds_since)
-        .ok_or("updated_at is missing or invalid")?;
-    if quiet_seconds < -300 {
-        return Err("updated_at is too far in the future".into());
-    }
-    Ok(quiet_seconds)
-}
-
 fn heartbeat_stop_requested(event_type: &str) -> bool {
     event_type == "SessionEnd"
 }
@@ -388,17 +379,9 @@ fn configured_heartbeat_interval() -> u64 {
 }
 
 pub fn read_stdin() -> Result<String> {
-    let limit =
-        env_u64("TALLY_MAX_HOOK_INPUT_BYTES", 16 * 1024 * 1024).clamp(64 * 1024, 64 * 1024 * 1024);
-    let mut bytes = Vec::new();
-    io::stdin()
-        .lock()
-        .take(limit.saturating_add(1))
-        .read_to_end(&mut bytes)?;
-    if bytes.len() as u64 > limit {
-        return Err(format!("hook input exceeded the configured {limit}-byte limit").into());
-    }
-    Ok(String::from_utf8(bytes)?)
+    let mut input = String::new();
+    io::stdin().read_to_string(&mut input)?;
+    Ok(input)
 }
 
 pub fn parse_payload(raw: &str) -> Value {
@@ -410,79 +393,61 @@ pub fn parse_payload(raw: &str) -> Value {
 }
 
 pub fn first_string_by_key(value: &Value, names: &[&str]) -> Option<String> {
-    let mut stack = vec![(value, 0_usize)];
-    let mut visited = 0_usize;
-    while let Some((value, depth)) = stack.pop() {
-        visited += 1;
-        if visited > 100_000 || depth > 64 {
-            continue;
-        }
-        match value {
-            Value::Object(map) => {
-                for name in names {
-                    if let Some(value) = map
-                        .get(*name)
-                        .and_then(Value::as_str)
-                        .filter(|value| !value.is_empty())
-                    {
-                        return Some(value.to_string());
-                    }
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map
+                    .get(*name)
+                    .and_then(Value::as_str)
+                    .filter(|value| !value.is_empty())
+                {
+                    return Some(value.to_string());
                 }
-                stack.extend(map.values().rev().map(|value| (value, depth + 1)));
             }
-            Value::Array(items) => stack.extend(items.iter().rev().map(|value| (value, depth + 1))),
-            _ => {}
+            map.values()
+                .find_map(|value| first_string_by_key(value, names))
         }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| first_string_by_key(value, names)),
+        _ => None,
     }
-    None
 }
 
 pub fn first_mapping_by_key<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
-    let mut stack = vec![(value, 0_usize)];
-    let mut visited = 0_usize;
-    while let Some((value, depth)) = stack.pop() {
-        visited += 1;
-        if visited > 100_000 || depth > 64 {
-            continue;
-        }
-        match value {
-            Value::Object(map) => {
-                for name in names {
-                    if let Some(value) = map.get(*name).filter(|value| value.is_object()) {
-                        return Some(value);
-                    }
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name).filter(|value| value.is_object()) {
+                    return Some(value);
                 }
-                stack.extend(map.values().rev().map(|value| (value, depth + 1)));
             }
-            Value::Array(items) => stack.extend(items.iter().rev().map(|value| (value, depth + 1))),
-            _ => {}
+            map.values()
+                .find_map(|value| first_mapping_by_key(value, names))
         }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| first_mapping_by_key(value, names)),
+        _ => None,
     }
-    None
 }
 
 pub fn first_value_by_key<'a>(value: &'a Value, names: &[&str]) -> Option<&'a Value> {
-    let mut stack = vec![(value, 0_usize)];
-    let mut visited = 0_usize;
-    while let Some((value, depth)) = stack.pop() {
-        visited += 1;
-        if visited > 100_000 || depth > 64 {
-            continue;
-        }
-        match value {
-            Value::Object(map) => {
-                for name in names {
-                    if let Some(value) = map.get(*name).filter(|value| !value.is_null()) {
-                        return Some(value);
-                    }
+    match value {
+        Value::Object(map) => {
+            for name in names {
+                if let Some(value) = map.get(*name).filter(|value| !value.is_null()) {
+                    return Some(value);
                 }
-                stack.extend(map.values().rev().map(|value| (value, depth + 1)));
             }
-            Value::Array(items) => stack.extend(items.iter().rev().map(|value| (value, depth + 1))),
-            _ => {}
+            map.values()
+                .find_map(|value| first_value_by_key(value, names))
         }
+        Value::Array(items) => items
+            .iter()
+            .find_map(|value| first_value_by_key(value, names)),
+        _ => None,
     }
-    None
 }
 
 pub fn stable_id(prefix: &str, value: &Value) -> String {
@@ -492,128 +457,46 @@ pub fn stable_id(prefix: &str, value: &Value) -> String {
         safe_slug(prefix, "id"),
         hash.trim_start_matches("sha256:")
             .chars()
-            .take(32)
+            .take(16)
             .collect::<String>()
     )
 }
 
 pub fn light_git_state(cwd: &Path) -> Value {
-    if !cwd.ancestors().any(|path| path.join(".git").exists()) {
-        return json!({
-            "is_git_repo": false,
-            "workspace": cwd.display().to_string(),
-        });
+    if !cwd.join(".git").exists() {
+        return json!({"is_git_repo": false, "workspace": cwd.display().to_string()});
     }
-    let untracked = if env_enabled("TALLY_GIT_INCLUDE_UNTRACKED", false) {
-        "--untracked-files=normal"
-    } else {
-        "--untracked-files=no"
-    };
-    let status = run_command(
-        &["git", "status", "--porcelain=v2", "--branch", untracked],
-        cwd,
-    );
-    if status["exit_code"].as_i64() != Some(0) {
-        return json!({
-            "is_git_repo": false,
-            "workspace": cwd.display().to_string(),
-            "capture": status,
-        });
-    }
+    let head = run_command(["git", "rev-parse", "--verify", "HEAD"], cwd);
+    let branch = run_command(["git", "branch", "--show-current"], cwd);
+    let status = run_command(["git", "status", "--short", "--branch"], cwd);
     let status_stdout = status["stdout"].as_str().unwrap_or("");
-    let head = status_stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("# branch.oid "))
-        .unwrap_or("");
-    let branch = status_stdout
-        .lines()
-        .find_map(|line| line.strip_prefix("# branch.head "))
-        .unwrap_or("");
     json!({
         "is_git_repo": true,
         "workspace": cwd.display().to_string(),
-        "head": head,
-        "branch": branch,
+        "head": head["stdout"].as_str().unwrap_or("").trim(),
+        "branch": branch["stdout"].as_str().unwrap_or("").trim(),
         "status": tail_chars(status_stdout, 20_000),
         "status_hash": sha256_str(status_stdout),
-        "untracked_files_included": env_enabled("TALLY_GIT_INCLUDE_UNTRACKED", false),
     })
 }
 
-fn run_command(argv: &[&str], cwd: &Path) -> Value {
+fn run_command<const N: usize>(argv: [&str; N], cwd: &Path) -> Value {
     let started = SystemTime::now();
     let argv_vec = argv
         .iter()
         .map(|value| value.to_string())
         .collect::<Vec<_>>();
-    let stdout_path = env::temp_dir().join(format!("tally-command-{}.stdout", unique_suffix()));
-    let stderr_path = env::temp_dir().join(format!("tally-command-{}.stderr", unique_suffix()));
-    let stdout = private_open_options()
-        .create_new(true)
-        .write(true)
-        .open(&stdout_path);
-    let stderr = private_open_options()
-        .create_new(true)
-        .write(true)
-        .open(&stderr_path);
-    let (stdout, stderr) = match (stdout, stderr) {
-        (Ok(stdout), Ok(stderr)) => (stdout, stderr),
-        (Err(error), _) | (_, Err(error)) => {
-            return json!({
-                "argv": argv_vec,
-                "exit_code": Value::Null,
-                "duration_ms": started.elapsed().map(|duration| duration.as_millis()).unwrap_or(0),
-                "error": error.to_string(),
-            })
-        }
-    };
-    let mut child = match Command::new(argv[0])
+    match Command::new(argv[0])
         .args(&argv[1..])
         .current_dir(cwd)
-        .stdout(Stdio::from(stdout))
-        .stderr(Stdio::from(stderr))
-        .spawn()
+        .output()
     {
-        Ok(child) => child,
-        Err(error) => {
-            let _ = fs::remove_file(&stdout_path);
-            let _ = fs::remove_file(&stderr_path);
-            return json!({
-                "argv": argv_vec,
-                "exit_code": Value::Null,
-                "duration_ms": started.elapsed().map(|duration| duration.as_millis()).unwrap_or(0),
-                "error": error.to_string(),
-            });
-        }
-    };
-    let timeout =
-        Duration::from_millis(env_u64("TALLY_GIT_TIMEOUT_MILLIS", 2_000).clamp(100, 10_000));
-    let deadline = Instant::now() + timeout;
-    let mut timed_out = false;
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
-            Ok(None) if Instant::now() < deadline => thread::sleep(Duration::from_millis(10)),
-            Ok(None) => {
-                timed_out = true;
-                let _ = child.kill();
-                break child.wait();
-            }
-            Err(error) => break Err(error),
-        }
-    };
-    let stdout = fs::read(&stdout_path).unwrap_or_default();
-    let stderr = fs::read(&stderr_path).unwrap_or_default();
-    let _ = fs::remove_file(&stdout_path);
-    let _ = fs::remove_file(&stderr_path);
-    match status {
-        Ok(status) => json!({
+        Ok(output) => json!({
             "argv": argv_vec,
-            "exit_code": status.code(),
+            "exit_code": output.status.code(),
             "duration_ms": started.elapsed().map(|duration| duration.as_millis()).unwrap_or(0),
-            "stdout": tail_chars(&String::from_utf8_lossy(&stdout), 20_000),
-            "stderr": tail_chars(&String::from_utf8_lossy(&stderr), 20_000),
-            "timed_out": timed_out,
+            "stdout": tail_chars(&String::from_utf8_lossy(&output.stdout), 20_000),
+            "stderr": tail_chars(&String::from_utf8_lossy(&output.stderr), 20_000),
         }),
         Err(error) => json!({
             "argv": argv_vec,
@@ -652,6 +535,115 @@ fn append_jsonl_locked(path: &Path, value: &Value) -> Result<()> {
 
 pub fn read_json_file(path: &Path) -> Result<Value> {
     Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
+}
+
+#[derive(Default, Clone, Copy)]
+struct TokenTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+}
+
+impl TokenTotals {
+    fn from_usage(usage: &Value) -> Self {
+        let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Self {
+            input_tokens: field("input_tokens"),
+            output_tokens: field("output_tokens"),
+            cache_creation_input_tokens: field("cache_creation_input_tokens"),
+            cache_read_input_tokens: field("cache_read_input_tokens"),
+        }
+    }
+
+    fn add(&mut self, other: &Self) {
+        self.input_tokens += other.input_tokens;
+        self.output_tokens += other.output_tokens;
+        self.cache_creation_input_tokens += other.cache_creation_input_tokens;
+        self.cache_read_input_tokens += other.cache_read_input_tokens;
+    }
+
+    fn total(&self) -> u64 {
+        self.input_tokens
+            + self.output_tokens
+            + self.cache_creation_input_tokens
+            + self.cache_read_input_tokens
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "total_tokens": self.total(),
+        })
+    }
+}
+
+/// Sums per-message `usage` blocks out of a Claude Code transcript (JSONL) to
+/// report cumulative token usage for the session recorded in that file.
+/// Assistant messages are deduplicated by `message.id` since Claude Code can
+/// rewrite the same message as a turn streams in.
+pub fn transcript_token_usage(transcript_path: &Path) -> Value {
+    let file = match fs::File::open(transcript_path) {
+        Ok(file) => file,
+        Err(_) => return json!({"available": false}),
+    };
+
+    let mut totals = TokenTotals::default();
+    let mut per_model: BTreeMap<String, TokenTotals> = BTreeMap::new();
+    let mut seen_message_ids: HashSet<String> = HashSet::new();
+    let mut assistant_messages: u64 = 0;
+
+    for line in BufReader::new(file).lines() {
+        let Ok(line) = line else { continue };
+        if line.trim().is_empty() {
+            continue;
+        }
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        if let Some(id) = message.get("id").and_then(Value::as_str) {
+            if !seen_message_ids.insert(id.to_string()) {
+                continue;
+            }
+        }
+        let message_totals = TokenTotals::from_usage(usage);
+        totals.add(&message_totals);
+        assistant_messages += 1;
+        let model = message
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        per_model.entry(model).or_default().add(&message_totals);
+    }
+
+    let by_model: serde_json::Map<String, Value> = per_model
+        .into_iter()
+        .map(|(model, model_totals)| (model, model_totals.to_json()))
+        .collect();
+
+    let mut result = totals.to_json();
+    merge_object(
+        &mut result,
+        json!({
+            "available": true,
+            "assistant_messages": assistant_messages,
+            "by_model": Value::Object(by_model),
+        }),
+    );
+    result
 }
 
 fn private_open_options() -> OpenOptions {
@@ -694,23 +686,7 @@ pub fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 pub fn sha256_value(value: &Value) -> String {
-    struct HashWriter(Sha256);
-    impl Write for HashWriter {
-        fn write(&mut self, bytes: &[u8]) -> io::Result<usize> {
-            self.0.update(bytes);
-            Ok(bytes.len())
-        }
-
-        fn flush(&mut self) -> io::Result<()> {
-            Ok(())
-        }
-    }
-
-    let mut writer = HashWriter(Sha256::new());
-    if serde_json::to_writer(&mut writer, value).is_err() {
-        return sha256_bytes(&[]);
-    }
-    format!("sha256:{:x}", writer.0.finalize())
+    sha256_bytes(serde_json::to_string(value).unwrap_or_default().as_bytes())
 }
 
 pub fn sha256_str(value: &str) -> String {
@@ -785,17 +761,10 @@ pub fn random_hex(bytes: usize) -> String {
         .collect()
 }
 
-pub fn secure_random_hex(bytes: usize) -> Result<String> {
-    let mut input = vec![0_u8; bytes];
-    getrandom::fill(&mut input)
-        .map_err(|error| format!("secure randomness unavailable: {error}"))?;
-    Ok(input.iter().map(|byte| format!("{byte:02x}")).collect())
-}
-
-pub fn seconds_since(value: &str) -> Option<i64> {
+pub fn seconds_since(value: &str) -> i64 {
     chrono::DateTime::parse_from_rfc3339(value)
         .map(|time| (Utc::now() - time.with_timezone(&Utc)).num_seconds())
-        .ok()
+        .unwrap_or(0)
 }
 
 #[cfg(unix)]
@@ -969,12 +938,12 @@ pub fn set_default(key: &str, value: &str) {
 mod tests {
     use super::{
         claim_heartbeat_daemon, first_string_by_key, heartbeat_due, heartbeat_stop_requested,
-        parse_payload, safe_slug, sha256_str, stable_id, unique_suffix,
-        validated_heartbeat_quiet_seconds, AuditSink, AuditSinkConfig,
+        parse_payload, safe_slug, sha256_str, stable_id, transcript_token_usage, unique_suffix,
+        AuditSink, AuditSinkConfig,
     };
     use fs2::FileExt;
     use serde_json::json;
-    use std::{env, fs};
+    use std::{env, fs, io::Write};
 
     #[test]
     fn parses_payload_and_finds_nested_strings() {
@@ -1001,7 +970,7 @@ mod tests {
     }
 
     #[test]
-    fn private_payloads_stage_one_content_addressed_object() {
+    fn private_payloads_use_one_content_addressed_object() {
         let directory = env::temp_dir().join(format!("tally-objects-{}", unique_suffix()));
         let log_root = directory.join("logs");
         let forwarding_state_dir = directory.join("forwarding");
@@ -1025,7 +994,11 @@ mod tests {
             .as_str()
             .unwrap()
             .starts_with("private://sha256/"));
-        assert_eq!(sink.staged_private_objects.borrow().len(), 1);
+        let objects = fs::read_dir(log_root.join("private/objects"))
+            .unwrap()
+            .flat_map(|entry| fs::read_dir(entry.unwrap().path()).unwrap())
+            .count();
+        assert_eq!(objects, 1);
         fs::remove_dir_all(directory).unwrap();
     }
 
@@ -1040,26 +1013,6 @@ mod tests {
     }
 
     #[test]
-    fn heartbeat_rejects_corrupt_and_future_state() {
-        assert!(validated_heartbeat_quiet_seconds(&json!({}))
-            .unwrap_err()
-            .to_string()
-            .contains("missing or invalid"));
-        assert!(
-            validated_heartbeat_quiet_seconds(&json!({"updated_at": "not-a-timestamp"}))
-                .unwrap_err()
-                .to_string()
-                .contains("missing or invalid")
-        );
-        assert!(
-            validated_heartbeat_quiet_seconds(&json!({"updated_at": "2099-01-01T00:00:00Z"}))
-                .unwrap_err()
-                .to_string()
-                .contains("too far in the future")
-        );
-    }
-
-    #[test]
     fn heartbeat_daemon_has_one_owner() {
         let directory = env::temp_dir().join(format!("tally-heartbeat-{}", unique_suffix()));
         let path = directory.join("session.pid");
@@ -1071,6 +1024,50 @@ mod tests {
         FileExt::unlock(&second).unwrap();
         drop(second);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sums_transcript_usage_and_dedupes_repeated_messages() {
+        let path = env::temp_dir().join(format!("tally-transcript-{}.jsonl", unique_suffix()));
+        let mut file = fs::File::create(&path).unwrap();
+        // Same message id written twice, as Claude Code does while a turn streams in.
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_1", "model": "claude-sonnet-5", "usage": {"input_tokens": 10, "output_tokens": 2}}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_1", "model": "claude-sonnet-5", "usage": {"input_tokens": 10, "output_tokens": 5}}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_2", "model": "claude-haiku-4-5", "usage": {"input_tokens": 3, "output_tokens": 1, "cache_read_input_tokens": 100}}})
+        )
+        .unwrap();
+        writeln!(file, "{}", json!({"type": "user", "message": {"content": "hi"}})).unwrap();
+
+        let usage = transcript_token_usage(&path);
+        assert_eq!(usage["available"], true);
+        // The repeated msg_1 is deduped, keeping only its first-seen usage (input 10, output 2).
+        assert_eq!(usage["assistant_messages"], 2);
+        assert_eq!(usage["input_tokens"], 13);
+        assert_eq!(usage["output_tokens"], 3);
+        assert_eq!(usage["total_tokens"], 116);
+        assert_eq!(usage["by_model"]["claude-sonnet-5"]["output_tokens"], 2);
+        assert_eq!(usage["by_model"]["claude-haiku-4-5"]["cache_read_input_tokens"], 100);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_transcript_reports_unavailable() {
+        let usage = transcript_token_usage(&env::temp_dir().join("does-not-exist.jsonl"));
+        assert_eq!(usage["available"], false);
     }
 
     #[cfg(windows)]
