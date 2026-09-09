@@ -57,6 +57,8 @@ class TallyClient:
         self.transport = transport or HttpTransport(self.config)
         self._owned_sessions: set[str] = set()
         self._sessions_lock = threading.RLock()
+        self._state_lock = threading.RLock()
+        self._close_lock = threading.Lock()
         self._stop = threading.Event()
         self._wake = threading.Event()
         self._worker: threading.Thread | None = None
@@ -84,32 +86,43 @@ class TallyClient:
 
         return TallyCallbackHandler(self, source=source)
 
-    def _enqueue(self, record: dict[str, Any], evidence: records.Evidence) -> int:
-        if self._closed:
-            raise RuntimeError("TallyClient is closed")
-        _validate_record(record)
-        sequence = self.journal.enqueue(record, evidence, agent_id=self.agent_id)
+    def _enqueue(
+        self,
+        record: dict[str, Any],
+        evidence: records.Evidence,
+        *,
+        activate_session_id: str | None = None,
+        deactivate_session_id: str | None = None,
+    ) -> int:
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("TallyClient is closed")
+            _validate_record(record)
+            sequence = self.journal.enqueue(
+                record,
+                evidence,
+                agent_id=self.agent_id,
+                activate_session_id=activate_session_id,
+                deactivate_session_id=deactivate_session_id,
+            )
         self._wake.set()
         return sequence
 
     def start_session(self, session_id: str, *, source: str) -> None:
-        self.journal.register_session(session_id, self.agent_id)
-        with self._sessions_lock:
-            self._owned_sessions.add(session_id)
-        try:
+        record, evidence = records.session_start(
+            session_id=session_id,
+            agent_id=self.agent_id,
+            config=self.config,
+            source=source,
+        )
+        with self._state_lock:
             self._enqueue(
-                *records.session_start(
-                    session_id=session_id,
-                    agent_id=self.agent_id,
-                    config=self.config,
-                    source=source,
-                )
+                record,
+                evidence,
+                activate_session_id=session_id,
             )
-        except Exception:
-            self.journal.unregister_session(session_id)
             with self._sessions_lock:
-                self._owned_sessions.discard(session_id)
-            raise
+                self._owned_sessions.add(session_id)
 
     def record_instruction(
         self,
@@ -178,9 +191,18 @@ class TallyClient:
         handoff_id: str | None = None,
         acknowledgement_status: str = "pending",
     ) -> str:
-        if acknowledgement_status not in {"pending", "acknowledged", "rejected", "timeout"}:
+        if not isinstance(receiving_agent, str) or not receiving_agent:
+            raise ValueError("receiving_agent must be a non-empty string")
+        if not isinstance(acknowledgement_status, str) or acknowledgement_status not in {
+            "pending",
+            "acknowledged",
+            "rejected",
+            "timeout",
+        }:
             raise ValueError("invalid acknowledgement_status")
-        resolved_id = handoff_id or f"handoff_{uuid.uuid4().hex}"
+        if handoff_id is not None and (not isinstance(handoff_id, str) or not handoff_id):
+            raise ValueError("handoff_id must be a non-empty string or None")
+        resolved_id = handoff_id if handoff_id is not None else f"handoff_{uuid.uuid4().hex}"
         self._enqueue(
             *records.handoff(
                 session_id=session_id,
@@ -216,10 +238,13 @@ class TallyClient:
     def end_session(self, session_id: str, *, outcome: str, value: Any) -> None:
         if outcome not in {"success", "failure", "partial", "interrupted"}:
             raise ValueError("invalid session outcome")
-        try:
-            self._enqueue(*records.session_end(session_id=session_id, outcome=outcome, value=value))
-        finally:
-            self.journal.unregister_session(session_id)
+        record, evidence = records.session_end(session_id=session_id, outcome=outcome, value=value)
+        with self._state_lock:
+            self._enqueue(
+                record,
+                evidence,
+                deactivate_session_id=session_id,
+            )
             with self._sessions_lock:
                 self._owned_sessions.discard(session_id)
 
@@ -276,22 +301,23 @@ class TallyClient:
             self._wake.clear()
 
     def _maybe_emit_heartbeat(self, *, now: float | None = None) -> bool:
-        sessions = self.journal.claim_heartbeat(
-            self.agent_id,
-            interval_seconds=self.config.heartbeat_interval_seconds,
-            stale_after_seconds=max(self.config.heartbeat_interval_seconds * 3, 1_800),
-            now=now,
-        )
-        if not sessions:
-            return False
-        self._enqueue(
-            *records.heartbeat(
-                agent_id=self.agent_id,
-                anchor_instance_id=self.anchor_instance_id,
-                active_sessions=sessions,
+        with self._state_lock:
+            if self._closed:
+                return False
+            enqueued = self.journal.enqueue_heartbeat_if_due(
+                self.agent_id,
+                interval_seconds=self.config.heartbeat_interval_seconds,
+                stale_after_seconds=max(self.config.heartbeat_interval_seconds * 3, 1_800),
+                record_factory=lambda sessions: records.heartbeat(
+                    agent_id=self.agent_id,
+                    anchor_instance_id=self.anchor_instance_id,
+                    active_sessions=sessions,
+                ),
+                now=now,
             )
-        )
-        return True
+        if enqueued:
+            self._wake.set()
+        return enqueued
 
     def flush(self, timeout: float = 5.0) -> bool:
         """Try to deliver pending records until empty or until ``timeout`` expires."""
@@ -304,17 +330,20 @@ class TallyClient:
         return self.journal.pending_count() == 0
 
     def close(self, *, flush: bool = True, timeout: float = 5.0) -> bool:
-        if self._closed:
+        with self._close_lock:
+            with self._state_lock:
+                if self._closed:
+                    return self.journal.pending_count() == 0
+                self._closed = True
+            self._stop.set()
+            self._wake.set()
+            started = time.monotonic()
+            if self._worker is not None:
+                self._worker.join(timeout=min(timeout, 2.0))
+            remaining = max(timeout - (time.monotonic() - started), 0)
+            if flush:
+                return self.flush(timeout=remaining)
             return self.journal.pending_count() == 0
-        self._stop.set()
-        self._wake.set()
-        started = time.monotonic()
-        if self._worker is not None:
-            self._worker.join(timeout=min(timeout, 2.0))
-        remaining = max(timeout - (time.monotonic() - started), 0)
-        delivered = self.flush(timeout=remaining) if flush else False
-        self._closed = True
-        return delivered
 
     def __enter__(self) -> TallyClient:
         return self

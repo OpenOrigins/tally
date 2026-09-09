@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -88,14 +89,30 @@ class Journal:
         self.max_record_bytes = max_record_bytes
         self.state_dir.mkdir(parents=True, exist_ok=True)
         self._secure_path(self.state_dir, 0o700)
-        with self._connect() as connection:
-            connection.executescript(_SCHEMA)
+        self._initialize_schema()
         self._secure_sqlite_files()
+
+    def _initialize_schema(self) -> None:
+        deadline = time.monotonic() + 10
+        while True:
+            try:
+                with self._connect() as connection:
+                    connection.execute("PRAGMA journal_mode=WAL")
+                    connection.executescript(_SCHEMA)
+                return
+            except sqlite3.OperationalError as error:
+                if "locked" not in str(error).lower() or time.monotonic() >= deadline:
+                    raise
+                time.sleep(0.01)
 
     @staticmethod
     def _secure_path(path: Path, mode: int) -> None:
         if os.name == "posix":
-            path.chmod(mode)
+            try:
+                path.chmod(mode)
+            except FileNotFoundError:
+                # SQLite may remove its transient -wal/-shm file between exists() and chmod().
+                pass
 
     def _secure_sqlite_files(self) -> None:
         for suffix in ("", "-shm", "-wal"):
@@ -109,7 +126,6 @@ class Journal:
         connection.row_factory = sqlite3.Row
         connection.execute("PRAGMA busy_timeout=10000")
         connection.execute("PRAGMA foreign_keys=ON")
-        connection.execute("PRAGMA journal_mode=WAL")
         connection.execute("PRAGMA synchronous=FULL")
         try:
             yield connection
@@ -137,8 +153,43 @@ class Journal:
         evidence: list[tuple[str, str]],
         *,
         agent_id: str,
+        activate_session_id: str | None = None,
+        deactivate_session_id: str | None = None,
         now: float | None = None,
     ) -> int:
+        payload, record_id = self._prepare_record(record, evidence)
+        created_at = time.time() if now is None else now
+        with self._connect() as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            sequence = self._insert_record(
+                connection,
+                payload=payload,
+                record_id=record_id,
+                evidence=evidence,
+                agent_id=agent_id,
+                created_at=created_at,
+            )
+            if activate_session_id is not None:
+                connection.execute(
+                    """INSERT INTO active_sessions (session_id, agent_id, last_seen_at)
+                       VALUES (?, ?, ?)
+                       ON CONFLICT(session_id) DO UPDATE SET
+                           agent_id = excluded.agent_id,
+                           last_seen_at = excluded.last_seen_at""",
+                    (activate_session_id, agent_id, created_at),
+                )
+            if deactivate_session_id is not None:
+                connection.execute(
+                    "DELETE FROM active_sessions WHERE session_id = ? AND agent_id = ?",
+                    (deactivate_session_id, agent_id),
+                )
+            return sequence
+
+    def _prepare_record(
+        self,
+        record: dict[str, Any],
+        evidence: list[tuple[str, str]],
+    ) -> tuple[str, str]:
         payload = json.dumps(
             record,
             ensure_ascii=False,
@@ -154,37 +205,49 @@ class Journal:
         record_id = record.get("record_id")
         if not isinstance(record_id, str) or not record_id:
             raise ValueError("record requires a non-empty record_id")
+        for digest, private_payload in evidence:
+            expected = f"sha256:{hashlib.sha256(private_payload.encode('utf-8')).hexdigest()}"
+            if digest != expected:
+                raise ValueError(f"private evidence payload does not match digest {digest}")
+        return payload, record_id
 
-        created_at = time.time() if now is None else now
-        with self._connect() as connection:
-            connection.execute("BEGIN IMMEDIATE")
-            for digest, private_payload in evidence:
-                connection.execute(
-                    "INSERT OR IGNORE INTO evidence (digest, payload, created_at) VALUES (?, ?, ?)",
-                    (digest, private_payload, created_at),
-                )
-            cursor = connection.execute(
-                "INSERT INTO outbox (record_id, payload, created_at) VALUES (?, ?, ?)",
-                (record_id, payload, created_at),
-            )
-            for digest, _ in evidence:
-                connection.execute(
-                    "INSERT INTO record_evidence (record_id, digest) VALUES (?, ?)",
-                    (record_id, digest),
-                )
+    @staticmethod
+    def _insert_record(
+        connection: sqlite3.Connection,
+        *,
+        payload: str,
+        record_id: str,
+        evidence: list[tuple[str, str]],
+        agent_id: str,
+        created_at: float,
+    ) -> int:
+        for digest, private_payload in evidence:
             connection.execute(
-                """INSERT INTO metadata (key, value) VALUES (?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value =
-                       CASE
-                           WHEN CAST(metadata.value AS REAL) > CAST(excluded.value AS REAL)
-                           THEN metadata.value
-                           ELSE excluded.value
-                       END""",
-                (f"last_record_at:{agent_id}", str(created_at)),
+                "INSERT OR IGNORE INTO evidence (digest, payload, created_at) VALUES (?, ?, ?)",
+                (digest, private_payload, created_at),
             )
-            if cursor.lastrowid is None:
-                raise RuntimeError("SQLite did not return an outbox sequence")
-            return cursor.lastrowid
+        cursor = connection.execute(
+            "INSERT INTO outbox (record_id, payload, created_at) VALUES (?, ?, ?)",
+            (record_id, payload, created_at),
+        )
+        for digest, _ in evidence:
+            connection.execute(
+                "INSERT OR IGNORE INTO record_evidence (record_id, digest) VALUES (?, ?)",
+                (record_id, digest),
+            )
+        connection.execute(
+            """INSERT INTO metadata (key, value) VALUES (?, ?)
+               ON CONFLICT(key) DO UPDATE SET value =
+                   CASE
+                       WHEN CAST(metadata.value AS REAL) > CAST(excluded.value AS REAL)
+                       THEN metadata.value
+                       ELSE excluded.value
+                   END""",
+            (f"last_record_at:{agent_id}", str(created_at)),
+        )
+        if cursor.lastrowid is None:
+            raise RuntimeError("SQLite did not return an outbox sequence")
+        return cursor.lastrowid
 
     def register_session(self, session_id: str, agent_id: str, *, now: float | None = None) -> None:
         current = time.time() if now is None else now
@@ -212,15 +275,16 @@ class Journal:
                 [(current, session_id) for session_id in session_ids],
             )
 
-    def claim_heartbeat(
+    def enqueue_heartbeat_if_due(
         self,
         agent_id: str,
         *,
         interval_seconds: float,
         stale_after_seconds: float,
+        record_factory: Callable[[list[str]], tuple[dict[str, Any], list[tuple[str, str]]]],
         now: float | None = None,
-    ) -> list[str]:
-        """Atomically decide whether this process should emit the next agent heartbeat."""
+    ) -> bool:
+        """Atomically decide, build, and persist the next agent heartbeat."""
 
         current = time.time() if now is None else now
         key = f"last_record_at:{agent_id}"
@@ -238,17 +302,22 @@ class Journal:
                 ).fetchall()
             ]
             if not sessions:
-                return []
+                return False
             row = connection.execute("SELECT value FROM metadata WHERE key = ?", (key,)).fetchone()
             last_record_at = float(row["value"]) if row is not None else 0.0
             if current - last_record_at < interval_seconds:
-                return []
-            connection.execute(
-                """INSERT INTO metadata (key, value) VALUES (?, ?)
-                   ON CONFLICT(key) DO UPDATE SET value = excluded.value""",
-                (key, str(current)),
+                return False
+            record, evidence = record_factory(sessions)
+            payload, record_id = self._prepare_record(record, evidence)
+            self._insert_record(
+                connection,
+                payload=payload,
+                record_id=record_id,
+                evidence=evidence,
+                agent_id=agent_id,
+                created_at=current,
             )
-            return sessions
+            return True
 
     def claim(self, *, lease_seconds: float, now: float | None = None) -> OutboxItem | None:
         current = time.time() if now is None else now

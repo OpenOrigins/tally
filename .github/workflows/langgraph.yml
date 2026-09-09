@@ -25,6 +25,7 @@ jobs:
   test:
     name: Python ${{ matrix.python-version }}
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     strategy:
       fail-fast: false
       matrix:
@@ -46,6 +47,9 @@ jobs:
 
       - name: Install package and test dependencies
         run: python -m pip install --upgrade pip ".[test]"
+
+      - name: Check dependency consistency
+        run: python -m pip check
 
       - name: Check formatting
         run: python -m ruff format --check .
@@ -70,6 +74,7 @@ jobs:
   minimum-langgraph:
     name: LangGraph 0.2.60 compatibility
     runs-on: ubuntu-24.04
+    timeout-minutes: 15
     defaults:
       run:
         working-directory: integrations/langgraph
@@ -84,8 +89,14 @@ jobs:
 
       - name: Install minimum LangGraph and package
         run: |
-          python -m pip install "langgraph==0.2.60"
+          python -m pip install "langgraph==0.2.60" "pytest>=8,<10" "pytest-cov>=5,<8"
           python -m pip install --no-deps .
+
+      - name: Check dependency consistency
+        run: python -m pip check
+
+      - name: Test against minimum LangGraph
+        run: python -m pytest
 
       - name: Run examples against minimum LangGraph
         env:

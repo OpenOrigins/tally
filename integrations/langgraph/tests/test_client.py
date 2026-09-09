@@ -139,7 +139,7 @@ def test_background_worker_delivers_and_stops(tmp_path: Path) -> None:
 
 def test_closed_client_rejects_new_records(tmp_path: Path) -> None:
     client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
-    assert client.close(flush=False) is False
+    assert client.close(flush=False) is True
     try:
         client.start_session("session-1", source="test")
     except RuntimeError as error:
@@ -170,6 +170,16 @@ def test_public_helpers_and_context_manager(
             "record_handoff",
             {"receiving_agent": "agent:x", "payload": None, "acknowledgement_status": "lost"},
             "acknowledgement_status",
+        ),
+        (
+            "record_handoff",
+            {"receiving_agent": "", "payload": None},
+            "receiving_agent",
+        ),
+        (
+            "record_handoff",
+            {"receiving_agent": "agent:x", "payload": None, "handoff_id": 42},
+            "handoff_id",
         ),
         ("end_turn", {"turn_id": "turn", "outcome": "unknown", "value": None}, "turn outcome"),
         ("end_session", {"outcome": "unknown", "value": None}, "session outcome"),
@@ -203,15 +213,27 @@ def test_start_session_rolls_back_registration_on_capture_failure(tmp_path: Path
     with pytest.raises(ValueError, match="maximum"):
         client.start_session("session-1", source="x" * 2_000)
 
-    assert (
-        client.journal.claim_heartbeat(
-            client.agent_id,
-            interval_seconds=600,
-            stale_after_seconds=1_800,
-            now=time.time() + 601,
-        )
-        == []
-    )
+    assert client._maybe_emit_heartbeat(now=time.time() + 601) is False
+
+
+def test_duplicate_evidence_references_are_deduplicated(tmp_path: Path) -> None:
+    client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
+    client.record_instruction("session", "instruction", {}, context={})
+
+    record = client.journal.records()[0]
+    assert record["instruction_hash"] == record["context_snapshot_hash"]
+
+
+def test_pending_records_survive_restart_and_are_delivered(tmp_path: Path) -> None:
+    config = _config(tmp_path)
+    first = TallyClient(config, transport=RecordingTransport(), background=False)
+    first.start_session("session", source="test")
+    assert first.close(flush=False) is False
+
+    transport = RecordingTransport()
+    second = TallyClient(config, transport=transport, background=False)
+    assert second.flush(timeout=1)
+    assert [record[1]["record_type"] for record in transport.deliveries] == ["SESSION_START"]
 
 
 @pytest.mark.parametrize(

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "tally-langgraph"
-version = "0.1.0"
+dynamic = ["version"]
 description = "Durable Tally audit records for LangGraph and LangChain applications"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -56,6 +56,9 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 tally_langgraph = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = { attr = "tally_langgraph._version.__version__" }
 
 [tool.pytest.ini_options]
 addopts = "--strict-config --strict-markers --cov=tally_langgraph --cov-report=term-missing"

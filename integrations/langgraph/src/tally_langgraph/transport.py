@@ -10,6 +10,7 @@ from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
+from ._version import __version__
 from .config import TallyConfig
 
 _MAX_RESPONSE_BYTES = 64 * 1024
@@ -63,7 +64,7 @@ class HttpTransport:
             headers={
                 "Content-Type": "application/json",
                 "Idempotency-Key": record_id,
-                "User-Agent": "tally-langgraph/0.1.0",
+                "User-Agent": f"tally-langgraph/{__version__}",
                 "X-Api-Key": self.config.api_key,
                 "X-Oo-Tally-Ingest-Path": "tally-langgraph",
                 "X-Oo-Tally-Source": "sdk",

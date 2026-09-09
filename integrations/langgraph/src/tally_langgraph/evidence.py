@@ -8,10 +8,12 @@ import hashlib
 import json
 import math
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from datetime import date, datetime
+from enum import Enum
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 _MAX_DEPTH = 32
 _MAX_COLLECTION_ITEMS = 10_000
@@ -86,6 +88,8 @@ _RISK_RULES = {
 def to_jsonable(value: Any, *, _depth: int = 0, _seen: set[int] | None = None) -> Any:
     """Convert common LangChain/Python values into deterministic JSON data."""
 
+    if isinstance(value, Enum):
+        return to_jsonable(value.value, _depth=_depth, _seen=_seen)
     if value is None or isinstance(value, (bool, int, str)):
         return value
     if isinstance(value, float):
@@ -93,6 +97,8 @@ def to_jsonable(value: Any, *, _depth: int = 0, _seen: set[int] | None = None) -
     if isinstance(value, (datetime, date)):
         return value.isoformat()
     if isinstance(value, Path):
+        return str(value)
+    if isinstance(value, UUID):
         return str(value)
     if isinstance(value, bytes):
         return {"_type": "bytes", "base64": base64.b64encode(value).decode("ascii")}
@@ -126,6 +132,23 @@ def to_jsonable(value: Any, *, _depth: int = 0, _seen: set[int] | None = None) -
                 to_jsonable(item, _depth=_depth + 1, _seen=seen)
                 for item in value[:_MAX_COLLECTION_ITEMS]
             ]
+            if len(value) > _MAX_COLLECTION_ITEMS:
+                items.append("[TRUNCATED]")
+            return items
+        if isinstance(value, Set):
+            items = [
+                to_jsonable(item, _depth=_depth + 1, _seen=seen)
+                for item in list(value)[:_MAX_COLLECTION_ITEMS]
+            ]
+            items.sort(
+                key=lambda item: json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    allow_nan=False,
+                    separators=(",", ":"),
+                    sort_keys=True,
+                )
+            )
             if len(value) > _MAX_COLLECTION_ITEMS:
                 items.append("[TRUNCATED]")
             return items

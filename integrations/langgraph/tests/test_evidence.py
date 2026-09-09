@@ -1,7 +1,9 @@
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from enum import Enum
 from pathlib import Path
+from uuid import UUID
 
 from tally_langgraph.evidence import canonical_json, private_evidence, server_evidence, to_jsonable
 
@@ -10,6 +12,10 @@ from tally_langgraph.evidence import canonical_json, private_evidence, server_ev
 class Payload:
     path: Path
     created_at: datetime
+
+
+class Priority(Enum):
+    HIGH = "high"
 
 
 def test_private_evidence_is_deterministic() -> None:
@@ -64,6 +70,9 @@ def test_json_conversion_handles_common_and_recursive_values() -> None:
         "bytes": b"hello",
         "recursive": recursive,
         "infinity": float("inf"),
+        "priority": Priority.HIGH,
+        "set": {"beta", "alpha"},
+        "uuid": UUID("12345678-1234-5678-1234-567812345678"),
     }
 
     converted = to_jsonable(value)
@@ -71,4 +80,7 @@ def test_json_conversion_handles_common_and_recursive_values() -> None:
 
     assert converted["recursive"] == ["[RECURSIVE]"]
     assert converted["bytes"]["base64"] == "aGVsbG8="
+    assert converted["priority"] == "high"
+    assert converted["set"] == ["alpha", "beta"]
+    assert converted["uuid"] == "12345678-1234-5678-1234-567812345678"
     assert json.loads(encoded)["payload"]["path"] == "example"

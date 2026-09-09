@@ -163,6 +163,32 @@ def test_async_handoff(tmp_path: Path) -> None:
     assert handoffs[0]["receiver"]["agent_id"] == "agent:async-worker"
 
 
+def test_stream_and_astream_complete_their_sessions(tmp_path: Path) -> None:
+    graph = _tool_graph()
+    sync_client = _client(tmp_path / "sync")
+    assert list(
+        graph.stream(
+            {"text": "sync stream", "count": 0},
+            config={"callbacks": [sync_client.callback(source="test")]},
+        )
+    )
+    assert sync_client.journal.records()[-1]["record_type"] == "SESSION_END"
+
+    async_client = _client(tmp_path / "async")
+
+    async def consume() -> list[dict]:
+        return [
+            chunk
+            async for chunk in graph.astream(
+                {"text": "async stream", "count": 0},
+                config={"callbacks": [async_client.callback(source="test")]},
+            )
+        ]
+
+    assert asyncio.run(consume())
+    assert async_client.journal.records()[-1]["record_type"] == "SESSION_END"
+
+
 def test_handler_ignores_unrelated_and_malformed_events() -> None:
     client = Mock()
     handler = TallyCallbackHandler(client)
@@ -237,3 +263,16 @@ def test_handler_records_tool_errors_and_validates_handoffs() -> None:
     assert client.record_action.call_args.kwargs["tool_server"] == "custom"
     client.record_result.assert_called_once()
     client.record_handoff.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"receiving_agent": ""},
+        {"receiving_agent": "agent:worker", "handoff_id": ""},
+        {"receiving_agent": "agent:worker", "acknowledgement_status": "lost"},
+    ],
+)
+def test_handoff_helper_rejects_invalid_events(kwargs: dict) -> None:
+    with pytest.raises(ValueError):
+        dispatch_handoff(**kwargs)

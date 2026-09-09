@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from tally_langgraph import __version__
 from tally_langgraph.config import TallyConfig
 from tally_langgraph.transport import HttpTransport, _retry_after_seconds
 
@@ -72,6 +73,7 @@ def test_success_sends_stable_idempotency_headers(tmp_path: Path) -> None:
     assert server.requests[0]["headers"]["Idempotency-Key"] == "record-1"
     assert server.requests[0]["headers"]["X-Tally-Record-Id"] == "record-1"
     assert server.requests[0]["headers"]["X-Api-Key"] == "test-key"
+    assert server.requests[0]["headers"]["User-Agent"] == f"tally-langgraph/{__version__}"
 
 
 def test_server_error_retries_and_honors_retry_after(tmp_path: Path) -> None:
