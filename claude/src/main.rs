@@ -128,7 +128,6 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         "raw_stdin_hash": sha256_str(&raw),
         "environment": scrub_environment(),
         "git_state": light_git_state(&workspace_path()),
-        "token_usage": token_usage.clone(),
     });
     let event_id = format!("evt_{}", random_hex(16));
     let event = json!({
