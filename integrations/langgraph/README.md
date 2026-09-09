@@ -191,9 +191,9 @@ immutable dataclass and can also be constructed directly for dependency injectio
 
 ## Examples
 
-- [`examples/basic_agent.py`](https://github.com/OpenOrigins/tally/blob/main/integrations/langgraph/examples/basic_agent.py)
+- [`examples/basic_agent.py`](https://github.com/OpenOrigins/tally/blob/HEAD/integrations/langgraph/examples/basic_agent.py)
   demonstrates lifecycle and tool capture.
-- [`examples/handoff_agent.py`](https://github.com/OpenOrigins/tally/blob/main/integrations/langgraph/examples/handoff_agent.py)
+- [`examples/handoff_agent.py`](https://github.com/OpenOrigins/tally/blob/HEAD/integrations/langgraph/examples/handoff_agent.py)
   demonstrates an explicit subagent handoff.
 
 Both examples use deterministic local functions; no model provider or API key is needed
@@ -218,4 +218,4 @@ the distributions pass `twine check`; wheels, SQLite databases, logs, virtual
 environments, and bytecode are not committed.
 
 Design rationale and failure semantics are documented in
-[`docs/architecture.md`](https://github.com/OpenOrigins/tally/blob/main/integrations/langgraph/docs/architecture.md).
+[`docs/architecture.md`](https://github.com/OpenOrigins/tally/blob/HEAD/integrations/langgraph/docs/architecture.md).

@@ -44,7 +44,7 @@ test = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/OpenOrigins/tally/tree/main/integrations/langgraph"
+Documentation = "https://github.com/OpenOrigins/tally/tree/HEAD/integrations/langgraph"
 Issues = "https://github.com/OpenOrigins/tally/issues"
 Repository = "https://github.com/OpenOrigins/tally"
 
