@@ -105,6 +105,14 @@ Codex requires hook commands to be reviewed and trusted in Codex CLI before
 they run. Tally writes the hook definitions but never writes Codex's trust
 hashes or bypasses this approval.
 
+## LangGraph Integration
+
+The [`tally-langgraph`](integrations/langgraph/) Python package adds durable,
+privacy-aware Tally audit records to an existing LangGraph agent through the
+standard callback interface. Its guide includes installation instructions,
+copy-paste examples, explicit handoff events, failure behavior, and local data
+management.
+
 ## From Source
 
 Install [Rust](https://www.rust-lang.org/tools/install), download this repository,
