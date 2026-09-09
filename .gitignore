@@ -1,6 +1,8 @@
 # macOS junk
 .DS_Store
 **/.DS_Store
+**/__pycache__/
+*.py[cod]
 ._.DS_Store
 **/._.DS_Store
 
@@ -15,6 +17,10 @@
 codex-container/logs/
 codex-host/target/
 codex-audit/target/
+
+# Generated reports and local review artifacts
+/output/
+/tmp/
 
 # Claude Code wrapper logs
 .tally-claude-logs*/

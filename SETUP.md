@@ -11,7 +11,8 @@ Before you begin, ensure you have:
 - A valid work email address
 - Access to your email inbox
 - A supported AI client (Claude Code or Codex)
-- A terminal on your operating system
+- For Codex, the [Codex CLI](https://developers.openai.com/codex/cli) installed
+  and available as `codex` in Terminal or PowerShell
 - A payment method (required for card verification, including the Free plan)
 
 ---
@@ -143,21 +144,16 @@ Copy and save your Agent API key.
 
 ## Download and Install Tally
 
-In the **Download Tally** card, click **Download for your system**. This opens the Tally **releases page**, where you download the Tally build for your application and operating system (Claude Code or OpenAI Codex).
+In the **Download Tally** card, click **Download for your system**. This opens the Tally **releases page**. Download the one Tally installer for your operating system; the same installer supports Claude Code and Codex.
 
 Prefer to configure it yourself? Use the **Setup guide** card and click **Open the setup guide**.
 
-Run the installer from your terminal.
+Open the installer, select Claude Code, Codex, or both, paste the Agent API key, and select **Install Tally**.
 
-When prompted:
-
-```text
-Agent API key:
-```
-
-Paste your key and press Enter.
-
-![Installer prompting for the Agent API key](images/06-terminal-key-prompt.png)
+For Codex, complete the approval step shown by Tally: quit Codex Desktop, run
+`codex` in Terminal or PowerShell, choose **Review hooks**, inspect the
+OpenOrigins Tally commands, then press `t` to trust all hooks. Quit the CLI and
+reopen Codex Desktop. Tally does not approve hooks on your behalf.
 
 ### Expected Result
 
@@ -274,20 +270,15 @@ you are ready to monitor AI agent activity through the **Agent Logs** dashboard.
 
 # Uninstalling Tally
 
-To remove the Tally integration, run the installer binary with the `uninstall` command from the directory where you downloaded it:
-
-```bash
-./tally-claude uninstall
-```
+To remove a Tally integration, open Tally, select the connected client or clients, and select **Uninstall Tally**.
 
 This will:
 
-- Remove the Tally Claude Code hooks from `~/.claude/settings.json`
-- Restore your previous settings from the backup created during install
-- Delete the stored Agent API key and local logs
+- Remove Tally hooks from each selected client configuration
+- Preserve unrelated client settings
+- Delete the locally stored Agent API key and ingest configuration
 
 > **Note**
-> Uninstalling only removes the local integration. Your OpenOrigins account and previously ingested logs remain available in the dashboard.new logs wont be ingested  since the integration is removed.
+> Uninstalling only removes the local integration. Your OpenOrigins account and previously ingested logs remain available in the dashboard. New logs are not ingested after the integration is removed.
 
 ---
-

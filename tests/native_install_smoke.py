@@ -11,9 +11,11 @@ import secrets
 import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 import threading
 import time
+import tomllib
 from collections.abc import Callable
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -21,14 +23,53 @@ from urllib.error import HTTPError
 from urllib.parse import parse_qs, urlsplit
 from urllib.request import Request, urlopen
 
-EVENTS = ["SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]
+EVENTS = [
+    "SessionStart",
+    "UserPromptSubmit",
+    "PreToolUse",
+    "PostToolUse",
+    "Stop",
+    "SessionEnd",
+]
+INSTALLED_EVENT_COUNT = 11
 EXPECTED_TYPES = [
     "ACTION_TAKEN",
     "INSTRUCTION_RECEIVED",
     "RESULT_RECEIVED",
     "SESSION_END",
     "SESSION_START",
+    "TURN_END",
 ]
+PACKAGE_VERSION = tomllib.loads(
+    (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
+)["workspace"]["package"]["version"]
+
+
+def jsonl_values(path: Path) -> list[dict]:
+    try:
+        lines = path.read_bytes().split(b"\n")[:-1]
+    except FileNotFoundError:
+        return []
+    return [json.loads(line) for line in lines if line.strip()]
+
+
+def journal_records(state_dir: Path) -> list[dict]:
+    records: list[dict] = []
+    for segment in sorted((state_dir / "journal" / "segments").glob("segment-*.jsonl")):
+        records.extend(value["record"] for value in jsonl_values(segment))
+    return records
+
+
+def pending_journal_records(state_dir: Path) -> list[dict]:
+    terminal: set[int] = set()
+    outcomes = state_dir / "journal" / "delivery-outcomes.jsonl"
+    if outcomes.exists():
+        terminal = {value["sequence"] for value in jsonl_values(outcomes)}
+    return [
+        record
+        for record in journal_records(state_dir)
+        if record["journal_sequence"] not in terminal
+    ]
 
 
 def run(
@@ -37,6 +78,7 @@ def run(
     env: dict[str, str],
     payload: dict | None = None,
     expected_code: int = 0,
+    timeout_seconds: float = 30,
 ) -> subprocess.CompletedProcess[str]:
     completed = subprocess.run(
         [str(binary), *args],
@@ -44,7 +86,7 @@ def run(
         text=True,
         env=env,
         capture_output=True,
-        timeout=30,
+        timeout=timeout_seconds,
     )
     if completed.returncode != expected_code:
         raise AssertionError(
@@ -74,6 +116,8 @@ def run_installed_hook(command: str, env: dict[str, str], payload: dict) -> None
 def tally_handlers(config: dict) -> list[dict]:
     handlers: list[dict] = []
     for groups in config.get("hooks", {}).values():
+        if not isinstance(groups, list):
+            continue
         for group in groups:
             for hook in group.get("hooks", []):
                 command = hook.get("command", "")
@@ -84,6 +128,39 @@ def tally_handlers(config: dict) -> list[dict]:
 
 def tally_commands(config: dict) -> list[str]:
     return [handler["command"] for handler in tally_handlers(config)]
+
+
+def read_client_config(path: Path, agent: str) -> dict:
+    return parse_client_config(path.read_bytes(), agent)
+
+
+def parse_client_config(contents: bytes, agent: str) -> dict:
+    text = contents.decode("utf-8")
+    return tomllib.loads(text) if agent == "codex" else json.loads(text)
+
+
+def fake_codex_cli(root: Path) -> Path:
+    root.mkdir(parents=True, exist_ok=True)
+    if os.name == "nt":
+        path = root / "codex.cmd"
+        path.write_text(
+            "@echo off\n"
+            'if "%1"=="--version" (echo codex-cli 0.149.1 & exit /b 0)\n'
+            'if "%1"=="features" (echo hooks stable true & exit /b 0)\n'
+            "exit /b 1\n",
+            encoding="ascii",
+        )
+    else:
+        path = root / "codex"
+        path.write_text(
+            "#!/bin/sh\n"
+            'if [ "$1" = "--version" ]; then echo "codex-cli 0.149.1"; exit 0; fi\n'
+            'if [ "$1" = "features" ] && [ "$2" = "list" ]; then echo "hooks stable true"; exit 0; fi\n'
+            "exit 1\n",
+            encoding="ascii",
+        )
+        path.chmod(0o755)
+    return path
 
 
 def command_references_path(command: str, path: Path) -> bool:
@@ -110,6 +187,13 @@ def installed_binary_path(config_path: Path, agent: str, env: dict[str, str]) ->
     )
 
 
+def expected_hook_source(binary: Path) -> Path:
+    app = next((path for path in binary.parents if path.suffix == ".app"), None)
+    if app is None or sys.platform != "darwin":
+        return binary
+    return app / "Contents" / "Helpers" / "tally-hook"
+
+
 class CaptureServer(ThreadingHTTPServer):
     daemon_threads = True
 
@@ -129,6 +213,11 @@ class CaptureServer(ThreadingHTTPServer):
         with self.lock:
             return [request for request in self.requests if request["path"] == path]
 
+    def recorded_matching(
+        self, path: str, predicate: Callable[[dict], bool]
+    ) -> list[dict]:
+        return [request for request in self.recorded(path) if predicate(request)]
+
     def set_response_status(self, status: int) -> None:
         with self.lock:
             self.response_status = status
@@ -141,6 +230,21 @@ class CaptureServer(ThreadingHTTPServer):
                 return requests
             time.sleep(0.05)
         raise AssertionError(f"timed out waiting for {count} request(s) to {path}")
+
+    def wait_for_matching(
+        self,
+        path: str,
+        predicate: Callable[[dict], bool],
+        count: int = 1,
+        timeout: float = 10,
+    ) -> list[dict]:
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            requests = self.recorded_matching(path, predicate)
+            if len(requests) >= count:
+                return requests
+            time.sleep(0.05)
+        raise AssertionError(f"timed out waiting for {count} matching request(s) to {path}")
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
@@ -199,6 +303,7 @@ def gui_request(
 
 def gui_install(
     binary: Path,
+    agent: str | list[str],
     env: dict[str, str],
     root: Path,
     api_key: str,
@@ -242,10 +347,32 @@ def gui_install(
         with urlopen(f"{origin}/", timeout=10) as response:
             html = response.read().decode("utf-8")
             assert "Agent API key" in html
-            assert "Configuration path" in html
+            assert "Advanced settings" in html
             assert "Try another key" in html
+            assert "Cancel" in html
+            assert "Close" in html
+            assert "Approve the hooks in Codex CLI" in html
+            assert "Review hooks" in html
+            assert "Press <kbd>t</kbd> to trust all hooks" in html
+            assert "Delete local journal and logs" in html
+            assert 'id="version"' in html
+            assert 'src="/oo-logo-horizontal.png"' in html
             assert api_key not in html
             assert "default-src 'self'" in response.headers["content-security-policy"]
+            assert "img-src 'self'" in response.headers["content-security-policy"]
+            assert response.headers["cache-control"] == "no-store"
+
+        with urlopen(f"{origin}/oo-logo-horizontal.png", timeout=10) as response:
+            logo = response.read()
+            assert response.headers["content-type"] == "image/png"
+            assert logo.startswith(b"\x89PNG\r\n\x1a\n")
+            assert response.headers["cache-control"] == "no-store"
+
+        assert '<link rel="icon" type="image/png" href="/oo-logo-no-text.png">' in html
+        with urlopen(f"{origin}/oo-logo-no-text.png", timeout=10) as response:
+            icon = response.read()
+            assert response.headers["content-type"] == "image/png"
+            assert icon.startswith(b"\x89PNG\r\n\x1a\n")
             assert response.headers["cache-control"] == "no-store"
 
         unauthorized, _ = gui_request(
@@ -259,15 +386,49 @@ def gui_install(
         assert not unauthorized["ok"]
 
         status, _ = gui_request(origin, token, "/api/status", {})
-        assert status["installed"]
-        body = {"apiKey": api_key, "apiUrl": api_url}
-        if config_path is not None:
-            body["configPath"] = str(config_path)
+        assert status["version"] == PACKAGE_VERSION
+        expected_default_api_url = os.environ.get(
+            "TALLY_EXPECTED_DEFAULT_API_URL",
+            "https://api.prod.openorigins.com/v1/tally/logs",
+        )
+        assert status["defaultApiUrl"] == expected_default_api_url
+        agent_ids = [agent] if isinstance(agent, str) else agent
+        client_status = {
+            client["id"]: client for client in status["clients"] if client["id"] in agent_ids
+        }
+        assert set(client_status) == set(agent_ids)
+        for agent_id in agent_ids:
+            assert client_status[agent_id]["available"] is True
+            if agent_id == "codex":
+                assert "codex-cli 0.149.1" in client_status[agent_id]["detectedVersion"]
+        body = {
+            "apiKey": api_key,
+            "apiUrl": api_url,
+            "clients": [
+                {
+                    "id": agent_id,
+                    "configPath": str(
+                        config_path
+                        if config_path is not None and len(agent_ids) == 1
+                        else client_status[agent_id]["configPath"]
+                    ),
+                }
+                for agent_id in agent_ids
+            ],
+        }
         result, _ = gui_request(origin, token, "/api/install", body)
         assert result["connected"] is expect_connected
+        assert result["approvalRequired"] is ("codex" in agent_ids)
         assert api_key not in json.dumps(result)
-        if config_path is not None:
-            assert result["configPath"] == str(config_path)
+        assert {client["id"] for client in result["clients"]} == set(agent_ids)
+        if config_path is not None and len(agent_ids) == 1:
+            assert result["clients"][0]["configPath"] == str(config_path)
+        for client in result["clients"]:
+            assert client["approvalRequired"] is (client["id"] == "codex")
+            if client["id"] == "codex":
+                assert "Review hooks" in client["approvalInstructions"]
+                assert "press `t` to trust all" in client["approvalInstructions"]
+                assert client["clientVersion"] == "codex-cli 0.149.1"
         if expect_connected:
             assert result["warning"] is None
         else:
@@ -294,29 +455,111 @@ def gui_install(
             process.communicate(timeout=5)
 
 
+def gui_uninstall(
+    binary: Path,
+    agent: str,
+    env: dict[str, str],
+    root: Path,
+    config_path: Path,
+    *,
+    remove_data: bool,
+) -> dict:
+    url_file = root / f"{binary.name}-{time.time_ns()}.uninstall-gui-url"
+    gui_env = env.copy()
+    gui_env.update(
+        {
+            "TALLY_GUI_NO_OPEN": "1",
+            "TALLY_GUI_URL_FILE": str(url_file),
+        }
+    )
+    process = subprocess.Popen(
+        [str(binary), "gui"],
+        text=True,
+        env=gui_env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not url_file.exists() and time.monotonic() < deadline:
+            if process.poll() is not None:
+                stdout, stderr = process.communicate()
+                raise AssertionError(f"GUI exited before startup\n{stdout}\n{stderr}")
+            time.sleep(0.05)
+        assert url_file.exists(), "GUI did not publish its local URL"
+
+        split = urlsplit(url_file.read_text(encoding="utf-8"))
+        token = parse_qs(split.fragment).get("token", [""])[0]
+        origin = f"{split.scheme}://{split.netloc}"
+        result, _ = gui_request(
+            origin,
+            token,
+            "/api/uninstall",
+            {
+                "clients": [{"id": agent, "configPath": str(config_path)}],
+                "removeData": remove_data,
+            },
+        )
+        assert result["dataRemoved"] is remove_data
+        assert len(result["clients"]) == 1
+        detail = result["clients"][0]
+        assert detail["id"] == agent
+        assert detail["configPath"] == str(config_path)
+        assert detail["dataRemoved"] is remove_data
+
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
+        return result
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=5)
+
+
 def smoke(source_binary: Path, agent: str, root: Path) -> None:
-    binary_dir = root / f"{agent} binary with spaces"
-    binary_dir.mkdir(parents=True)
-    binary = binary_dir / source_binary.name
-    shutil.copy2(source_binary, binary)
-    binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
+    if expected_hook_source(source_binary) != source_binary:
+        binary = source_binary
+    else:
+        binary_dir = root / f"{agent} binary with spaces"
+        binary_dir.mkdir(parents=True)
+        binary = binary_dir / source_binary.name
+        shutil.copy2(source_binary, binary)
+        binary.chmod(binary.stat().st_mode | stat.S_IXUSR)
 
     home = root / agent / "home with spaces"
-    config_path = home / (".codex/hooks.json" if agent == "codex" else ".claude/settings.json")
+    config_path = home / (".codex/config.toml" if agent == "codex" else ".claude/settings.json")
     config_path.parent.mkdir(parents=True)
-    config_path.write_text(
-        json.dumps(
-            {
-                "theme": "dark",
-                "hooks": {
-                    "SessionStart": [
-                        {"hooks": [{"type": "command", "command": "echo keep"}]}
-                    ]
-                },
-            }
-        ),
-        encoding="utf-8",
-    )
+    previous_notify = [sys.executable, "-c", "pass"]
+    if agent == "codex":
+        config_path.write_text(
+            "# existing Codex settings must survive Tally\n"
+            'model = "gpt-test"\n'
+            f"notify = {json.dumps(previous_notify)}\n\n"
+            "[[hooks.SessionStart]]\n"
+            'matcher = ".*"\n\n'
+            "[[hooks.SessionStart.hooks]]\n"
+            'type = "command"\n'
+            'command = "echo keep"\n'
+            "timeout = 5\n\n"
+            "[hooks.state]\n\n"
+            '[hooks.state."existing-hook"]\n'
+            'trusted_hash = "sha256:keep"\n',
+            encoding="utf-8",
+        )
+    else:
+        config_path.write_text(
+            json.dumps(
+                {
+                    "theme": "dark",
+                    "hooks": {
+                        "SessionStart": [
+                            {"hooks": [{"type": "command", "command": "echo keep"}]}
+                        ]
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
     log_root = root / agent / "logs"
     state_dir = config_path.parent / "tally" / "logs" / ".state"
     api_key_path = state_dir / "api_key.txt"
@@ -336,31 +579,40 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
     env.pop("CODEX_HOME", None)
     env.pop("CODEX_HOOKS_PATH", None)
+    env.pop("CODEX_CONFIG_PATH", None)
     env.pop("TALLY_CLAUDE_SETTINGS_PATH", None)
     env.pop("TALLY_STATE_DIR", None)
+    if agent == "codex":
+        env["TALLY_CODEX_CLI"] = str(fake_codex_cli(root / "fake-codex-cli"))
     installed_binary = installed_binary_path(config_path, agent, env)
-    legacy_installed_binary = (
-        config_path.parent
-        / "tally"
-        / "bin"
-        / f"tally-{agent}{'.exe' if os.name == 'nt' else ''}"
-    )
-    if os.name == "nt":
-        legacy_installed_binary.parent.mkdir(parents=True)
-        legacy_installed_binary.write_bytes(b"legacy unsigned hook executable")
 
     api_key = secrets.token_urlsafe(32)
-    server = CaptureServer([config_path, api_key_path, api_config_path, installed_binary])
+    expected_install_files = [config_path, api_key_path, api_config_path, installed_binary]
+    if agent == "codex":
+        expected_install_files.append(state_dir / "previous-codex-notify.json")
+        before_missing_cli = config_path.read_bytes()
+        missing_cli_env = env.copy()
+        missing_cli_env["TALLY_CODEX_CLI"] = str(root / "missing-codex-cli")
+        missing_cli = run(
+            binary,
+            agent,
+            "install",
+            "--api-key",
+            api_key,
+            env=missing_cli_env,
+            expected_code=1,
+        )
+        assert "Codex CLI with lifecycle hook support is required" in missing_cli.stderr
+        assert config_path.read_bytes() == before_missing_cli
+        assert not api_key_path.exists()
+        assert not installed_binary.exists()
+    server = CaptureServer(expected_install_files)
     server_thread = threading.Thread(target=server.serve_forever, daemon=True)
     server_thread.start()
     try:
-        if os.name != "nt":
-            no_args = run(binary, env=env)
-            assert "Commands:" in no_args.stdout
-            assert "Tally installer:" not in no_args.stdout
-
         installed = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -371,6 +623,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert api_key not in installed.stdout
         assert api_key not in installed.stderr
         assert "dashboard connection confirmed" in installed.stdout
+        if agent == "codex":
+            assert "Action required" in installed.stdout
+            assert "Review hooks" in installed.stdout
+            assert "press `t` to trust all" in installed.stdout
+            assert "codex-cli 0.149.1" in installed.stdout
 
         handshakes = server.wait_for("/v1/tally/onboarding/client-connected")
         handshake = handshakes[-1]
@@ -383,11 +640,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert api_key_path.read_text(encoding="utf-8") == api_key
         assert api_key.encode("utf-8") not in binary.read_bytes()
         assert installed_binary.exists()
-        assert installed_binary.read_bytes() == binary.read_bytes()
+        hook_source = expected_hook_source(binary)
+        assert hook_source.is_file()
+        assert installed_binary.read_bytes() == hook_source.read_bytes()
         if os.name == "nt":
             assert config_path.parent not in installed_binary.parents
             assert "Programs" in installed_binary.parts
-            assert not legacy_installed_binary.exists()
         assert json.loads(api_config_path.read_text(encoding="utf-8")) == {
             "apiUrl": server.api_url
         }
@@ -395,50 +653,152 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             assert stat.S_IMODE(api_key_path.stat().st_mode) == 0o600
             assert stat.S_IMODE(api_config_path.stat().st_mode) == 0o600
 
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert config["theme"] == "dark"
+        config = read_client_config(config_path, agent)
+        assert config["model" if agent == "codex" else "theme"] == (
+            "gpt-test" if agent == "codex" else "dark"
+        )
         assert "echo keep" in json.dumps(config)
         assert api_key not in json.dumps(config)
-        assert len(tally_commands(config)) == 10
+        assert len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        session_end_handlers = [
+            handler
+            for handler in tally_handlers(config)
+            if handler["command"].endswith("hook SessionEnd")
+        ]
+        assert len(session_end_handlers) == 1
+        assert session_end_handlers[0]["timeout"] == 3
         commands = tally_commands(config)
         assert all(command_references_path(command, installed_binary) for command in commands), (
             f"hooks do not reference installed binary {installed_binary}: {commands}"
         )
-        if os.name == "nt" and agent == "codex":
-            assert all(
-                handler.get("commandWindows") == handler["command"]
-                for handler in tally_handlers(config)
+        if agent == "codex":
+            codex_toml = config
+            assert codex_toml["model"] == "gpt-test"
+            notify = codex_toml["notify"]
+            assert notify[1:4] == ["codex", "notify", "--state-dir"]
+            assert Path(notify[0]).resolve() == installed_binary.resolve()
+            assert Path(notify[4]).resolve() == state_dir.resolve()
+            assert (
+                json.loads(
+                    (state_dir / "previous-codex-notify.json").read_text(encoding="utf-8")
+                )["command"]
+                == previous_notify
             )
+            assert codex_toml["hooks"]["state"] == {
+                "existing-hook": {"trusted_hash": "sha256:keep"}
+            }, "Tally must leave hook approval to Codex CLI"
 
+            desktop_payload = {
+                "type": "agent-turn-complete",
+                "thread-id": "native-desktop-thread",
+                "turn-id": "native-desktop-turn-1",
+                "cwd": str(root),
+                "client": "codex-desktop",
+                "input-messages": ["desktop prompt"],
+                "last-assistant-message": "desktop response",
+            }
+            is_desktop_session = lambda request: (
+                request["body"].get("session_id") == "native-desktop-thread"
+            )
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            desktop_requests = server.wait_for_matching(
+                "/v1/tally/logs", is_desktop_session, count=3
+            )
+            desktop_types = sorted(
+                request["body"]["record_type"] for request in desktop_requests
+            )
+            assert desktop_types == [
+                "INSTRUCTION_RECEIVED",
+                "SESSION_START",
+                "TURN_END",
+            ], [
+                {
+                    "record_type": request["body"].get("record_type"),
+                    "record_id": request["body"].get("record_id"),
+                }
+                for request in desktop_requests
+            ]
+
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            time.sleep(0.5)
+            assert len(
+                server.recorded_matching("/v1/tally/logs", is_desktop_session)
+            ) == 3
+
+            desktop_payload["turn-id"] = "native-desktop-turn-2"
+            desktop_payload["input-messages"] = ["second desktop prompt"]
+            run(
+                installed_binary,
+                "codex",
+                "notify",
+                "--state-dir",
+                str(state_dir),
+                json.dumps(desktop_payload),
+                env=env,
+            )
+            second_turn = server.wait_for_matching(
+                "/v1/tally/logs", is_desktop_session, count=5
+            )[3:]
+            assert sorted(
+                request["body"]["record_type"] for request in second_turn
+            ) == [
+                "INSTRUCTION_RECEIVED",
+                "TURN_END",
+            ]
         run(
             binary,
+            agent,
             "install",
             f"--api-key={api_key}",
             f"--api-url={server.api_url}",
             env=env,
         )
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert len(tally_commands(config)) == 10, "reinstall duplicated hook handlers"
+        config = read_client_config(config_path, agent)
+        assert (
+            len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        ), "reinstall duplicated hook handlers"
 
         gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
             server.api_url,
             expect_connected=True,
         )
-        config = json.loads(config_path.read_text(encoding="utf-8"))
-        assert len(tally_commands(config)) == 10, "GUI reinstall duplicated hook handlers"
+        config = read_client_config(config_path, agent)
+        assert (
+            len(tally_commands(config)) == INSTALLED_EVENT_COUNT
+        ), "GUI reinstall duplicated hook handlers"
 
         custom_config_path = (
             root
             / agent
             / "custom config with spaces"
-            / ("hooks.json" if agent == "codex" else "settings.json")
+            / ("config.toml" if agent == "codex" else "settings.json")
         )
         custom_config_path.parent.mkdir(parents=True)
-        custom_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_config_path.write_text(
+            'model = "custom"\n' if agent == "codex" else json.dumps({"hooks": {}}),
+            encoding="utf-8",
+        )
         custom_state_dir = custom_config_path.parent / "tally" / "logs" / ".state"
         custom_api_key_path = custom_state_dir / "api_key.txt"
         custom_api_config_path = custom_state_dir / "config.json"
@@ -449,8 +809,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_api_config_path,
             custom_installed_binary,
         ]
+        if agent == "codex":
+            server.expected_files.append(custom_state_dir / "previous-codex-notify.json")
         custom_installed = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -468,9 +831,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         if os.name != "nt":
             assert stat.S_IMODE(custom_api_key_path.stat().st_mode) == 0o600
             assert stat.S_IMODE(custom_api_config_path.stat().st_mode) == 0o600
-        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        custom_config = read_client_config(custom_config_path, agent)
         custom_commands = tally_commands(custom_config)
-        assert len(custom_commands) == 10
+        assert len(custom_commands) == INSTALLED_EVENT_COUNT
         assert all(
             command_references_path(command, custom_installed_binary)
             for command in custom_commands
@@ -484,10 +847,15 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             root
             / agent
             / "custom gui config with spaces"
-            / ("hooks.json" if agent == "codex" else "settings.json")
+            / ("config.toml" if agent == "codex" else "settings.json")
         )
         custom_gui_config_path.parent.mkdir(parents=True)
-        custom_gui_config_path.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+        custom_gui_config_path.write_text(
+            'model = "custom-gui"\n'
+            if agent == "codex"
+            else json.dumps({"hooks": {}}),
+            encoding="utf-8",
+        )
         custom_gui_state_dir = custom_gui_config_path.parent / "tally" / "logs" / ".state"
         custom_gui_installed_binary = installed_binary_path(
             custom_gui_config_path, agent, env
@@ -498,8 +866,13 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             custom_gui_state_dir / "config.json",
             custom_gui_installed_binary,
         ]
+        if agent == "codex":
+            server.expected_files.append(
+                custom_gui_state_dir / "previous-codex-notify.json"
+            )
         gui_result = gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
@@ -507,19 +880,76 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             expect_connected=True,
             config_path=custom_gui_config_path,
         )
-        assert gui_result["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
+        assert gui_result["clients"][0]["keyPath"] == str(custom_gui_state_dir / "api_key.txt")
+
+        custom_gui_journal = custom_gui_state_dir / "journal"
+        journal_record = custom_gui_journal / "segments" / "segment-00000000000000000001.jsonl"
+        journal_record.parent.mkdir(parents=True)
+        journal_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        retained_log = log_root / "retained-during-uninstall.txt"
+        retained_log.parent.mkdir(parents=True, exist_ok=True)
+        retained_log.write_text("retained\n", encoding="utf-8")
+        retained_result = gui_uninstall(
+            binary,
+            agent,
+            env,
+            root,
+            custom_gui_config_path,
+            remove_data=False,
+        )
+        retained_detail = retained_result["clients"][0]
+        assert retained_detail["journalPath"] == str(custom_gui_journal)
+        assert retained_detail["logsPath"] == str(log_root)
+        assert journal_record.exists(), "normal uninstall deleted the local journal"
+        assert retained_log.exists(), "normal uninstall deleted local logs"
+        assert not custom_gui_installed_binary.exists()
+        assert not (custom_gui_state_dir / "api_key.txt").exists()
+        assert not tally_commands(read_client_config(custom_gui_config_path, agent))
+
+        server.expected_files = [
+            custom_gui_config_path,
+            custom_gui_state_dir / "api_key.txt",
+            custom_gui_state_dir / "config.json",
+            custom_gui_installed_binary,
+        ]
+        gui_install(
+            binary,
+            agent,
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+            config_path=custom_gui_config_path,
+        )
+        journal_record.write_text('{"record_type":"SESSION_START"}\n', encoding="utf-8")
+        retained_log.write_text("delete me\n", encoding="utf-8")
+        removed_result = gui_uninstall(
+            binary,
+            agent,
+            env,
+            root,
+            custom_gui_config_path,
+            remove_data=True,
+        )
+        assert removed_result["clients"][0]["journalPath"] == str(custom_gui_journal)
+        assert not custom_gui_state_dir.exists(), "full uninstall retained journal state"
+        assert not log_root.exists(), "full uninstall retained local logs"
+        assert custom_gui_config_path.exists(), "full uninstall deleted the client settings file"
+        assert not tally_commands(read_client_config(custom_gui_config_path, agent))
 
         session_start = next(
             command
             for command in tally_commands(config)
             if command.endswith("hook SessionStart")
         )
+        forwarded_count = len(server.recorded("/v1/tally/logs"))
         run_installed_hook(
             session_start,
             env,
             {"session_id": "native-forwarding-session"},
         )
-        forwarded = server.wait_for("/v1/tally/logs")[-1]
+        forwarded = server.wait_for("/v1/tally/logs", count=forwarded_count + 1)[-1]
         assert header(forwarded, "x-api-key") == api_key
         assert forwarded["body"]["record_type"] == "SESSION_START"
 
@@ -540,14 +970,62 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert header(custom_forwarded, "x-api-key") == api_key
         assert custom_forwarded["body"]["record_type"] == "SESSION_START"
 
-        run(binary, "uninstall", "--config-path", str(custom_config_path), env=env)
-        custom_config = json.loads(custom_config_path.read_text(encoding="utf-8"))
+        heartbeat_env = env.copy()
+        heartbeat_env["TALLY_HOOK_HEARTBEAT_ENABLED"] = "1"
+        heartbeat_run_id = f"native-heartbeat-volume-{agent}"
+        heartbeat_env["TALLY_RUN_ID"] = heartbeat_run_id
+        forwarded_count = len(server.recorded("/v1/tally/logs"))
+        user_prompt = next(
+            command
+            for command in tally_commands(config)
+            if command.endswith("hook UserPromptSubmit")
+        )
+        run_installed_hook(
+            user_prompt,
+            heartbeat_env,
+            {
+                "session_id": heartbeat_run_id,
+                "prompt": (
+                    "audit this risky example: sudo rm -rf /tmp/example "
+                    "api_key=THIS_SECRET_MUST_BE_REDACTED"
+                ),
+            },
+        )
+        server.wait_for("/v1/tally/logs", count=forwarded_count + 1)
+        time.sleep(0.5)
+        emitted = server.recorded("/v1/tally/logs")[forwarded_count:]
+        assert len(emitted) == 1, (
+            f"one {agent} hook produced {len(emitted)} forwarded records"
+        )
+        instruction = emitted[0]["body"]
+        assert instruction["record_type"] == "INSTRUCTION_RECEIVED"
+        evidence = instruction["server_evidence"]
+        assert evidence["visibility"] == "arbitrator"
+        assert "rm -rf" in evidence["text"]
+        assert "THIS_SECRET_MUST_BE_REDACTED" not in evidence["text"]
+        assert evidence["redaction_count"] >= 1
+        assert "destructive_change" in evidence["risk_signals"]
+        assert "privilege_escalation" in evidence["risk_signals"]
+        assert instruction["declared_intent"]["summary"] is None
+        assert instruction["declared_intent"]["capture_status"] == "unavailable"
+        assert "THIS_SECRET_MUST_BE_REDACTED" not in instruction["instruction_summary"]
+        delivered_records = log_root / "tally" / f"{agent}-hooks"
+        assert not list(delivered_records.glob("*.json")), (
+            "delivered records retained redundant structured local copies"
+        )
+        heartbeat_records = log_root / "tally" / "hook-heartbeat"
+        assert not list(heartbeat_records.glob("*.json")), (
+            f"{agent} hook emitted an immediate heartbeat"
+        )
+
+        run(binary, agent, "uninstall", "--config-path", str(custom_config_path), env=env)
+        custom_config = read_client_config(custom_config_path, agent)
         assert not tally_commands(custom_config)
         assert not custom_api_key_path.exists()
         assert not custom_api_config_path.exists()
         assert not custom_installed_binary.exists()
 
-        server.expected_files = [config_path, api_key_path, api_config_path, installed_binary]
+        server.expected_files = expected_install_files
 
         stable_hooks = config_path.read_bytes()
         stable_key = api_key_path.read_bytes()
@@ -555,6 +1033,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         server.set_response_status(503)
         gui_install(
             binary,
+            agent,
             env,
             root,
             api_key,
@@ -569,6 +1048,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         server.set_response_status(503)
         failed_handshake = run(
             binary,
+            agent,
             "install",
             "--api-key",
             api_key,
@@ -581,7 +1061,7 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         assert config_path.read_bytes() == stable_hooks
         assert api_key_path.read_bytes() == stable_key
         assert api_config_path.read_bytes() == stable_api_config
-        assert len(tally_commands(json.loads(stable_hooks))) == 10
+        assert len(tally_commands(parse_client_config(stable_hooks, agent))) == INSTALLED_EVENT_COUNT
     finally:
         server.shutdown()
         server.server_close()
@@ -606,6 +1086,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             "tool_response": {"stdout": ""},
         },
         "Stop": {"session_id": "native-smoke-session"},
+        "SessionEnd": {
+            "session_id": "native-smoke-session",
+            "reason": "prompt_input_exit",
+        },
     }
     session_start = next(
         command for command in tally_commands(config) if command.endswith("hook SessionStart")
@@ -614,38 +1098,428 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     offline_env["TALLY_FORWARDING_ENABLED"] = "0"
     run_installed_hook(session_start, offline_env, payloads["SessionStart"])
     for event in EVENTS[1:]:
-        run(binary, "hook", event, env=offline_env, payload=payloads[event])
+        run(binary, agent, "hook", event, env=offline_env, payload=payloads[event])
 
-    record_dir = log_root / "tally" / f"{agent}-hooks"
-    records = [json.loads(path.read_text(encoding="utf-8")) for path in record_dir.glob("*.json")]
+    records = pending_journal_records(state_dir)
     assert sorted(record["record_type"] for record in records) == EXPECTED_TYPES
     assert all(record["schema_version"] == "0.2" for record in records)
+    records_by_type = {record["record_type"]: record for record in records}
+    session_start_record = records_by_type["SESSION_START"]
+    assert session_start_record["principal"]["id"] is None
+    assert session_start_record["principal"]["type"] is None
+    assert session_start_record["principal"]["capture_status"] == "unavailable"
+    assert session_start_record["authority_scope_hash"] is None
+    assert session_start_record["authority_scope_uri"] is None
+    assert session_start_record["authority_granted_at"] is None
+    assert records_by_type["ACTION_TAKEN"]["deviance_flag"]["deviated"] is None
+    assert (
+        records_by_type["ACTION_TAKEN"]["deviance_flag"]["evaluation_status"]
+        == "unavailable"
+    )
+    assert records_by_type["SESSION_END"]["outcome"] is None
+    assert records_by_type["SESSION_END"]["outcome_capture_status"] == "unavailable"
     action_ids = {
         record["record_type"]: record.get("action_id")
         for record in records
         if record["record_type"] in {"ACTION_TAKEN", "RESULT_RECEIVED"}
     }
     assert action_ids["ACTION_TAKEN"] == action_ids["RESULT_RECEIVED"]
+    assert not list((log_root / "jsonl").glob("*.jsonl")), (
+        "redundant JSONL logging was enabled without explicit opt-in"
+    )
+    assert all(
+        record.get("server_evidence", {}).get("visibility") == "arbitrator"
+        for record in records
+        if record["record_type"]
+        in {"INSTRUCTION_RECEIVED", "ACTION_TAKEN", "RESULT_RECEIVED", "TURN_END"}
+    )
+    private_objects: list[Path] = []
+    materialization_deadline = time.monotonic() + 3
+    while time.monotonic() < materialization_deadline:
+        private_objects = list((log_root / "private" / "objects").glob("*/*.json"))
+        if private_objects:
+            break
+        time.sleep(0.025)
+    assert private_objects, "raw evidence was not retained in the private object cache"
+    assert all(
+        "private://sha256/" in json.dumps(record)
+        for record in records
+    )
 
-    run(binary, "uninstall", env=env)
-    config = json.loads(config_path.read_text(encoding="utf-8"))
+    run(binary, agent, "uninstall", env=env)
+    config = read_client_config(config_path, agent)
     assert "echo keep" in json.dumps(config)
     assert not tally_commands(config)
     assert list(config_path.parent.glob(f"{config_path.name}.backup-*"))
     assert not api_key_path.exists()
     assert not api_config_path.exists()
     assert not installed_binary.exists()
+    if agent == "codex":
+        restored_toml = read_client_config(config_path, agent)
+        assert restored_toml["model"] == "gpt-test"
+        assert restored_toml["notify"] == previous_notify
+        assert "existing Codex settings must survive Tally" in config_path.read_text(
+            encoding="utf-8"
+        )
+
+
+def smoke_combined_install(source_binary: Path, root: Path) -> None:
+    home = root / "combined" / "home"
+    codex_config = home / ".codex" / "config.toml"
+    claude_config = home / ".claude" / "settings.json"
+    codex_config.parent.mkdir(parents=True, exist_ok=True)
+    codex_config.write_text('model = "combined"\n', encoding="utf-8")
+    claude_config.parent.mkdir(parents=True, exist_ok=True)
+    claude_config.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "TALLY_HOOK_HEARTBEAT_ENABLED": "0",
+        "TALLY_FORWARDING_ENABLED": "0",
+        "TALLY_CODEX_CLI": str(fake_codex_cli(root / "combined-fake-codex")),
+    })
+    if os.name == "nt":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+
+    codex_state = codex_config.parent / "tally" / "logs" / ".state"
+    server = CaptureServer([
+        codex_config,
+        codex_state / "api_key.txt",
+        codex_state / "config.json",
+        installed_binary_path(codex_config, "codex", env),
+    ])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        key = secrets.token_urlsafe(32)
+        result = gui_install(
+            source_binary,
+            ["codex", "claude"],
+            env,
+            root,
+            key,
+            server.api_url,
+            expect_connected=True,
+        )
+        clients = {client["id"]: client for client in result["clients"]}
+        assert Path(clients["codex"]["logsPath"]).resolve() == (
+            home / ".tally-codex" / "logs"
+        ).resolve()
+        assert Path(clients["claude"]["logsPath"]).resolve() == (
+            home / ".tally-claude" / "logs"
+        ).resolve()
+        handshakes = server.wait_for("/v1/tally/onboarding/client-connected", count=2)
+        assert {request["body"]["source"] for request in handshakes[-2:]} == {
+            "codex", "claude-code"
+        }
+        assert (
+            len(tally_commands(read_client_config(codex_config, "codex")))
+            == INSTALLED_EVENT_COUNT
+        )
+        assert (
+            len(tally_commands(json.loads(claude_config.read_text(encoding="utf-8"))))
+            == INSTALLED_EVENT_COUNT
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def smoke_heartbeat_session_lifecycle(binary: Path, root: Path, agent: str) -> None:
+    lifecycle_root = root / f"heartbeat-lifecycle-{agent}"
+    home = lifecycle_root / "home"
+    log_root = lifecycle_root / "logs"
+    run_id = f"native-heartbeat-lifecycle-{agent}"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TALLY_LOG_ROOT": str(log_root),
+            "TALLY_RUN_ID": run_id,
+            "TALLY_FORWARDING_ENABLED": "0",
+            "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": "600",
+            "TALLY_HOOK_HEARTBEAT_POLL_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "1800",
+        }
+    )
+    state_dir = log_root / "state"
+    state_path = state_dir / f"hook-heartbeat.{run_id}.json"
+    pid_path = state_dir / f"hook-heartbeat.{run_id}.pid"
+    payload = {"session_id": run_id}
+
+    run(binary, agent, "hook", "SessionStart", env=env, payload=payload)
+    deadline = time.monotonic() + 8
+    while not pid_path.exists() and time.monotonic() < deadline:
+        time.sleep(0.1)
+    assert pid_path.exists(), f"{agent} heartbeat daemon did not start"
+
+    try:
+        run(binary, agent, "hook", "Stop", env=env, payload=payload)
+        time.sleep(1.25)
+        assert pid_path.exists(), f"{agent} Stop ended the session heartbeat"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_hook_event"] == "Stop"
+        assert state["stop_requested"] is False
+
+        run(
+            binary,
+            agent,
+            "hook",
+            "SessionEnd",
+            env=env,
+            payload={**payload, "reason": "prompt_input_exit"},
+        )
+        deadline = time.monotonic() + 8
+        while pid_path.exists() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not pid_path.exists(), f"{agent} SessionEnd left heartbeat daemon running"
+        state = json.loads(state_path.read_text(encoding="utf-8"))
+        assert state["last_hook_event"] == "SessionEnd"
+        assert state["stop_requested"] is True
+
+        forwarding_state = (
+            home
+            / (".codex" if agent == "codex" else ".claude")
+            / "tally"
+            / "logs"
+            / ".state"
+        )
+        record_types = {
+            record["record_type"] for record in pending_journal_records(forwarding_state)
+        }
+        assert {"SESSION_START", "TURN_END", "SESSION_END"} <= record_types
+    finally:
+        if pid_path.exists():
+            run(
+                binary,
+                agent,
+                "hook",
+                "SessionEnd",
+                env=env,
+                payload={**payload, "reason": "test_cleanup"},
+            )
+
+
+def smoke_heartbeat_daemon(binary: Path, root: Path, agent: str) -> None:
+    daemon_root = root / f"heartbeat-daemon-{agent}"
+    home = daemon_root / "home"
+    log_root = daemon_root / "logs"
+    forwarding_state_dir = daemon_root / "forwarding-state"
+    forwarding_state_dir.mkdir(parents=True)
+    api_key = secrets.token_urlsafe(32)
+    api_key_path = forwarding_state_dir / "api_key.txt"
+    api_config_path = forwarding_state_dir / "config.json"
+    marker_path = daemon_root / "installed.marker"
+    api_key_path.write_text(api_key, encoding="utf-8")
+    marker_path.write_text("tally-hook", encoding="utf-8")
+    run_ids = [
+        f"native-heartbeat-daemon-{agent}-one",
+        f"native-heartbeat-daemon-{agent}-two",
+    ]
+    server = CaptureServer([marker_path])
+    api_config_path.write_text(json.dumps({"apiUrl": server.api_url}), encoding="utf-8")
+    if os.name != "nt":
+        api_key_path.chmod(0o600)
+        api_config_path.chmod(0o600)
+    server_thread = threading.Thread(target=server.serve_forever, daemon=True)
+    server_thread.start()
+    base_env = os.environ.copy()
+    base_env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TALLY_LOG_ROOT": str(log_root),
+            "TALLY_STATE_DIR": str(forwarding_state_dir),
+            "TALLY_AGENT_ID": f"native-agent-{agent}",
+            "TALLY_FORWARDING_ENABLED": "1",
+            "TALLY_HOOK_HEARTBEAT_ENABLED": "1",
+            "TALLY_HOOK_HEARTBEAT_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_POLL_SECONDS": "1",
+            "TALLY_HOOK_HEARTBEAT_IDLE_SECONDS": "600",
+        }
+    )
+    state_dir = log_root / "state"
+
+    try:
+        for run_id in run_ids:
+            env = base_env.copy()
+            env["TALLY_RUN_ID"] = run_id
+            run(
+                binary,
+                agent,
+                "hook",
+                "SessionStart",
+                env=env,
+                payload={"session_id": run_id},
+                timeout_seconds=10,
+            )
+
+        limiter_paths = list(state_dir.glob("agent-heartbeat.*.json"))
+        assert len(limiter_paths) == 1, "expected one agent-wide heartbeat state file"
+        limiter_state = json.loads(limiter_paths[0].read_text(encoding="utf-8"))
+        limiter_state["last_activity_unix_millis"] = 0
+        limiter_state["last_heartbeat_unix_millis"] = 0
+        limiter_paths[0].write_text(json.dumps(limiter_state), encoding="utf-8")
+
+        for run_id in run_ids:
+            path = state_dir / f"hook-heartbeat.{run_id}.json"
+            state = json.loads(path.read_text(encoding="utf-8"))
+            state["updated_at"] = "2000-01-01T00:00:00.000Z"
+            path.write_text(json.dumps(state), encoding="utf-8")
+
+        deadline = time.monotonic() + 8
+        forwarded_heartbeats: list[dict] = []
+        while time.monotonic() < deadline:
+            forwarded_heartbeats = [
+                request
+                for request in server.recorded("/v1/tally/logs")
+                if request["body"].get("record_type") == "HEARTBEAT"
+            ]
+            if forwarded_heartbeats:
+                break
+            time.sleep(0.1)
+        assert len(forwarded_heartbeats) == 1, (
+            f"{agent} forwarded {len(forwarded_heartbeats)} competing heartbeats"
+        )
+        forwarded = forwarded_heartbeats[0]
+        assert header(forwarded, "x-api-key") == api_key
+        heartbeat = forwarded["body"]
+        assert heartbeat["record_type"] == "HEARTBEAT"
+        assert heartbeat["record_id"].startswith("heartbeat_")
+        assert heartbeat["agent_id"] == f"native-agent-{agent}"
+        assert heartbeat["metadata"]["rate_limit_seconds"] == 600, (
+            "heartbeat interval override bypassed the ten-minute minimum"
+        )
+        deadline = time.monotonic() + 8
+        pending = pending_journal_records(forwarding_state_dir)
+        while pending and time.monotonic() < deadline:
+            time.sleep(0.1)
+            pending = pending_journal_records(forwarding_state_dir)
+        assert not pending, (
+            "a successfully forwarded heartbeat remained pending"
+        )
+        assert list((log_root / "private" / "objects").glob("*/*.json")), (
+            "forwarding removed raw evidence before the retention window"
+        )
+
+        time.sleep(2.25)
+        assert not pending_journal_records(forwarding_state_dir)
+        assert len(
+            [
+                request
+                for request in server.recorded("/v1/tally/logs")
+                if request["body"].get("record_type") == "HEARTBEAT"
+            ]
+        ) == 1, f"{agent} forwarded a duplicate heartbeat"
+
+        deadline = time.monotonic() + 8
+        while list(state_dir.glob("hook-heartbeat.*.pid")) and time.monotonic() < deadline:
+            time.sleep(0.1)
+        assert not list(state_dir.glob("hook-heartbeat.*.pid")), (
+            "heartbeat daemons did not stop after their idle timeout"
+        )
+
+    finally:
+        server.shutdown()
+        server.server_close()
+        server_thread.join(timeout=5)
+
+
+def assert_windows_application_icon(binary: Path) -> None:
+    if os.name != "nt":
+        return
+
+    import ctypes
+
+    extract_icon = ctypes.windll.shell32.ExtractIconExW
+    extract_icon.argtypes = [
+        ctypes.c_wchar_p,
+        ctypes.c_int,
+        ctypes.c_void_p,
+        ctypes.c_void_p,
+        ctypes.c_uint,
+    ]
+    extract_icon.restype = ctypes.c_uint
+    assert extract_icon(str(binary), -1, None, None, 0) > 0, (
+        "Windows installer does not contain an application icon"
+    )
+
+
+def smoke_gui_requires_codex_cli(binary: Path, root: Path) -> None:
+    home = root / "missing-codex-cli" / "home"
+    url_file = root / "missing-codex-cli.gui-url"
+    env = os.environ.copy()
+    env.update(
+        {
+            "HOME": str(home),
+            "USERPROFILE": str(home),
+            "TALLY_CODEX_CLI": str(root / "does-not-exist"),
+            "TALLY_GUI_NO_OPEN": "1",
+            "TALLY_GUI_URL_FILE": str(url_file),
+        }
+    )
+    process = subprocess.Popen(
+        [str(binary), "gui"],
+        text=True,
+        env=env,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not url_file.exists() and time.monotonic() < deadline:
+            assert process.poll() is None, "GUI exited while checking for Codex CLI"
+            time.sleep(0.05)
+        split = urlsplit(url_file.read_text(encoding="utf-8"))
+        token = parse_qs(split.fragment)["token"][0]
+        origin = f"{split.scheme}://{split.netloc}"
+        status, _ = gui_request(origin, token, "/api/status", {})
+        codex = next(client for client in status["clients"] if client["id"] == "codex")
+        assert codex["available"] is False
+        assert "Codex CLI is required for Codex Desktop" in codex["availabilityDetail"]
+        failed, _ = gui_request(
+            origin,
+            token,
+            "/api/install",
+            {
+                "apiKey": "fake-agent-key",
+                "apiUrl": "http://127.0.0.1:9/v1/tally/logs",
+                "clients": [{"id": "codex", "configPath": codex["configPath"]}],
+            },
+            expected_status=400,
+        )
+        assert "Codex CLI with lifecycle hook support is required" in failed["error"]
+        assert not (home / ".codex" / "config.toml").exists()
+        assert not (home / ".codex" / "tally").exists()
+        gui_request(origin, token, "/api/shutdown", {})
+        stdout, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
+    finally:
+        if process.poll() is None:
+            process.terminate()
+            process.communicate(timeout=5)
 
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--codex", type=Path, required=True)
-    parser.add_argument("--claude", type=Path, required=True)
+    parser.add_argument("--tally", type=Path, required=True)
     args = parser.parse_args()
+    assert_windows_application_icon(args.tally.resolve())
     with tempfile.TemporaryDirectory(prefix="tally-native-smoke-") as directory:
         root = Path(directory)
-        smoke(args.codex.resolve(), "codex", root)
-        smoke(args.claude.resolve(), "claude", root)
+        smoke_gui_requires_codex_cli(args.tally.resolve(), root)
+        smoke(args.tally.resolve(), "codex", root)
+        smoke(args.tally.resolve(), "claude", root)
+        smoke_combined_install(args.tally.resolve(), root)
+        smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "codex")
+        smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "claude")
+        smoke_heartbeat_daemon(args.tally.resolve(), root, "codex")
+        smoke_heartbeat_daemon(args.tally.resolve(), root, "claude")
     print("Native install smoke tests passed.")
 
 

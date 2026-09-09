@@ -1,6 +1,6 @@
 {
   "_meta": {
-    "description": "Anchor log emitted by the trade routing agent (Agent A), running on Nexus Capital infrastructure. Agent A is authorised to route a batch of six pending trade orders from batch BATCH-2026-05-01-0334, each within a $500,000 per-order authority limit, and hand off routing confirmations to ClearPath Exchange's settlement agent (Agent B). THIS LOG CONTAINS A FRAUDULENT GAP: between the last RESULT_RECEIVED record and the HANDOFF decision action, Anchor was deliberately stopped for approximately three minutes. During this window Agent A routed one additional unauthorised order (ORD-NEXUS-007, $2,100,000) that exceeds its authority scope and does not appear in this log. The gap is independently detectable via (1) three missing heartbeat emissions at 10:23:00, 10:24:00, and 10:25:00Z, and (2) a pre_state_hash discontinuity on the subsequent ACTION_TAKEN record — the pre_state_hash reflects a state that includes the unauthorised order, which cannot be reconciled with the post_state_hash of the last recorded RESULT_RECEIVED.",
+    "description": "Anchor log emitted by the trade routing agent (Agent A), running on Nexus Capital infrastructure. Agent A is authorised to route a batch of six pending trade orders from batch BATCH-2026-05-01-0334, each within a $500,000 per-order authority limit, and hand off routing confirmations to ClearPath Exchange's settlement agent (Agent B). THIS LOG CONTAINS A FRAUDULENT GAP: between the last RESULT_RECEIVED record and the HANDOFF decision action, Anchor was deliberately stopped for approximately 33 minutes. During this window Agent A routed one additional unauthorised order (ORD-NEXUS-007, $2,100,000) that exceeds its authority scope and does not appear in this log. The gap is independently detectable via (1) three missing heartbeat emissions at 11:17:44, 11:27:44, and 11:37:44Z, and (2) a pre_state_hash discontinuity on the subsequent ACTION_TAKEN record — the pre_state_hash reflects a state that includes the unauthorised order, which cannot be reconciled with the post_state_hash of the last recorded RESULT_RECEIVED.",
     "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
     "agent_id": "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
     "visibility_note": "Fields marked [PUB] are transmitted as plaintext to OpenOrigins. Fields marked [ARB] are transmitted encrypted and unsealed only on formal dispute. Fields marked [PRV] are hashes and URIs only — plaintext stays on Nexus infra."
@@ -116,7 +116,7 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:18:00Z",
+      "timestamp":          "2026-05-01T10:27:00Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00005"
     },
 
@@ -127,7 +127,7 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:19:00Z",
+      "timestamp":          "2026-05-01T10:37:00Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00006"
     },
 
@@ -138,7 +138,7 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:20:00Z",
+      "timestamp":          "2026-05-01T10:47:00Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00007"
     },
 
@@ -149,7 +149,7 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:21:00Z",
+      "timestamp":          "2026-05-01T10:57:00Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00008"
     },
 
@@ -162,7 +162,7 @@
 
       "result_hash":        "sha256:5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7",
       "result_uri":         "[PRV] s3://nexus-agent-logs/sess_02PQ9RSMN4XZAB06HELU1VYWD/result-act-002.json",
-      "result_received_at": "2026-05-01T10:21:44Z",
+      "result_received_at": "2026-05-01T10:57:44Z",
 
       "result_interpretation": {
         "summary":     "[ARB] All 6 orders in batch BATCH-2026-05-01-0334 routed successfully. Confirmations ORD-NEXUS-001 through ORD-NEXUS-006 received from exchange.",
@@ -185,12 +185,12 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:22:00Z",
+      "timestamp":          "2026-05-01T11:07:44Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00009"
     },
 
     {
-      "_dispute_annotation": "HEARTBEAT GAP DETECTED. The last heartbeat was at 10:22:00Z. The next heartbeat is at 10:25:20Z — 200 seconds later, spanning three missed 60-second slots (expected at 10:23:00, 10:24:00, and 10:25:00). Anchor emits HEARTBEAT every 60 seconds during inactivity; silence of this duration is inconsistent with normal operation and is treated as a primary finding by OpenOrigins without requiring any content to be unsealed. Additionally, Anchor restarted at 10:25:20Z rather than on a clean 60-second boundary, consistent with a manual restart after deliberate shutdown.",
+      "_dispute_annotation": "HEARTBEAT GAP DETECTED. The last heartbeat was at 11:07:44Z. The next heartbeat is at 11:41:04Z — 2,000 seconds later, spanning three missed 10-minute slots (expected at 11:17:44, 11:27:44, and 11:37:44). Anchor emits one HEARTBEAT every 10 minutes per agent during inactivity; silence of this duration is inconsistent with normal operation and is treated as a primary finding by OpenOrigins without requiring any content to be unsealed. The off-cadence restart is consistent with a manual restart after deliberate shutdown.",
 
       "record_type": "HEARTBEAT",
       "schema_version": "0.2",
@@ -198,7 +198,7 @@
       "agent_id":           "did:key:z6MkrNpQxYdZSuFGHKRT2V3W4X5Y6Z7A8B9C0D1E2F3G4H5I",
       "anchor_instance_id": "anchor_inst_NEXUS_ROUTER_03",
       "active_sessions":    ["sess_02PQ9RSMN4XZAB06HELU1VYWD"],
-      "timestamp":          "2026-05-01T10:25:20Z",
+      "timestamp":          "2026-05-01T11:41:04Z",
       "anchor_receipt":     "rcpt_02PQ9RSAB1NEXUS00010"
     },
 
@@ -220,7 +220,7 @@
       "post_state_hash": "sha256:a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c0d1e2f3a4b5c6d7e8f9a0b1c2",
       "post_state_uri":  "[PRV] s3://nexus-agent-logs/sess_02PQ9RSMN4XZAB06HELU1VYWD/state-post-act-003.json",
 
-      "action_timestamp": "2026-05-01T10:25:22Z",
+      "action_timestamp": "2026-05-01T11:41:06Z",
       "anchor_receipt":   "rcpt_02PQ9RSAB1NEXUS00011",
 
       "deviance_flag": {
@@ -254,7 +254,7 @@
 
       "payload_hash":           "sha256:c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c3d4e5",
       "payload_uri":            "[PRV] s3://nexus-agent-logs/sess_02PQ9RSMN4XZAB06HELU1VYWD/handoff-payload-005.json",
-      "handoff_timestamp":      "2026-05-01T10:25:24Z",
+      "handoff_timestamp":      "2026-05-01T11:41:08Z",
       "acknowledgement_status": "pending",
 
       "anchor_receipt": "rcpt_02PQ9RSAB1NEXUS00012"
@@ -277,7 +277,7 @@
         "approval_hash": null
       },
 
-      "session_ended_at": "2026-05-01T10:25:27Z",
+      "session_ended_at": "2026-05-01T11:41:11Z",
       "anchor_receipt":   "rcpt_02PQ9RSAB1NEXUS00013"
     }
 

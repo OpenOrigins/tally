@@ -4,7 +4,7 @@
 > **Status**: Draft. We welcome issues and pull requests.  
 > **Maintainer**: [OpenOrigins](https://openorigins.com)  
 > **License**: CC BY 4.0  
-> **Changelog**: v0.2 introduces three-tier field visibility (PUBLIC / ARBITRATOR / PRIVATE) and the Anchor local scanning model.
+> **Changelog**: v0.2 introduces three-tier field visibility (PUBLIC / ARBITRATOR / PRIVATE) and local Anchor collection.
 
 ---
 
@@ -21,7 +21,10 @@ Compatibility means that, in the event of a dispute between agents or between an
 
 ### How Anchor works
 
-**Anchor runs locally on each organisation's own infrastructure.** It is a lightweight daemon that scans a designated log directory for new records, hashes their contents, and transmits fields to OpenOrigins according to their visibility tier (see below).
+**Anchor runs locally on each organisation's own infrastructure.** It is a
+lightweight collector that receives agent events, journals structured records,
+hashes their private content, and transmits records to OpenOrigins according to
+their visibility tier (see below).
 
 Each organisation runs its own Anchor instance independently. This means:
 
@@ -38,6 +41,7 @@ Each organisation runs its own Anchor instance independently. This means:
 |---|---|
 | **Agent** | Any automated system acting on behalf of a principal |
 | **Principal** | The human, organisation, or upstream agent that authorised this agent to act |
+| **Turn** | One user instruction and the agent response produced for it within a session |
 | **Action** | A single atomic operation performed by an agent |
 | **Handoff** | The transfer of a task or result from one agent to another |
 | **Anchor** | The OpenOrigins local daemon that scans, hashes, and transmits log records |
@@ -51,8 +55,11 @@ Each organisation runs its own Anchor instance independently. This means:
 **1. Anchor runs independently on each party's infra.**  
 Neither party's log is authoritative on its own. OpenOrigins holds independently anchored records from both sides. The comparison is the evidence.
 
-**2. Hash content, don't transmit it by default.**  
-Raw prompt and response content is not transmitted to OpenOrigins unless the field's visibility tier requires it. Plaintext stays on company infrastructure and is retrieved only under dispute.
+**2. Hash complete content; bound any transmitted excerpt.**
+Complete raw prompt and response payloads remain on company infrastructure as
+PRIVATE evidence. An implementation may send a bounded, redacted excerpt as
+ARBITRATOR evidence for server-side detection, as described below. This must be
+explicitly disableable.
 
 **3. Record intent before action.**  
 A log that only records what happened is insufficient. The spec requires recording what the agent declared it would do before acting. The delta between declared intent and actual action is a primary signal in dispute resolution.
@@ -61,13 +68,16 @@ A log that only records what happened is insufficient. The spec requires recordi
 Each party's Anchor independently records the handoff event using the same `handoff_id`. OpenOrigins matches them. If the payload hashes differ, this is a material finding.
 
 **5. Timestamps must be externally attested.**  
-Anchor attaches an OpenOrigins receipt to each transmitted record, carrying an external time attestation.
+Anchor associates an OpenOrigins receipt with each transmitted record, carrying
+an external time attestation. Because the logical record is immutable, a receipt
+returned after ingestion may be stored in a separate append-only outcome journal
+keyed by record ID and sequence rather than inserted into the original record.
 
-**6. The log is append-only.**  
-No record may be modified or deleted after being written. Corrections are made by appending a new record referencing the corrected one.
+**6. The logical log is append-only.**
+No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery journal may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
 
 **7. Heartbeat ensures gap detection.**  
-Anchor emits a `HEARTBEAT` record every 60 seconds when no other records are being written.
+Anchor emits one agent-scoped `HEARTBEAT` record every 10 minutes (600 seconds) whenever no other records are being written for that agent. Concurrent sessions share the same heartbeat window.
 
 ---
 
@@ -85,6 +95,49 @@ Arbitrator-tier fields are sealed by default. On routine ingestion they are stor
 
 ### PRIVATE `[PRV]`
 Only the SHA-256 hash and a company-held URI are transmitted to OpenOrigins. The plaintext never leaves company infrastructure. OpenOrigins can confirm the content existed and has not been altered, but cannot read it. If a dispute requires inspection of a private field, the company must voluntarily produce the plaintext, which is verified against the anchored hash.
+
+### Bounded server evidence
+
+Implementations may transmit a bounded, redacted plaintext excerpt of prompts,
+tool parameters, tool results, or turn results as an ARBITRATOR field to support
+server-side anomaly detection. This is plaintext derived from private content,
+not merely a hash; redaction is best effort and does not make the excerpt
+PUBLIC. When present it uses this shape:
+
+```json
+{
+  "server_evidence": {
+    "schema_version": "tally-server-evidence.v1",
+    "visibility": "arbitrator",
+    "text": "<bounded redacted plaintext>",
+    "content_hash": "<SHA-256 of the unredacted source value>",
+    "truncated": false,
+    "redaction_count": 0,
+    "risk_signals": []
+  }
+}
+```
+
+`risk_signals` are advisory candidates for ranking and human review. They are not
+findings. The receiver must apply ARBITRATOR access control, encryption, audit,
+unsealing, and deletion requirements to `server_evidence`. Clients must support
+disabling this field when those controls are unavailable.
+
+### Local retention
+
+Pending records and the private evidence they reference must not be deleted.
+After successful ingestion, clients may remove redundant structured local
+copies and garbage-collect unreferenced private evidence under a documented age
+and size policy. Content-addressed storage is recommended so repeated payloads
+share one immutable object. An implementation claiming Level 2 must configure
+private retention long enough to keep its URIs resolvable for the organisation's
+dispute window.
+
+Implementations must not fabricate unavailable capture semantics. When a client
+hook does not expose a principal identity, signature, declared intent, or
+deviation evaluation, the corresponding value is `null` and an adjacent status
+field records `unavailable`. An instruction excerpt or post-hoc summary is not a
+declared intent, and a content hash is not a cryptographic signature.
 
 ---
 
@@ -105,7 +158,7 @@ Arbitrator-tier fields are sealed by default. The process for unsealing them is:
 
 ## Record Types
 
-The spec defines seven record types. A compliant implementation must be capable of emitting all seven. Field definitions include their visibility tier in brackets.
+The spec defines eight record types. A compliant implementation must be capable of emitting all eight. Field definitions include their visibility tier in brackets.
 
 ---
 
@@ -297,7 +350,31 @@ Emitted when an agent transfers a task or result to another agent.
 
 ---
 
-### 6. `SESSION_END`
+### 6. `TURN_END`
+
+Emitted when the agent finishes one response. A session can contain many turns;
+this record does not conclude the session.
+
+```json
+{
+  "record_type": "TURN_END",
+  "schema_version": "0.2",
+
+  "session_id": "<uuid>",                                       // [PUB]
+  "turn_id":    "<uuid>",                                       // [PUB]
+
+  "outcome":      "completed | failed | interrupted",           // [PUB]
+  "outcome_hash": "<SHA-256>",                                  // [PUB]
+  "outcome_uri":  "<URI>",                                     // [PRV]
+
+  "turn_ended_at":  "<ISO 8601>",                              // [PUB]
+  "anchor_receipt": "<receipt ID>"                              // [PUB]
+}
+```
+
+---
+
+### 7. `SESSION_END`
 
 Emitted once when the agent's task session concludes.
 
@@ -326,9 +403,9 @@ Emitted once when the agent's task session concludes.
 
 ---
 
-### 7. `HEARTBEAT`
+### 8. `HEARTBEAT`
 
-Emitted by Anchor every 60 seconds when no other records are being written. Allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance.
+Emitted by Anchor every 10 minutes (600 seconds) whenever no other records are being written for the same agent. Concurrent sessions share one heartbeat window. This allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance without multiplying records by session count.
 
 ```json
 {
@@ -347,13 +424,17 @@ Emitted by Anchor every 60 seconds when no other records are being written. Allo
 
 ## Anchoring
 
-Anchor transmits records to OpenOrigins in two passes:
+Anchor may transmit the PUBLIC and ARBITRATOR fields of a record in one
+authenticated request. The receiving service applies the field-tier controls:
 
-**Pass 1 — Public fields**: Transmitted immediately as plaintext on record creation.
+**Public fields**: Transmitted as plaintext on record creation.
 
-**Pass 2 — Arbitrator fields**: Transmitted as plaintext but stored encrypted at rest, inaccessible to OpenOrigins staff until a dispute is formally raised.
+**Arbitrator fields**: Transmitted as plaintext but stored encrypted at rest,
+inaccessible to OpenOrigins staff until a dispute is formally raised.
 
-**Private fields**: Only hash and URI are transmitted. Plaintext never leaves company infrastructure.
+**Private fields**: Only hash and URI are transmitted. Complete raw plaintext
+never leaves company infrastructure; a bounded excerpt is a separate
+ARBITRATOR field when enabled.
 
 ### Minimum anchoring requirement
 
@@ -364,7 +445,8 @@ These record types must each receive an individual Anchor receipt (not batched):
 - `SESSION_END`
 - Every `HEARTBEAT`
 
-`INSTRUCTION_RECEIVED`, `ACTION_TAKEN`, and `RESULT_RECEIVED` records may be batched into a Merkle root and anchored together.
+`INSTRUCTION_RECEIVED`, `ACTION_TAKEN`, `RESULT_RECEIVED`, and `TURN_END`
+records may be batched into a Merkle root and anchored together.
 
 ---
 
@@ -381,7 +463,7 @@ These record types must each receive an individual Anchor receipt (not batched):
 
 | Level | Requirement |
 |---|---|
-| **Level 1 — Basic** | Emits all seven record types. Runs Anchor locally. Anchors SESSION_START, HANDOFF, SESSION_END, and HEARTBEAT individually. |
+| **Level 1 — Basic** | Emits all eight record types. Runs Anchor locally. Anchors SESSION_START, HANDOFF, SESSION_END, and HEARTBEAT individually. |
 | **Level 2 — Standard** | Level 1 plus: all three visibility tiers correctly implemented; private-field URIs resolvable on request during dispute; Data Processing Agreement with OpenOrigins signed. |
 | **Level 3 — Full** | Level 2 plus: Cambium proof required before each cross-agent handoff; real-time streaming to Anchor rather than batch submission. |
 
