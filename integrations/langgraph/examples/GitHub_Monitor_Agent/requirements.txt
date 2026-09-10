@@ -1,0 +1,13 @@
+langgraph>=0.2.60
+langchain>=0.3.0
+langchain-core>=0.3.0
+langchain-ollama>=0.2.2
+fastapi>=0.115.0
+uvicorn[standard]>=0.30.0
+requests>=2.32.0
+python-dotenv>=1.0.1
+apscheduler>=3.10.4
+pyyaml>=6.0
+# anchor_hooks itself (see anchor_hooks/README.md) -- editable install of this same
+# repo's pyproject.toml, so `import anchor_hooks` resolves regardless of cwd.
+-e .
