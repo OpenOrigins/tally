@@ -235,10 +235,22 @@ class TallyClient:
             )
         )
 
-    def end_session(self, session_id: str, *, outcome: str, value: Any) -> None:
+    def end_session(
+        self,
+        session_id: str,
+        *,
+        outcome: str,
+        value: Any,
+        token_usage: dict[str, int] | None = None,
+    ) -> None:
         if outcome not in {"success", "failure", "partial", "interrupted"}:
             raise ValueError("invalid session outcome")
-        record, evidence = records.session_end(session_id=session_id, outcome=outcome, value=value)
+        record, evidence = records.session_end(
+            session_id=session_id,
+            outcome=outcome,
+            value=value,
+            token_usage=token_usage,
+        )
         with self._state_lock:
             self._enqueue(
                 record,
