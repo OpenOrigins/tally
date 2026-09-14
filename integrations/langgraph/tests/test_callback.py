@@ -206,6 +206,55 @@ def test_handler_ignores_unrelated_and_malformed_events() -> None:
     assert not client.method_calls
 
 
+def test_llm_token_usage_recorded_on_session_end() -> None:
+    from types import SimpleNamespace
+
+    root = uuid4()
+    client = Mock()
+    handler = TallyCallbackHandler(client)
+
+    handler.on_chain_start(None, {}, run_id=root)
+
+    usage_metadata_response = SimpleNamespace(
+        generations=[
+            [
+                SimpleNamespace(
+                    message=SimpleNamespace(
+                        usage_metadata={
+                            "input_tokens": 10,
+                            "output_tokens": 5,
+                            "total_tokens": 15,
+                        }
+                    )
+                )
+            ]
+        ],
+        llm_output=None,
+    )
+    llm_output_response = SimpleNamespace(
+        generations=[],
+        llm_output={
+            "token_usage": {
+                "prompt_tokens": 20,
+                "completion_tokens": 8,
+                "total_tokens": 28,
+            }
+        },
+    )
+    handler.on_llm_end(usage_metadata_response, run_id=uuid4())
+    handler.on_llm_end(llm_output_response, run_id=uuid4())
+
+    handler.on_chain_end({"answer": "done"}, run_id=root)
+
+    _, kwargs = client.end_session.call_args
+    assert kwargs["token_usage"] == {
+        "prompt_tokens": 30,
+        "completion_tokens": 13,
+        "total_tokens": 43,
+        "llm_call_count": 2,
+    }
+
+
 def test_handler_contains_capture_failures() -> None:
     root = uuid4()
     action = uuid4()

@@ -8,3 +8,4 @@
   heartbeat records.
 - Bounded/redacted server evidence with local SHA-256-addressed private evidence.
 - Synchronous and asynchronous explicit handoff helpers based on public LangChain APIs.
+- Session-level token usage totals from LangChain model callbacks.

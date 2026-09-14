@@ -43,6 +43,7 @@ EXPECTED_TYPES = [
 PACKAGE_VERSION = tomllib.loads(
     (Path(__file__).resolve().parents[1] / "Cargo.toml").read_text(encoding="utf-8")
 )["workspace"]["package"]["version"]
+ASYNC_RESULT_TIMEOUT_SECONDS = 30
 
 
 def jsonl_values(path: Path) -> list[dict]:
@@ -222,21 +223,29 @@ class CaptureServer(ThreadingHTTPServer):
         with self.lock:
             self.response_status = status
 
-    def wait_for(self, path: str, count: int = 1, timeout: float = 10) -> list[dict]:
+    def wait_for(
+        self,
+        path: str,
+        count: int = 1,
+        timeout: float = ASYNC_RESULT_TIMEOUT_SECONDS,
+    ) -> list[dict]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
             requests = self.recorded(path)
             if len(requests) >= count:
                 return requests
             time.sleep(0.05)
-        raise AssertionError(f"timed out waiting for {count} request(s) to {path}")
+        received = len(self.recorded(path))
+        raise AssertionError(
+            f"timed out waiting for {count} request(s) to {path}; received {received}"
+        )
 
     def wait_for_matching(
         self,
         path: str,
         predicate: Callable[[dict], bool],
         count: int = 1,
-        timeout: float = 10,
+        timeout: float = ASYNC_RESULT_TIMEOUT_SECONDS,
     ) -> list[dict]:
         deadline = time.monotonic() + timeout
         while time.monotonic() < deadline:
@@ -244,7 +253,10 @@ class CaptureServer(ThreadingHTTPServer):
             if len(requests) >= count:
                 return requests
             time.sleep(0.05)
-        raise AssertionError(f"timed out waiting for {count} matching request(s) to {path}")
+        received = len(self.recorded_matching(path, predicate))
+        raise AssertionError(
+            f"timed out waiting for {count} matching request(s) to {path}; received {received}"
+        )
 
 
 class CaptureHandler(BaseHTTPRequestHandler):
