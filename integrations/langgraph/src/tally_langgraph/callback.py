@@ -246,11 +246,15 @@ class TallyCallbackHandler(BaseCallbackHandler):
             llm_output = getattr(response, "llm_output", None) or {}
             token_usage = llm_output.get("token_usage") or llm_output.get("usage")
             if token_usage:
-                prompt_tokens = token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0
+                prompt_tokens = (
+                    token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0
+                )
                 completion_tokens = (
                     token_usage.get("completion_tokens", token_usage.get("output_tokens", 0)) or 0
                 )
-                total_tokens = token_usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+                total_tokens = (
+                    token_usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+                )
 
         return {
             "prompt_tokens": prompt_tokens,

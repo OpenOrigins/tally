@@ -4,8 +4,14 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.13 - 2026-09-14
+
 ### Added
 
+- Added the `tally-langgraph` integration and a tested universal Python wheel
+  to GitHub releases.
+- Added Claude Code transcript token usage to session records, including cache
+  token counts and per-model totals.
 - Added a durable append-only segmented delivery journal with ordered sequence
   numbers, torn-tail repair, terminal outcome records, dead letters, and receipt
   persistence.

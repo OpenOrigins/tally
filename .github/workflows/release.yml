@@ -207,10 +207,61 @@ jobs:
     uses: ./.github/workflows/dev2-native.yml
     secrets: inherit
 
+  python-wheel:
+    name: Build and test Python wheel
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    defaults:
+      run:
+        working-directory: integrations/langgraph
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+      - name: Install Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: "3.13"
+
+      - name: Install package and release dependencies
+        run: python -m pip install --upgrade pip ".[test]"
+
+      - name: Check formatting and types
+        run: |
+          python -m ruff format --check .
+          python -m ruff check .
+          python -m mypy --strict src/tally_langgraph
+
+      - name: Test package
+        run: python -m pytest
+
+      - name: Build and check wheel
+        run: |
+          python -m build --wheel
+          python -m twine check dist/*.whl
+
+      - name: Test clean wheel installation
+        shell: bash
+        run: |
+          python -m venv "$RUNNER_TEMP/tally-wheel-smoke"
+          "$RUNNER_TEMP/tally-wheel-smoke/bin/python" -m pip install dist/*.whl
+          "$RUNNER_TEMP/tally-wheel-smoke/bin/python" -c \
+            "import tally_langgraph; print(tally_langgraph.__version__)"
+
+      - name: Upload Python wheel
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: python-wheel
+          path: integrations/langgraph/dist/*.whl
+          if-no-files-found: error
+
   publish:
     needs:
       - build
       - build-dev2
+      - python-wheel
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -228,6 +279,12 @@ jobs:
           path: dist
           merge-multiple: true
 
+      - name: Download tested Python wheel
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: python-wheel
+          path: dist
+
       - name: Keep Dev2 installers out of the release
         shell: bash
         run: |
@@ -238,7 +295,7 @@ jobs:
 
       - name: Create one checksum manifest
         working-directory: dist
-        run: sha256sum tally-* > SHA256SUMS
+        run: sha256sum tally-* tally_langgraph-*.whl > SHA256SUMS
 
       - name: Generate Homebrew cask
         if: github.event_name == 'push'
@@ -257,6 +314,7 @@ jobs:
             dist/tally-macos-x86_64.dmg
             dist/tally-windows-x86_64.exe
             dist/tally-linux-x86_64
+            dist/tally_langgraph-*.whl
             dist/SHA256SUMS
           generate_release_notes: true
           fail_on_unmatched_files: true
@@ -279,6 +337,8 @@ jobs:
             **Windows:** Download and open `tally-windows-x86_64.exe`. Windows signing is not yet available, so SmartScreen may require **More info** > **Run anyway**.
 
             **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
+
+            **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`. The universal wheel supports Python 3.10 through 3.14. See the [LangGraph guide](https://github.com/OpenOrigins/tally/tree/${{ github.ref_name }}/integrations/langgraph) for setup.
 
             Choose Codex, Claude Code, or both in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 
@@ -322,7 +382,7 @@ jobs:
           RELEASE_TAG: ${{ inputs.release_tag }}
         run: |
           gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY"
-          gh release upload "$RELEASE_TAG" dist/tally-* dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
+          gh release upload "$RELEASE_TAG" dist/tally-* dist/tally_langgraph-*.whl dist/SHA256SUMS --clobber --repo "$GITHUB_REPOSITORY"
 
       - name: Update refreshed release instructions
         if: github.event_name == 'workflow_dispatch'
@@ -340,6 +400,7 @@ jobs:
             - **macOS:** Download the `.dmg` for your Mac, open it, drag Tally to Applications, and open Tally.
             - **Windows:** Download and open `tally-windows-x86_64.exe`. The executable is currently unsigned, so SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block it.
             - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
+            - **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`.
 
             Choose Codex, Claude Code, or both. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 

@@ -9,6 +9,7 @@ Each release contains only:
 - `tally-macos-x86_64.dmg`
 - `tally-windows-x86_64.exe`
 - `tally-linux-x86_64`
+- `tally_langgraph-<version>-py3-none-any.whl`
 - `SHA256SUMS`
 
 The macOS app and DMG are Developer ID signed, hardened, notarized, stapled, and
@@ -19,11 +20,15 @@ assessed by Gatekeeper before upload. Windows is currently unsigned.
 1. Update `CHANGELOG.md` and the workspace version in `Cargo.toml`.
 2. Record the exact Codex CLI/Desktop and Claude Code versions tested in
    `README.md` and `.github/workflows/release.yml`.
-3. Run `./scripts/release-check.sh` from a clean checkout.
+3. Run `./scripts/release-check.sh` from a clean checkout. It tests the native
+   workspace and the Python package, builds the wheel, and installs that wheel
+   into a clean virtual environment.
 4. Merge to `dev` and wait for every CI job to pass.
 5. Tag that exact commit as `v<version>` and push the tag.
 6. Wait for all four native release jobs and the publish job to pass.
-7. Download every asset and verify `sha256sum --check SHA256SUMS`.
+7. Download every asset and verify `sha256sum --check SHA256SUMS`. Install the
+   downloaded wheel into a clean virtual environment and import
+   `tally_langgraph`.
 8. Mount both DMGs and verify the app and DMG with `codesign`, `stapler`, and
    `spctl`. Test installation, retry, hook execution, and uninstall on Windows
    and Linux as well.
