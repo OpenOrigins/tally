@@ -39,6 +39,8 @@ All notable changes to Tally are documented in this file.
 
 ### Fixed
 
+- Updated Rustls to address RUSTSEC-2026-0285 before publishing release
+  binaries.
 - Preserve capture order instead of hash-sorting records, prevent retry storms
   and poison-record blockage, retain server receipts, and close worker wakeup
   races during bursts.
