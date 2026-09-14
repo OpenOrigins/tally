@@ -9,8 +9,8 @@ use std::thread;
 use tally_common::agent_runtime::{
     backup_if_exists, env_enabled, expand_home, first_string_by_key, home_dir, hook_command,
     light_git_state, parse_payload, random_hex, read_json_file, read_stdin, run_id, safe_slug,
-    set_default, sha256_str, stable_id, utc_now, workspace_path, write_json_atomic, AuditSink,
-    AuditSinkConfig, HeartbeatFiles,
+    set_default, sha256_str, stable_id, transcript_token_usage, utc_now, workspace_path,
+    write_json_atomic, AuditSink, AuditSinkConfig, HeartbeatFiles,
 };
 
 pub type Result<T> = std::result::Result<T, Box<dyn std::error::Error>>;
@@ -117,6 +117,9 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     let sink = audit_sink("claude-hooks")?;
     let raw_ref = sink.private_payload(&payload)?;
     let observed_at = utc_now();
+    let token_usage = first_string_by_key(&payload, &["transcript_path"])
+        .map(|path| transcript_token_usage(&expand_home(&path)))
+        .unwrap_or_else(|| json!({"available": false}));
     let metadata = json!({
         "observed_at": observed_at,
         "hook_event": event_type,
@@ -156,6 +159,7 @@ fn record_hook_event(event_type: &str) -> Result<()> {
             .trim_start_matches("evt_")
     ));
     record["audit_event_id"] = event["event_id"].clone();
+    record["token_usage"] = token_usage;
     sink.write_tally_record(&record)?;
     Ok(())
 }

@@ -3,10 +3,10 @@ use fs2::FileExt;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::cell::RefCell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, HashSet};
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -654,6 +654,117 @@ pub fn read_json_file(path: &Path) -> Result<Value> {
     Ok(serde_json::from_str(&fs::read_to_string(path)?)?)
 }
 
+#[derive(Clone, Copy, Default)]
+struct TokenTotals {
+    input_tokens: u64,
+    output_tokens: u64,
+    cache_creation_input_tokens: u64,
+    cache_read_input_tokens: u64,
+}
+
+impl TokenTotals {
+    fn from_usage(usage: &Value) -> Self {
+        let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+        Self {
+            input_tokens: field("input_tokens"),
+            output_tokens: field("output_tokens"),
+            cache_creation_input_tokens: field("cache_creation_input_tokens"),
+            cache_read_input_tokens: field("cache_read_input_tokens"),
+        }
+    }
+
+    fn add(&mut self, other: Self) {
+        self.input_tokens = self.input_tokens.saturating_add(other.input_tokens);
+        self.output_tokens = self.output_tokens.saturating_add(other.output_tokens);
+        self.cache_creation_input_tokens = self
+            .cache_creation_input_tokens
+            .saturating_add(other.cache_creation_input_tokens);
+        self.cache_read_input_tokens = self
+            .cache_read_input_tokens
+            .saturating_add(other.cache_read_input_tokens);
+    }
+
+    fn total(self) -> u64 {
+        self.input_tokens
+            .saturating_add(self.output_tokens)
+            .saturating_add(self.cache_creation_input_tokens)
+            .saturating_add(self.cache_read_input_tokens)
+    }
+
+    fn to_json(self) -> Value {
+        json!({
+            "input_tokens": self.input_tokens,
+            "output_tokens": self.output_tokens,
+            "cache_creation_input_tokens": self.cache_creation_input_tokens,
+            "cache_read_input_tokens": self.cache_read_input_tokens,
+            "total_tokens": self.total(),
+        })
+    }
+}
+
+/// Returns cumulative token usage from the assistant messages in a Claude Code transcript.
+pub fn transcript_token_usage(transcript_path: &Path) -> Value {
+    let file = match fs::File::open(transcript_path) {
+        Ok(file) => file,
+        Err(_) => return json!({"available": false}),
+    };
+
+    let mut totals = TokenTotals::default();
+    let mut per_model: BTreeMap<String, TokenTotals> = BTreeMap::new();
+    let mut seen_message_ids = HashSet::new();
+    let mut assistant_messages = 0_u64;
+
+    for line in BufReader::new(file)
+        .lines()
+        .map_while(std::result::Result::ok)
+    {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("assistant") {
+            continue;
+        }
+        let Some(message) = entry.get("message") else {
+            continue;
+        };
+        let Some(usage) = message.get("usage") else {
+            continue;
+        };
+        if message
+            .get("id")
+            .and_then(Value::as_str)
+            .is_some_and(|id| !seen_message_ids.insert(id.to_string()))
+        {
+            continue;
+        }
+
+        let message_totals = TokenTotals::from_usage(usage);
+        totals.add(message_totals);
+        assistant_messages = assistant_messages.saturating_add(1);
+        let model = message
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown")
+            .to_string();
+        per_model.entry(model).or_default().add(message_totals);
+    }
+
+    let by_model = per_model
+        .into_iter()
+        .map(|(model, totals)| (model, totals.to_json()))
+        .collect::<serde_json::Map<_, _>>();
+    let mut result = totals.to_json();
+    merge_object(
+        &mut result,
+        json!({
+            "available": true,
+            "assistant_messages": assistant_messages,
+            "by_model": by_model,
+        }),
+    );
+    result
+}
+
 fn private_open_options() -> OpenOptions {
     let options = OpenOptions::new();
     #[cfg(unix)]
@@ -969,12 +1080,12 @@ pub fn set_default(key: &str, value: &str) {
 mod tests {
     use super::{
         claim_heartbeat_daemon, first_string_by_key, heartbeat_due, heartbeat_stop_requested,
-        parse_payload, safe_slug, sha256_str, stable_id, unique_suffix,
+        parse_payload, safe_slug, sha256_str, stable_id, transcript_token_usage, unique_suffix,
         validated_heartbeat_quiet_seconds, AuditSink, AuditSinkConfig,
     };
     use fs2::FileExt;
     use serde_json::json;
-    use std::{env, fs};
+    use std::{env, fs, io::Write};
 
     #[test]
     fn parses_payload_and_finds_nested_strings() {
@@ -1071,6 +1182,50 @@ mod tests {
         FileExt::unlock(&second).unwrap();
         drop(second);
         fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn sums_transcript_usage_and_deduplicates_messages() {
+        let path = env::temp_dir().join(format!("tally-transcript-{}.jsonl", unique_suffix()));
+        let mut file = fs::File::create(&path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_1", "model": "claude-sonnet", "usage": {"input_tokens": 10, "output_tokens": 2}}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_1", "model": "claude-sonnet", "usage": {"input_tokens": 10, "output_tokens": 2}}})
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({"type": "assistant", "message": {"id": "msg_2", "model": "claude-haiku", "usage": {"input_tokens": 3, "output_tokens": 1, "cache_read_input_tokens": 100}}})
+        )
+        .unwrap();
+
+        let usage = transcript_token_usage(&path);
+        assert_eq!(usage["available"], true);
+        assert_eq!(usage["assistant_messages"], 2);
+        assert_eq!(usage["input_tokens"], 13);
+        assert_eq!(usage["output_tokens"], 3);
+        assert_eq!(usage["total_tokens"], 116);
+        assert_eq!(usage["by_model"]["claude-sonnet"]["output_tokens"], 2);
+        assert_eq!(
+            usage["by_model"]["claude-haiku"]["cache_read_input_tokens"],
+            100
+        );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn missing_transcript_reports_unavailable() {
+        let usage = transcript_token_usage(&env::temp_dir().join("missing-transcript.jsonl"));
+        assert_eq!(usage, json!({"available": false}));
     }
 
     #[cfg(windows)]
