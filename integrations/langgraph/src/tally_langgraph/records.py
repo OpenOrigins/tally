@@ -259,6 +259,7 @@ def session_end(
     session_id: str,
     outcome: str,
     value: Any,
+    token_usage: dict[str, int] | None = None,
 ) -> tuple[dict[str, Any], Evidence]:
     outcome_hash, outcome_uri, evidence = _reference(value)
     record = {
@@ -274,6 +275,7 @@ def session_end(
             "approval_hash": None,
         },
         "session_ended_at": now_iso(),
+        "token_usage": token_usage,
     }
     return record, evidence
 

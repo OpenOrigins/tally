@@ -33,6 +33,8 @@ class TallyCallbackHandler(BaseCallbackHandler):
         self._instruction_id: str | None = None
         self._turn_id: str | None = None
         self._action_ids: dict[UUID, str] = {}
+        self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._llm_call_count = 0
 
     def on_chain_start(
         self,
@@ -121,8 +123,14 @@ class TallyCallbackHandler(BaseCallbackHandler):
                 )
             except Exception:
                 logger.exception("Failed to capture the end of a Tally turn")
+            token_usage = {**self._token_usage, "llm_call_count": self._llm_call_count}
             try:
-                self.client.end_session(session_id, outcome=session_outcome, value=value)
+                self.client.end_session(
+                    session_id,
+                    outcome=session_outcome,
+                    value=value,
+                    token_usage=token_usage,
+                )
             except Exception:
                 logger.exception("Failed to capture the end of a Tally session")
             finally:
@@ -202,6 +210,54 @@ class TallyCallbackHandler(BaseCallbackHandler):
             except Exception:
                 logger.exception("Failed to capture a Tally tool result")
 
+    def on_llm_end(
+        self,
+        response: Any,
+        *,
+        run_id: UUID,
+        parent_run_id: UUID | None = None,
+        **kwargs: Any,
+    ) -> None:
+        usage = self._extract_token_usage(response)
+        with self._lock:
+            self._token_usage["prompt_tokens"] += usage["prompt_tokens"]
+            self._token_usage["completion_tokens"] += usage["completion_tokens"]
+            self._token_usage["total_tokens"] += usage["total_tokens"]
+            self._llm_call_count += 1
+
+    @staticmethod
+    def _extract_token_usage(response: Any) -> dict[str, int]:
+        prompt_tokens = 0
+        completion_tokens = 0
+        total_tokens = 0
+        found = False
+
+        for generation_list in getattr(response, "generations", []) or []:
+            for generation in generation_list:
+                message = getattr(generation, "message", None)
+                usage_metadata = getattr(message, "usage_metadata", None) if message else None
+                if usage_metadata:
+                    prompt_tokens += usage_metadata.get("input_tokens", 0) or 0
+                    completion_tokens += usage_metadata.get("output_tokens", 0) or 0
+                    total_tokens += usage_metadata.get("total_tokens", 0) or 0
+                    found = True
+
+        if not found:
+            llm_output = getattr(response, "llm_output", None) or {}
+            token_usage = llm_output.get("token_usage") or llm_output.get("usage")
+            if token_usage:
+                prompt_tokens = token_usage.get("prompt_tokens", token_usage.get("input_tokens", 0)) or 0
+                completion_tokens = (
+                    token_usage.get("completion_tokens", token_usage.get("output_tokens", 0)) or 0
+                )
+                total_tokens = token_usage.get("total_tokens", prompt_tokens + completion_tokens) or 0
+
+        return {
+            "prompt_tokens": prompt_tokens,
+            "completion_tokens": completion_tokens,
+            "total_tokens": total_tokens,
+        }
+
     def on_custom_event(
         self,
         name: str,
@@ -238,3 +294,5 @@ class TallyCallbackHandler(BaseCallbackHandler):
         self._instruction_id = None
         self._turn_id = None
         self._action_ids.clear()
+        self._token_usage = {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}
+        self._llm_call_count = 0
