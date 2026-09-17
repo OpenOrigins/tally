@@ -96,7 +96,7 @@ jobs:
         run: python -m pip check
 
       - name: Test against minimum LangGraph
-        run: python -m pytest
+        run: python -m pytest --ignore=tests/test_github_monitor_example.py
 
       - name: Run examples against minimum LangGraph
         env:

@@ -195,9 +195,13 @@ immutable dataclass and can also be constructed directly for dependency injectio
   demonstrates lifecycle and tool capture.
 - [`examples/handoff_agent.py`](https://github.com/OpenOrigins/tally/blob/HEAD/integrations/langgraph/examples/handoff_agent.py)
   demonstrates an explicit subagent handoff.
+- [`examples/GitHub_Monitor_Agent`](https://github.com/OpenOrigins/tally/tree/HEAD/integrations/langgraph/examples/GitHub_Monitor_Agent)
+  demonstrates a signed-webhook service with fixed LangGraph routes, local activity
+  storage, dry-run GitHub actions, and a Tally callback on every invocation.
 
-Both examples use deterministic local functions; no model provider or API key is needed
-to see records appear in the journal.
+The first two examples use deterministic local functions; no model provider or API key
+is needed to see records appear in the journal. The GitHub monitor is an optional,
+end-to-end example that uses Ollama and additional dependencies from the `monitor` extra.
 
 ## Development and release
 
