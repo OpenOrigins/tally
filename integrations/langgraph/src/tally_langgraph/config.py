@@ -1,23 +1,22 @@
-"""Configuration for the Tally LangGraph client.
-
-Secrets are accepted through constructor arguments or the process environment.
-The library deliberately does not read or modify ``.env`` files.
-"""
+"""Configuration for the Tally LangGraph client."""
 
 from __future__ import annotations
 
 import os
+from collections.abc import Mapping
 from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
+
+from dotenv import dotenv_values
 
 DEFAULT_API_URL = "https://api.prod.openorigins.com/v1/tally/logs"
 DEFAULT_STATE_DIR = Path(".tally") / "langgraph"
 MIN_HEARTBEAT_SECONDS = 600
 
 
-def _env_bool(name: str, default: bool) -> bool:
-    value = os.environ.get(name)
+def _env_bool(values: Mapping[str, str | None], name: str, default: bool) -> bool:
+    value = values.get(name)
     if value is None:
         return default
     normalized = value.strip().lower()
@@ -28,8 +27,8 @@ def _env_bool(name: str, default: bool) -> bool:
     raise ValueError(f"{name} must be a boolean value")
 
 
-def _env_int(name: str, default: int) -> int:
-    value = os.environ.get(name)
+def _env_int(values: Mapping[str, str | None], name: str, default: int) -> int:
+    value = values.get(name)
     if value is None:
         return default
     try:
@@ -38,8 +37,8 @@ def _env_int(name: str, default: int) -> int:
         raise ValueError(f"{name} must be an integer") from error
 
 
-def _env_float(name: str, default: float) -> float:
-    value = os.environ.get(name)
+def _env_float(values: Mapping[str, str | None], name: str, default: float) -> float:
+    value = values.get(name)
     if value is None:
         return default
     try:
@@ -48,7 +47,10 @@ def _env_float(name: str, default: float) -> float:
         raise ValueError(f"{name} must be a number") from error
 
 
-def _validate_api_url(value: str) -> str:
+def validate_api_url(value: str) -> str:
+    value = value.strip()
+    if len(value) > 2_048:
+        raise ValueError("Tally API URL must not exceed 2048 characters")
     parts = urlsplit(value)
     if not parts.scheme or not parts.hostname:
         raise ValueError("Tally API URL must be an absolute URL")
@@ -58,6 +60,19 @@ def _validate_api_url(value: str) -> str:
     if parts.scheme != "https" and not (parts.scheme == "http" and is_loopback):
         raise ValueError("Tally API URL must use HTTPS (HTTP is allowed only for localhost)")
     return value
+
+
+def normalize_api_key(value: str | None) -> str | None:
+    if value is None:
+        return None
+    normalized = value.strip()
+    if not normalized:
+        return None
+    if len(normalized) > 4_096 or any(
+        ord(character) < 32 or ord(character) == 127 for character in normalized
+    ):
+        raise ValueError("Tally API key has an invalid format")
+    return normalized
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,11 +103,9 @@ class TallyConfig:
     delivered_retention_days: int = 30
 
     def __post_init__(self) -> None:
-        object.__setattr__(self, "api_url", _validate_api_url(self.api_url))
+        object.__setattr__(self, "api_url", validate_api_url(self.api_url))
         object.__setattr__(self, "state_dir", Path(self.state_dir))
-        if self.api_key is not None:
-            normalized_key = self.api_key.strip()
-            object.__setattr__(self, "api_key", normalized_key or None)
+        object.__setattr__(self, "api_key", normalize_api_key(self.api_key))
         if self.heartbeat_interval_seconds < MIN_HEARTBEAT_SECONDS:
             raise ValueError(f"heartbeat_interval_seconds must be at least {MIN_HEARTBEAT_SECONDS}")
         if not 256 <= self.server_evidence_max_chars <= 32_768:
@@ -116,30 +129,51 @@ class TallyConfig:
             raise ValueError("principal_type must be human, organisation, agent, or None")
 
     @classmethod
-    def from_env(cls, **overrides: object) -> TallyConfig:
-        """Build configuration from ``TALLY_*`` variables plus explicit overrides."""
+    def from_env(
+        cls,
+        *,
+        env_file: str | Path | None = None,
+        **overrides: object,
+    ) -> TallyConfig:
+        """Build configuration from ``.env`` and ``TALLY_*`` process variables.
+
+        Process variables take precedence over the file. Explicit constructor-style
+        overrides take precedence over both.
+        """
+
+        resolved_env_file = Path(
+            env_file if env_file is not None else os.environ.get("TALLY_ENV_FILE", ".env")
+        )
+        environment: dict[str, str | None] = dict(dotenv_values(resolved_env_file))
+        environment.update(os.environ)
 
         values: dict[str, object] = {
-            "api_url": os.environ.get("TALLY_API_URL", DEFAULT_API_URL),
-            "api_key": os.environ.get("TALLY_API_KEY"),
-            "state_dir": Path(os.environ.get("TALLY_STATE_DIR", str(DEFAULT_STATE_DIR))),
-            "agent_id": os.environ.get("TALLY_AGENT_ID"),
-            "agent_version": os.environ.get("TALLY_AGENT_VERSION", "unknown"),
-            "principal_id": os.environ.get("TALLY_PRINCIPAL_ID"),
-            "principal_type": os.environ.get("TALLY_PRINCIPAL_TYPE"),
-            "forwarding_enabled": _env_bool("TALLY_FORWARDING_ENABLED", True),
-            "server_evidence_enabled": _env_bool("TALLY_SERVER_EVIDENCE_ENABLED", True),
-            "server_evidence_max_chars": _env_int("TALLY_SERVER_EVIDENCE_MAX_CHARS", 8_192),
-            "max_record_bytes": _env_int("TALLY_MAX_RECORD_BYTES", 16 * 1024 * 1024),
-            "heartbeat_interval_seconds": _env_int(
-                "TALLY_HEARTBEAT_SECONDS", MIN_HEARTBEAT_SECONDS
+            "api_url": environment.get("TALLY_API_URL") or DEFAULT_API_URL,
+            "api_key": environment.get("TALLY_API_KEY"),
+            "state_dir": Path(environment.get("TALLY_STATE_DIR") or str(DEFAULT_STATE_DIR)),
+            "agent_id": environment.get("TALLY_AGENT_ID"),
+            "agent_version": environment.get("TALLY_AGENT_VERSION") or "unknown",
+            "principal_id": environment.get("TALLY_PRINCIPAL_ID"),
+            "principal_type": environment.get("TALLY_PRINCIPAL_TYPE"),
+            "forwarding_enabled": _env_bool(environment, "TALLY_FORWARDING_ENABLED", True),
+            "server_evidence_enabled": _env_bool(
+                environment, "TALLY_SERVER_EVIDENCE_ENABLED", True
             ),
-            "worker_poll_seconds": _env_float("TALLY_WORKER_POLL_SECONDS", 1.0),
-            "request_timeout_seconds": _env_float("TALLY_REQUEST_TIMEOUT_SECONDS", 5.0),
-            "retry_base_seconds": _env_float("TALLY_RETRY_BASE_SECONDS", 0.5),
-            "retry_max_seconds": _env_float("TALLY_RETRY_MAX_SECONDS", 30.0),
-            "claim_lease_seconds": _env_float("TALLY_CLAIM_LEASE_SECONDS", 30.0),
-            "delivered_retention_days": _env_int("TALLY_DELIVERED_RETENTION_DAYS", 30),
+            "server_evidence_max_chars": _env_int(
+                environment, "TALLY_SERVER_EVIDENCE_MAX_CHARS", 8_192
+            ),
+            "max_record_bytes": _env_int(environment, "TALLY_MAX_RECORD_BYTES", 16 * 1024 * 1024),
+            "heartbeat_interval_seconds": _env_int(
+                environment, "TALLY_HEARTBEAT_SECONDS", MIN_HEARTBEAT_SECONDS
+            ),
+            "worker_poll_seconds": _env_float(environment, "TALLY_WORKER_POLL_SECONDS", 1.0),
+            "request_timeout_seconds": _env_float(
+                environment, "TALLY_REQUEST_TIMEOUT_SECONDS", 5.0
+            ),
+            "retry_base_seconds": _env_float(environment, "TALLY_RETRY_BASE_SECONDS", 0.5),
+            "retry_max_seconds": _env_float(environment, "TALLY_RETRY_MAX_SECONDS", 30.0),
+            "claim_lease_seconds": _env_float(environment, "TALLY_CLAIM_LEASE_SECONDS", 30.0),
+            "delivered_retention_days": _env_int(environment, "TALLY_DELIVERED_RETENTION_DAYS", 30),
         }
         values.update(overrides)
         return cls(**values)  # type: ignore[arg-type]

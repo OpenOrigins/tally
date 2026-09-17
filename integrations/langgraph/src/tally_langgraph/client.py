@@ -8,6 +8,7 @@ import threading
 import time
 import uuid
 from datetime import timedelta
+from pathlib import Path
 from typing import Any
 
 from . import records
@@ -76,8 +77,13 @@ class TallyClient:
             self._worker.start()
 
     @classmethod
-    def from_env(cls, **kwargs: Any) -> TallyClient:
-        return cls(TallyConfig.from_env(), **kwargs)
+    def from_env(
+        cls,
+        *,
+        env_file: str | Path | None = None,
+        **kwargs: Any,
+    ) -> TallyClient:
+        return cls(TallyConfig.from_env(env_file=env_file), **kwargs)
 
     def callback(self, *, source: str = "langgraph") -> Any:
         """Return a callback handler for one graph invocation."""

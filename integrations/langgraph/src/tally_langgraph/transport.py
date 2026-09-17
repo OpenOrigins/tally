@@ -8,8 +8,9 @@ from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
 from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.request import Request, build_opener
 
+from ._tls import NoRedirectHandler, https_handler
 from ._version import __version__
 from .config import TallyConfig
 
@@ -28,19 +29,10 @@ class Transport(Protocol):
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult: ...
 
 
-class _NoRedirectHandler(HTTPRedirectHandler):
-    """Do not risk forwarding the Agent API key to a redirected origin."""
-
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> None:
-        return None
-
-
 class HttpTransport:
     def __init__(self, config: TallyConfig) -> None:
         self.config = config
-        self._opener = build_opener(_NoRedirectHandler())
+        self._opener = build_opener(NoRedirectHandler(), https_handler())
 
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult:
         if not self.config.forwarding_enabled:

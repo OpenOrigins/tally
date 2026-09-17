@@ -1,5 +1,22 @@
 # Changelog
 
+## Unreleased
+
+- Add a `tally-langgraph connect` CLI for one-time installation setup: saves
+  `TALLY_API_KEY`/`TALLY_API_URL` to `.env` and performs the dashboard's
+  `client-connected` handshake, matching the contract shared by the other Tally
+  clients. The handshake also establishes and prints this installation's
+  persisted `agent_id`. Configuration automatically reads `.env`, while process
+  variables and explicit arguments retain higher precedence.
+- Validate connection URLs and credentials before saving them, reject insecure
+  non-loopback HTTP endpoints, write credentials atomically with restricted
+  permissions, and refuse redirects that could disclose the API key.
+- Bundle `certifi`'s CA store for all outbound HTTPS requests (handshake and log
+  delivery alike), so TLS verification works even on Python installs that don't
+  link to the platform certificate store (notably python.org builds on macOS,
+  which otherwise fail every HTTPS request with
+  `CERTIFICATE_VERIFY_FAILED: unable to get local issuer certificate`).
+
 ## 0.1.0
 
 - Initial supported `tally-langgraph` package.
