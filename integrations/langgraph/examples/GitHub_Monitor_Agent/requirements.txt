@@ -1,0 +1,10 @@
+# Paths in requirements files are resolved relative to this file. This installs
+# tally-langgraph from integrations/langgraph and the dependencies used by the demo.
+-e ../..
+apscheduler>=3.10,<4
+fastapi>=0.115,<1
+langchain-ollama>=0.2.2,<2
+langgraph>=0.2.60,<2
+python-dotenv>=1,<2
+requests>=2.32,<3
+uvicorn[standard]>=0.30,<1

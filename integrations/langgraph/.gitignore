@@ -8,3 +8,6 @@ dist/
 __pycache__/
 *.py[cod]
 .tally/
+examples/**/.env
+examples/**/*.db
+examples/**/*.sqlite3
