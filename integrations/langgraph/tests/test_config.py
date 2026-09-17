@@ -6,6 +6,7 @@ from tally_langgraph.config import DEFAULT_API_URL, TallyConfig
 
 
 def test_from_env_and_explicit_override(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
     monkeypatch.setenv("TALLY_API_KEY", "  test-key  ")
     monkeypatch.setenv("TALLY_STATE_DIR", str(tmp_path))
     monkeypatch.setenv("TALLY_SERVER_EVIDENCE_ENABLED", "false")
@@ -21,12 +22,36 @@ def test_from_env_and_explicit_override(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert config.server_evidence_enabled is False
 
 
+def test_from_env_loads_file_but_process_environment_wins(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    env_file = tmp_path / "custom.env"
+    env_file.write_text(
+        "TALLY_API_KEY=file-key\n"
+        "TALLY_AGENT_VERSION=file-version\n"
+        "TALLY_FORWARDING_ENABLED=false\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("TALLY_API_KEY", "process-key")
+
+    config = TallyConfig.from_env(env_file=env_file)
+
+    assert config.api_key == "process-key"
+    assert config.agent_version == "file-version"
+    assert config.forwarding_enabled is False
+
+
+def test_default_api_url_is_production() -> None:
+    assert DEFAULT_API_URL == "https://api.prod.openorigins.com/v1/tally/logs"
+
+
 @pytest.mark.parametrize(
     ("kwargs", "message"),
     [
         ({"api_url": "http://example.com/logs"}, "HTTPS"),
         ({"api_url": "not-a-url"}, "absolute URL"),
         ({"api_url": "https://user:password@example.com/logs"}, "credentials"),
+        ({"api_key": "invalid\nkey"}, "invalid format"),
         ({"heartbeat_interval_seconds": 599}, "at least 600"),
         ({"server_evidence_max_chars": 128}, "between 256"),
         ({"retry_base_seconds": 2, "retry_max_seconds": 1}, "must not exceed"),

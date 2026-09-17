@@ -26,7 +26,9 @@ classifiers = [
   "Typing :: Typed",
 ]
 dependencies = [
+  "certifi>=2024.2.2",
   "langchain-core>=0.3,<2",
+  "python-dotenv>=1,<2",
 ]
 
 [project.optional-dependencies]
@@ -47,6 +49,9 @@ test = [
 Documentation = "https://github.com/OpenOrigins/tally/tree/HEAD/integrations/langgraph"
 Issues = "https://github.com/OpenOrigins/tally/issues"
 Repository = "https://github.com/OpenOrigins/tally"
+
+[project.scripts]
+tally-langgraph = "tally_langgraph.cli:main"
 
 [tool.setuptools]
 package-dir = { "" = "src" }
