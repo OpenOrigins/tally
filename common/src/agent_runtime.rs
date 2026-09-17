@@ -101,6 +101,7 @@ impl AuditSink {
     pub fn write_tally_record(&self, record: &Value) -> Result<u64> {
         let mut with_defaults = record.clone();
         with_defaults["run_id"] = Value::String(self.run_id.clone());
+        with_defaults["workspace"] = Value::String(self.workspace.display().to_string());
         if with_defaults.get("schema_version").is_none() {
             with_defaults["schema_version"] = Value::String("0.2".to_string());
         }
