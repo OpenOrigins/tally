@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from urllib.parse import urlsplit
 
-DEFAULT_API_URL = "https://api.prod.openorigins.com/v1/tally/logs"
+DEFAULT_API_URL = "https://api.dev2.openorigins.com/v1/tally/logs"
 DEFAULT_STATE_DIR = Path(".tally") / "langgraph"
 MIN_HEARTBEAT_SECONDS = 600
 
