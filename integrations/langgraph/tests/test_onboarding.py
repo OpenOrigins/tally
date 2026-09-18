@@ -67,7 +67,7 @@ def test_notify_client_connected_sends_expected_request() -> None:
     request = server.requests[0]
     assert request["path"] == "/v1/tally/onboarding/client-connected"
     assert request["body"] == {"source": "langgraph"}
-    assert request["headers"]["X-Api-Key"] == "test-key"
+    assert request["headers"]["x-api-key"] == "test-key"
     assert request["headers"]["Content-Type"] == "application/json"
 
 

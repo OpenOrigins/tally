@@ -70,7 +70,7 @@ def test_connect_writes_env_file_and_handshakes(
     assert "TALLY_API_KEY=my-key" in env_contents
     assert f"TALLY_API_URL=http://{host}:{port}/v1/tally/logs" in env_contents
     assert server.requests[0]["body"] == {"source": "langgraph"}
-    assert server.requests[0]["headers"]["X-Api-Key"] == "my-key"
+    assert server.requests[0]["headers"]["x-api-key"] == "my-key"
 
 
 def test_connect_preserves_existing_env_lines(
@@ -112,7 +112,7 @@ def test_connect_reuses_existing_key_when_not_passed(
 
     assert exit_code == 0
     assert len(server.requests) == 2
-    assert server.requests[1]["headers"]["X-Api-Key"] == "my-key"
+    assert server.requests[1]["headers"]["x-api-key"] == "my-key"
 
 
 def test_connect_without_key_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

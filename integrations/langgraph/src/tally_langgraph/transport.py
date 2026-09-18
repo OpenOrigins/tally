@@ -2,15 +2,15 @@
 
 from __future__ import annotations
 
+import http.client
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
-from urllib.error import HTTPError, URLError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.parse import urlsplit
 
-from ._tls import https_handler
+from ._tls import ssl_context
 from ._version import __version__
 from .config import TallyConfig
 
@@ -29,19 +29,9 @@ class Transport(Protocol):
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult: ...
 
 
-class _NoRedirectHandler(HTTPRedirectHandler):
-    """Do not risk forwarding the Agent API key to a redirected origin."""
-
-    def redirect_request(
-        self, req: Any, fp: Any, code: int, msg: str, headers: Any, newurl: str
-    ) -> None:
-        return None
-
-
 class HttpTransport:
     def __init__(self, config: TallyConfig) -> None:
         self.config = config
-        self._opener = build_opener(_NoRedirectHandler(), https_handler())
 
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult:
         if not self.config.forwarding_enabled:
@@ -58,39 +48,58 @@ class HttpTransport:
             separators=(",", ":"),
             sort_keys=True,
         ).encode("utf-8")
-        request = Request(
-            self.config.api_url,
-            data=body,
-            method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "Idempotency-Key": record_id,
-                "User-Agent": f"tally-langgraph/{__version__}",
-                "X-Api-Key": self.config.api_key,
-                "X-Oo-Tally-Ingest-Path": "tally-langgraph",
-                "X-Oo-Tally-Source": "sdk",
-                "X-Tally-Record-Id": record_id,
-            },
-        )
+        parts = urlsplit(self.config.api_url)
+        assert parts.hostname  # guaranteed by TallyConfig's _validate_api_url
+        headers = {
+            "Content-Type": "application/json",
+            "Content-Length": str(len(body)),
+            "Idempotency-Key": record_id,
+            "User-Agent": f"tally-langgraph/{__version__}",
+            # urllib.request always re-title-cases header names before sending
+            # ("x-api-key" -> "X-Api-Key"), and the API Gateway authorizer only
+            # accepts the exact lowercase "x-api-key" as its identity source, so
+            # this uses http.client directly to send it byte-for-byte as given.
+            # http.client also never follows redirects on its own, so the Agent
+            # API key is never at risk of being forwarded to another origin.
+            "x-api-key": self.config.api_key,
+            "X-Oo-Tally-Ingest-Path": "tally-langgraph",
+            "X-Oo-Tally-Source": "sdk",
+            "X-Tally-Record-Id": record_id,
+        }
+        path = parts.path or "/"
+        if parts.query:
+            path = f"{path}?{parts.query}"
+        connection: http.client.HTTPConnection
+        if parts.scheme == "https":
+            connection = http.client.HTTPSConnection(
+                parts.hostname,
+                parts.port,
+                timeout=self.config.request_timeout_seconds,
+                context=ssl_context(),
+            )
+        else:
+            connection = http.client.HTTPConnection(
+                parts.hostname, parts.port, timeout=self.config.request_timeout_seconds
+            )
         try:
-            with self._opener.open(
-                request, timeout=self.config.request_timeout_seconds
-            ) as response:
-                response_body = response.read(_MAX_RESPONSE_BYTES + 1)
-                if len(response_body) > _MAX_RESPONSE_BYTES:
-                    return DeliveryResult("retry", "server response exceeded 64 KiB")
-                return self._success_result(response.status, response_body)
-        except HTTPError as error:
-            body_bytes = error.read(_MAX_RESPONSE_BYTES + 1)
-            detail = self._response_detail(error.code, body_bytes)
-            return self._status_result(error.code, detail, error.headers.get("Retry-After"))
-        except (TimeoutError, URLError, OSError) as error:
+            connection.request("POST", path, body=body, headers=headers)
+            response = connection.getresponse()
+            response_body = response.read(_MAX_RESPONSE_BYTES + 1)
+            if len(response_body) > _MAX_RESPONSE_BYTES:
+                return DeliveryResult("retry", "server response exceeded 64 KiB")
+            if not 200 <= response.status < 300:
+                detail = self._response_detail(response.status, response_body)
+                return self._status_result(
+                    response.status, detail, response.getheader("Retry-After")
+                )
+            return self._success_result(response_body)
+        except (TimeoutError, OSError, http.client.HTTPException) as error:
             return DeliveryResult("retry", f"delivery failed: {error}")
+        finally:
+            connection.close()
 
     @staticmethod
-    def _success_result(status: int, body: bytes) -> DeliveryResult:
-        if not 200 <= status < 300:
-            return HttpTransport._status_result(status, f"server returned HTTP {status}", None)
+    def _success_result(body: bytes) -> DeliveryResult:
         if not body.strip():
             return DeliveryResult("delivered")
         try:

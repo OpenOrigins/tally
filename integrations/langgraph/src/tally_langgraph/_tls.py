@@ -10,11 +10,9 @@ the onboarding handshake work regardless of how the host Python was installed.
 from __future__ import annotations
 
 import ssl
-from urllib.request import HTTPSHandler
 
 import certifi
 
 
-def https_handler() -> HTTPSHandler:
-    context = ssl.create_default_context(cafile=certifi.where())
-    return HTTPSHandler(context=context)
+def ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())

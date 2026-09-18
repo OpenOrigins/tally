@@ -72,7 +72,7 @@ def test_success_sends_stable_idempotency_headers(tmp_path: Path) -> None:
     assert result.receipt == {"id": "receipt-1"}
     assert server.requests[0]["headers"]["Idempotency-Key"] == "record-1"
     assert server.requests[0]["headers"]["X-Tally-Record-Id"] == "record-1"
-    assert server.requests[0]["headers"]["X-Api-Key"] == "test-key"
+    assert server.requests[0]["headers"]["x-api-key"] == "test-key"
     assert server.requests[0]["headers"]["User-Agent"] == f"tally-langgraph/{__version__}"
 
 
@@ -126,7 +126,7 @@ def test_disabled_forwarding_keeps_record_pending(tmp_path: Path) -> None:
     ],
 )
 def test_success_response_shapes(body: bytes, receipt: Any, disposition: str) -> None:
-    result = HttpTransport._success_result(200, body)
+    result = HttpTransport._success_result(body)
     assert result.disposition == disposition
     assert result.receipt == receipt
 

@@ -56,6 +56,16 @@ wired up before any log record arrives. It also establishes this installation's
 `agent_id` at the same time -- see [Agent identity](#agent-identity) below -- and
 prints it so you can confirm which agent you just connected.
 
+To give this agent a memorable name instead of a random ID, set `TALLY_AGENT_ID`
+before running `connect` (or at any point before the next run):
+
+```bash
+export TALLY_AGENT_ID=agent:my-new-id
+```
+
+By default -- if `TALLY_AGENT_ID` is not set -- a random ID is generated once and used
+from then on.
+
 The handshake is best-effort: if the server is unreachable, the key is still saved and
 `tally-langgraph connect` exits successfully -- log capture and delivery do not depend
 on it, and records queue locally and retry through the normal outbox regardless. Add

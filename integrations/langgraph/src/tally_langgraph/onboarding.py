@@ -9,12 +9,11 @@ any log record arrives; log delivery itself does not depend on it succeeding.
 
 from __future__ import annotations
 
+import http.client
 import json
-from urllib.error import HTTPError, URLError
 from urllib.parse import urlsplit, urlunsplit
-from urllib.request import Request, build_opener
 
-from ._tls import https_handler
+from ._tls import ssl_context
 from ._version import __version__
 
 _HANDSHAKE_PATH = "/v1/tally/onboarding/client-connected"
@@ -46,28 +45,40 @@ def notify_client_connected(
     """
 
     url = handshake_url(api_url)
+    parts = urlsplit(url)
+    if not parts.hostname:
+        raise OnboardingError(f"invalid onboarding URL: {url}")
     body = json.dumps({"source": source}, separators=(",", ":")).encode("utf-8")
-    request = Request(
-        url,
-        data=body,
-        method="POST",
-        headers={
-            "Content-Type": "application/json",
-            "User-Agent": f"tally-langgraph/{__version__}",
-            "X-Api-Key": api_key,
-        },
-    )
-    opener = build_opener(https_handler())
+    headers = {
+        "Content-Type": "application/json",
+        "Content-Length": str(len(body)),
+        "User-Agent": f"tally-langgraph/{__version__}",
+        # urllib.request always re-title-cases header names before sending
+        # ("x-api-key" -> "X-Api-Key"), and the API Gateway authorizer only
+        # accepts the exact lowercase "x-api-key" as its identity source, so
+        # this uses http.client directly to send it byte-for-byte as given.
+        "x-api-key": api_key,
+    }
+    path = parts.path or "/"
+    if parts.query:
+        path = f"{path}?{parts.query}"
+    connection: http.client.HTTPConnection
+    if parts.scheme == "https":
+        connection = http.client.HTTPSConnection(
+            parts.hostname, parts.port, timeout=timeout, context=ssl_context()
+        )
+    else:
+        connection = http.client.HTTPConnection(parts.hostname, parts.port, timeout=timeout)
     try:
-        with opener.open(request, timeout=timeout) as response:
-            response.read(_MAX_RESPONSE_BYTES)
-            if not 200 <= response.status < 300:
-                raise OnboardingError(f"server returned HTTP {response.status}")
-    except HTTPError as error:
-        detail = error.read(_MAX_RESPONSE_BYTES).decode("utf-8", "replace").strip()
-        message = f"server returned HTTP {error.code}"
-        if detail:
-            message = f"{message}: {detail[:500]}"
-        raise OnboardingError(message) from error
-    except (TimeoutError, URLError, OSError) as error:
+        connection.request("POST", path, body=body, headers=headers)
+        response = connection.getresponse()
+        detail = response.read(_MAX_RESPONSE_BYTES).decode("utf-8", "replace").strip()
+        if not 200 <= response.status < 300:
+            message = f"server returned HTTP {response.status}"
+            if detail:
+                message = f"{message}: {detail[:500]}"
+            raise OnboardingError(message)
+    except (TimeoutError, OSError, http.client.HTTPException) as error:
         raise OnboardingError(f"could not reach {url}: {error}") from error
+    finally:
+        connection.close()
