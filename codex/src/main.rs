@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, Read, Write};
+use std::io::{self, BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -167,8 +167,93 @@ fn record_payload_event(
             .trim_start_matches("evt_")
     ));
     record["audit_event_id"] = event["event_id"].clone();
+    record["token_usage"] = extract_session_id(payload)
+        .map(|session_id| codex_token_usage(&codex_home_dir(), &session_id))
+        .unwrap_or_else(|| json!({"available": false}));
     sink.write_tally_record(&record)?;
     Ok(())
+}
+
+/// Returns the latest cumulative token usage reported in the Codex CLI
+/// rollout file for the given session, in the shape of the OpenAI Responses
+/// API `usage` object.
+fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
+    let Some(rollout_path) = find_codex_rollout_file(codex_home, session_id) else {
+        return json!({"available": false});
+    };
+    let file = match fs::File::open(&rollout_path) {
+        Ok(file) => file,
+        Err(_) => return json!({"available": false}),
+    };
+
+    let mut latest_usage: Option<Value> = None;
+    for line in BufReader::new(file)
+        .lines()
+        .map_while(std::result::Result::ok)
+    {
+        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
+            continue;
+        };
+        if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
+            continue;
+        }
+        let Some(payload) = entry.get("payload") else {
+            continue;
+        };
+        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+            continue;
+        }
+        if let Some(usage) = payload
+            .get("info")
+            .and_then(|info| info.get("total_token_usage"))
+        {
+            latest_usage = Some(usage.clone());
+        }
+    }
+
+    let Some(usage) = latest_usage else {
+        return json!({"available": false});
+    };
+    let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
+    json!({
+        "available": true,
+        "input_tokens": field("input_tokens"),
+        "output_tokens": field("output_tokens"),
+        "total_tokens": field("total_tokens"),
+        "input_token_details": {
+            "cached_tokens": field("cached_input_tokens"),
+        },
+        "output_token_details": {
+            "reasoning_tokens": field("reasoning_output_tokens"),
+        },
+    })
+}
+
+fn find_codex_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
+    let suffix = format!("-{session_id}.jsonl");
+    let mut directories = vec![codex_home.join("sessions")];
+    while let Some(directory) = directories.pop() {
+        let Ok(entries) = fs::read_dir(&directory) else {
+            continue;
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            if path.is_dir() {
+                directories.push(path);
+            } else if path
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| name.ends_with(&suffix))
+            {
+                return Some(path);
+            }
+        }
+    }
+    None
+}
+
+fn codex_home_dir() -> PathBuf {
+    expand_home(&env::var("CODEX_HOME").unwrap_or_else(|_| format!("{}/.codex", home_dir())))
 }
 
 fn handle_desktop_notification(arguments: Vec<String>) -> Result<()> {
@@ -1300,6 +1385,81 @@ mod tests {
             Some("thread-123")
         );
         assert_eq!(turn_id(&notification), "turn-123");
+    }
+
+    #[test]
+    fn reads_latest_cumulative_codex_token_usage() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a0b49b-d186-7172-9301-1d8037168b23";
+        let sessions_dir = codex_home.join("sessions/2026/09/18");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout_path =
+            sessions_dir.join(format!("rollout-2026-09-18T18-31-45-{session_id}.jsonl"));
+        let mut file = fs::File::create(&rollout_path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 14465,
+                            "cached_input_tokens": 9984,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 9,
+                            "reasoning_output_tokens": 0,
+                            "total_tokens": 14474,
+                        }
+                    }
+                }
+            })
+        )
+        .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 43454,
+                            "cached_input_tokens": 38144,
+                            "cache_write_input_tokens": 0,
+                            "output_tokens": 113,
+                            "reasoning_output_tokens": 12,
+                            "total_tokens": 43567,
+                        }
+                    }
+                }
+            })
+        )
+        .unwrap();
+
+        let usage = codex_token_usage(&codex_home, session_id);
+        assert_eq!(
+            usage,
+            json!({
+                "available": true,
+                "input_tokens": 43454,
+                "output_tokens": 113,
+                "total_tokens": 43567,
+                "input_token_details": {"cached_tokens": 38144},
+                "output_token_details": {"reasoning_tokens": 12},
+            })
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn missing_codex_rollout_reports_unavailable() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let usage = codex_token_usage(&codex_home, "missing-session");
+        assert_eq!(usage, json!({"available": false}));
     }
 
     #[test]
