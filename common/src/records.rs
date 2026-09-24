@@ -1,6 +1,6 @@
 use crate::agent_runtime::{
-    evidence_summary, first_mapping_by_key, first_string_by_key, first_value_by_key,
-    server_evidence, stable_id, AuditSink,
+    env_enabled, evidence_summary, first_mapping_by_key, first_string_by_key,
+    first_value_by_key, server_evidence, stable_id, AuditSink,
 };
 use crate::Result;
 use serde_json::{json, Value};
@@ -56,6 +56,7 @@ pub fn build_hook_record(
             "authority_capture_status": "unavailable",
             "authority_granted_at": Value::Null,
             "session_started_at": metadata["observed_at"],
+            "workspace": workspace_summary(&metadata["git_state"]),
             "raw_hook_hash": raw_hash,
             "raw_hook_uri": raw_uri,
         }),
@@ -75,6 +76,7 @@ pub fn build_hook_record(
                 "instruction_received_at": observed_at,
                 "context_snapshot_hash": context_ref["hash"],
                 "context_snapshot_uri": context_ref["uri"],
+                "workspace": workspace_summary(&metadata["git_state"]),
                 "declared_intent": {
                     "summary": Value::Null,
                     "detail_hash": Value::Null,
@@ -230,7 +232,80 @@ pub fn build_hook_record(
     Ok(with_hook_event(record, profile.hook_field, event_type))
 }
 
+
+pub fn workspace_summary(git_state: &Value) -> Value {
+    if !env_enabled("TALLY_WORKSPACE_DETAILS_ENABLED", true) {
+        return Value::Null;
+    }
+    let Some(path) = git_state["workspace"].as_str().filter(|p| !p.is_empty()) else {
+        return Value::Null;
+    };
+    let field = |key: &str, placeholder: &str| {
+        git_state[key]
+            .as_str()
+            .filter(|v| !v.is_empty() && *v != placeholder)
+            .map(|v| Value::String(v.to_string()))
+            .unwrap_or(Value::Null)
+    };
+    json!({
+        "path": path,
+        "name": std::path::Path::new(path).file_name().and_then(|n| n.to_str()),
+        "is_git_repo": git_state["is_git_repo"].as_bool().unwrap_or(false),
+        "branch": field("branch", "(detached)"),
+        "head": field("head", "(initial)"),
+    })
+}
+
 fn with_hook_event(mut record: Value, field: &str, event_type: &str) -> Value {
     record[field] = Value::String(event_type.to_string());
     record
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn workspace_summary_exposes_identity_not_status() {
+        let git_state = json!({
+            "is_git_repo": true,
+            "workspace": "/home/u/origo-backend",
+            "head": "a774ef8",
+            "branch": "cpu-rule-compiler",
+            "status": "# branch.oid a774ef8\n1 .M N... src/secret.rs",
+            "status_hash": "sha256:00",
+        });
+        assert_eq!(
+            workspace_summary(&git_state),
+            json!({
+                "path": "/home/u/origo-backend",
+                "name": "origo-backend",
+                "is_git_repo": true,
+                "branch": "cpu-rule-compiler",
+                "head": "a774ef8",
+            })
+        );
+    }
+
+    #[test]
+    fn workspace_summary_drops_git_placeholders() {
+        let git_state = json!({
+            "is_git_repo": true,
+            "workspace": "/r",
+            "head": "(initial)",
+            "branch": "(detached)",
+        });
+        let summary = workspace_summary(&git_state);
+        assert!(summary["branch"].is_null());
+        assert!(summary["head"].is_null());
+    }
+
+    #[test]
+    fn workspace_summary_outside_git() {
+        let summary = workspace_summary(&json!({"is_git_repo": false, "workspace": "/tmp/x"}));
+        assert_eq!(summary["path"], "/tmp/x");
+        assert_eq!(summary["is_git_repo"], false);
+        assert!(summary["branch"].is_null());
+        assert!(workspace_summary(&Value::Null).is_null());
+    }
 }
