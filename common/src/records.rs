@@ -1,9 +1,10 @@
 use crate::agent_runtime::{
     evidence_summary, first_mapping_by_key, first_string_by_key, first_value_by_key,
-    server_evidence, stable_id, AuditSink,
+    server_evidence, sha256_str, stable_id, AuditSink,
 };
 use crate::Result;
 use serde_json::{json, Value};
+use std::path::Path;
 
 pub struct HookRecordProfile {
     pub hook_field: &'static str,
@@ -227,10 +228,79 @@ pub fn build_hook_record(
             "metadata": metadata,
         }),
     };
-    Ok(with_hook_event(record, profile.hook_field, event_type))
+    Ok(with_hook_event(
+        with_workspace_context(record, metadata),
+        profile.hook_field,
+        event_type,
+    ))
+}
+
+/// Send stable folder and branch fingerprints for server-side task matching. The local event
+/// metadata also contains absolute paths, argv, environment, and git status; those remain private.
+fn with_workspace_context(mut record: Value, metadata: &Value) -> Value {
+    if !matches!(
+        record["record_type"].as_str(),
+        Some("SESSION_START" | "INSTRUCTION_RECEIVED")
+    ) {
+        return record;
+    }
+    let workspace = metadata
+        .pointer("/git_state/workspace")
+        .and_then(Value::as_str)
+        .filter(|value| !value.trim().is_empty())
+        .or_else(|| metadata.get("cwd").and_then(Value::as_str));
+    let branch = metadata
+        .pointer("/git_state/branch")
+        .and_then(Value::as_str);
+    if let Some(workspace) = workspace {
+        let canonical = Path::new(workspace)
+            .canonicalize()
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|_| workspace.trim_end_matches('/').to_string());
+        record["metadata"] = json!({
+            "git_state": {
+                "workspace": sha256_str(&canonical),
+                "branch": branch.map(sha256_str),
+            }
+        });
+    }
+    record
 }
 
 fn with_hook_event(mut record: Value, field: &str, event_type: &str) -> Value {
     record[field] = Value::String(event_type.to_string());
     record
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn sends_workspace_without_private_local_metadata() {
+        let metadata = json!({
+            "cwd": "/work/project",
+            "git_state": {"workspace": "/work/project", "branch": "feature"},
+            "environment": {"SECRET": "never-send-this"},
+            "argv": ["private-argument"],
+        });
+        for record_type in ["SESSION_START", "INSTRUCTION_RECEIVED"] {
+            let record = with_workspace_context(json!({"record_type": record_type}), &metadata);
+            assert_eq!(
+                record["metadata"]["git_state"]["workspace"],
+                sha256_str("/work/project")
+            );
+            assert_eq!(
+                record["metadata"]["git_state"]["branch"],
+                sha256_str("feature")
+            );
+            let serialized = record.to_string();
+            assert!(!serialized.contains("/work/project"));
+            assert!(!serialized.contains("feature"));
+            assert!(!serialized.contains("never-send-this"));
+            assert!(!serialized.contains("private-argument"));
+        }
+        let action = with_workspace_context(json!({"record_type": "ACTION_TAKEN"}), &metadata);
+        assert!(action.get("metadata").is_none());
+    }
 }
