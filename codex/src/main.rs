@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::env;
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, BufReader, Read, Write};
+use std::io::{self, Read, Seek, SeekFrom, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
@@ -181,37 +181,12 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
     let Some(rollout_path) = find_codex_rollout_file(codex_home, session_id) else {
         return json!({"available": false});
     };
-    let file = match fs::File::open(&rollout_path) {
+    let mut file = match fs::File::open(&rollout_path) {
         Ok(file) => file,
         Err(_) => return json!({"available": false}),
     };
 
-    let mut latest_usage: Option<Value> = None;
-    for line in BufReader::new(file)
-        .lines()
-        .map_while(std::result::Result::ok)
-    {
-        let Ok(entry) = serde_json::from_str::<Value>(&line) else {
-            continue;
-        };
-        if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
-            continue;
-        }
-        let Some(payload) = entry.get("payload") else {
-            continue;
-        };
-        if payload.get("type").and_then(Value::as_str) != Some("token_count") {
-            continue;
-        }
-        if let Some(usage) = payload
-            .get("info")
-            .and_then(|info| info.get("total_token_usage"))
-        {
-            latest_usage = Some(usage.clone());
-        }
-    }
-
-    let Some(usage) = latest_usage else {
+    let Some(usage) = latest_codex_total_token_usage(&mut file) else {
         return json!({"available": false});
     };
     let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
@@ -229,8 +204,47 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
     })
 }
 
+fn latest_codex_total_token_usage(file: &mut fs::File) -> Option<Value> {
+    const CHUNK_SIZE: usize = 64 * 1024;
+
+    let mut position = file.seek(SeekFrom::End(0)).ok()?;
+    let mut partial_line = Vec::new();
+    while position > 0 {
+        let read_len = usize::try_from(position.min(CHUNK_SIZE as u64)).ok()?;
+        position -= read_len as u64;
+        file.seek(SeekFrom::Start(position)).ok()?;
+
+        let mut chunk = vec![0; read_len];
+        file.read_exact(&mut chunk).ok()?;
+        chunk.extend_from_slice(&partial_line);
+
+        let mut line_end = chunk.len();
+        while let Some(newline) = chunk[..line_end].iter().rposition(|byte| *byte == b'\n') {
+            if let Some(usage) = codex_total_token_usage_from_line(&chunk[newline + 1..line_end]) {
+                return Some(usage);
+            }
+            line_end = newline;
+        }
+        partial_line = chunk[..line_end].to_vec();
+    }
+
+    codex_total_token_usage_from_line(&partial_line)
+}
+
+fn codex_total_token_usage_from_line(line: &[u8]) -> Option<Value> {
+    let entry = serde_json::from_slice::<Value>(line).ok()?;
+    if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
+        return None;
+    }
+    let payload = entry.get("payload")?;
+    if payload.get("type").and_then(Value::as_str) != Some("token_count") {
+        return None;
+    }
+    payload.get("info")?.get("total_token_usage").cloned()
+}
+
 fn find_codex_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
-    let suffix = format!("-{session_id}.jsonl");
+    let session_marker = format!("-{session_id}");
     let mut directories = vec![codex_home.join("sessions")];
     while let Some(directory) = directories.pop() {
         let Ok(entries) = fs::read_dir(&directory) else {
@@ -238,12 +252,18 @@ fn find_codex_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            if path.is_dir() {
+            let Ok(file_type) = entry.file_type() else {
+                continue;
+            };
+            if file_type.is_dir() {
                 directories.push(path);
-            } else if path
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| name.ends_with(&suffix))
+            } else if file_type.is_file()
+                && path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .and_then(|name| name.strip_suffix(".jsonl"))
+                    .and_then(|stem| stem.rsplit_once(&session_marker))
+                    .is_some_and(|(_, trailing)| trailing.is_empty() || trailing.starts_with('_'))
             {
                 return Some(path);
             }
@@ -1438,6 +1458,18 @@ mod tests {
             })
         )
         .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "agent_message",
+                    "message": "x".repeat(70 * 1024),
+                }
+            })
+        )
+        .unwrap();
 
         let usage = codex_token_usage(&codex_home, session_id);
         assert_eq!(
@@ -1451,6 +1483,44 @@ mod tests {
                 "output_token_details": {"reasoning_tokens": 12},
             })
         );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn reads_codex_usage_from_collision_suffixed_rollout() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a0ae4a-48fb-7570-8c86-b59934a2cdfe";
+        let sessions_dir = codex_home.join("sessions/2026/09/17");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout_path = sessions_dir.join(format!(
+            "rollout-2026-09-17T23-28-00-{session_id}_01a0b10e-0282-7190-b9a8-456dba158c25.jsonl"
+        ));
+        let mut file = fs::File::create(&rollout_path).unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {
+                        "total_token_usage": {
+                            "input_tokens": 100,
+                            "cached_input_tokens": 75,
+                            "output_tokens": 25,
+                            "reasoning_output_tokens": 5,
+                            "total_tokens": 125,
+                        }
+                    }
+                }
+            })
+        )
+        .unwrap();
+
+        let usage = codex_token_usage(&codex_home, session_id);
+        assert_eq!(usage["available"], true);
+        assert_eq!(usage["total_tokens"], 125);
 
         fs::remove_dir_all(codex_home).unwrap();
     }
