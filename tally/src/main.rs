@@ -19,6 +19,7 @@ fn run() -> Result<()> {
         Some(argument) if argument.starts_with("-psn_") => run_gui(),
         Some("codex") => run_client(tally_codex::dispatch(args.collect())),
         Some("claude") => run_client(tally_claude::dispatch(args.collect())),
+        Some("cursor") => run_client(tally_cursor::dispatch(args.collect())),
         Some("forward-pending") => {
             let state_dir = env::var("TALLY_STATE_DIR")
                 .map(PathBuf::from)
@@ -29,6 +30,7 @@ fn run() -> Result<()> {
             let client = client_from_environment()?;
             run_client(match client {
                 "codex" => tally_codex::dispatch(vec!["heartbeat-daemon".to_string()]),
+                "cursor" => tally_cursor::dispatch(vec!["heartbeat-daemon".to_string()]),
                 _ => tally_claude::dispatch(vec!["heartbeat-daemon".to_string()]),
             })
         }
@@ -90,10 +92,21 @@ fn run_gui() -> Result<()> {
                 availability_detail: None,
                 detected_version: None,
             },
+            tally_common::GuiClient {
+                id: "cursor",
+                product: "Cursor",
+                config_path: tally_cursor::default_config_path(),
+                state_dir: tally_cursor::default_state_dir(),
+                installed_binary_path: tally_cursor::default_installed_binary_path(),
+                available: true,
+                availability_detail: None,
+                detected_version: None,
+            },
         ],
         |client, options| match client {
             "codex" => tally_codex::install_desktop_hooks(options),
             "claude" => tally_claude::install_desktop_hooks(options),
+            "cursor" => tally_cursor::install_desktop_hooks(options),
             _ => Err(format!("unknown client: {client}").into()),
         },
         |client, config_path, remove_data| match client {
@@ -101,11 +114,15 @@ fn run_gui() -> Result<()> {
             "claude" => {
                 tally_claude::uninstall_desktop_hooks_with_options(config_path, remove_data)
             }
+            "cursor" => {
+                tally_cursor::uninstall_desktop_hooks_with_options(config_path, remove_data)
+            }
             _ => Err(format!("unknown client: {client}").into()),
         },
         |client, config_path| match client {
             "codex" => Ok(tally_codex::installation_snapshot_paths(config_path)),
             "claude" => Ok(tally_claude::installation_snapshot_paths(config_path)),
+            "cursor" => Ok(tally_cursor::installation_snapshot_paths(config_path)),
             _ => Err(format!("unknown client: {client}").into()),
         },
     )
@@ -117,6 +134,8 @@ fn client_from_environment() -> Result<&'static str> {
         Ok("codex")
     } else if agent.contains("claude") {
         Ok("claude")
+    } else if agent.contains("cursor") {
+        Ok("cursor")
     } else {
         Err("could not identify the hook client".into())
     }

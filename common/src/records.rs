@@ -45,7 +45,7 @@ pub fn build_hook_record(
     let observed_at = metadata["observed_at"].clone();
 
     let record = match event_type {
-        "SessionStart" => json!({
+        "SessionStart" | "sessionStart" => json!({
             "record_type": "SESSION_START",
             "schema_version": "0.2",
             "session_id": identity.session_id,
@@ -60,7 +60,7 @@ pub fn build_hook_record(
             "raw_hook_hash": raw_hash,
             "raw_hook_uri": raw_uri,
         }),
-        "UserPromptSubmit" => {
+        "UserPromptSubmit" | "beforeSubmitPrompt" => {
             let evidence =
                 server_evidence(&prompt.map(Value::String).unwrap_or_else(|| payload.clone()));
             let summary = evidence_summary(&evidence, profile.prompt_summary_label);
@@ -86,7 +86,12 @@ pub fn build_hook_record(
                 "server_evidence": evidence,
             })
         }
-        "PreToolUse" | "PermissionRequest" => {
+        "PreToolUse"
+        | "PermissionRequest"
+        | "preToolUse"
+        | "beforeShellExecution"
+        | "beforeMCPExecution"
+        | "beforeReadFile" => {
             let tool_params = first_mapping_by_key(payload, profile.tool_param_keys)
                 .cloned()
                 .unwrap_or_else(|| payload.clone());
@@ -100,7 +105,7 @@ pub fn build_hook_record(
                 "action_id": identity.action_id,
                 "instruction_id": first_string_by_key(payload, profile.instruction_id_keys)
                     .unwrap_or_else(|| stable_id("instr", &Value::String(identity.session_id.to_string()))),
-                "action_type": if event_type == "PermissionRequest" { "decision" } else { "tool_call" },
+                "action_type": if matches!(event_type, "PermissionRequest" | "beforeShellExecution" | "beforeMCPExecution" | "beforeReadFile") { "decision" } else { "tool_call" },
                 "tool": {
                     "server": first_string_by_key(payload, profile.tool_server_keys)
                         .unwrap_or_else(|| profile.default_tool_server.to_string()),
@@ -120,7 +125,7 @@ pub fn build_hook_record(
                 "raw_hook_uri": raw_ref["uri"],
             })
         }
-        "PostToolUse" => {
+        "PostToolUse" | "postToolUse" | "postToolUseFailure" => {
             let has_error = first_string_by_key(payload, profile.error_keys).is_some();
             let evidence_source = first_value_by_key(
                 payload,
@@ -160,7 +165,7 @@ pub fn build_hook_record(
                 "server_evidence": evidence,
             })
         }
-        "Stop" => {
+        "Stop" | "stop" => {
             let evidence_source = first_value_by_key(
                 payload,
                 &[
@@ -184,7 +189,7 @@ pub fn build_hook_record(
                 "server_evidence": server_evidence(evidence_source),
             })
         }
-        "SessionEnd" => json!({
+        "SessionEnd" | "sessionEnd" => json!({
             "record_type": "SESSION_END",
             "schema_version": "0.2",
             "session_id": identity.session_id,
@@ -195,10 +200,17 @@ pub fn build_hook_record(
             "session_ended_at": observed_at,
             "session_end_reason": first_string_by_key(payload, &["reason"]),
         }),
-        "SubagentStart" | "SubagentStop" => {
+        "SubagentStart" | "SubagentStop" | "subagentStart" | "subagentStop" => {
+            let is_stop = matches!(event_type, "SubagentStop" | "subagentStop");
             let receiver_id = first_string_by_key(
                 payload,
-                &["subagent_id", "subagentId", "agent_name", "agent_type"],
+                &[
+                    "subagent_id",
+                    "subagentId",
+                    "agent_name",
+                    "agent_type",
+                    "subagent_type",
+                ],
             );
             let handoff_id = stable_id(
                 "handoff",
@@ -211,11 +223,11 @@ pub fn build_hook_record(
                 "handoff_id": handoff_id,
                 "emitting_party": "sender",
                 "sender": {"agent_id": identity.agent_id, "org_id": Value::Null, "signature": Value::Null, "signature_status": "unavailable"},
-                "receiver": {"agent_id": receiver_id, "org_id": Value::Null, "signature": Value::Null, "acknowledged_at": if event_type == "SubagentStop" { observed_at.clone() } else { Value::Null }},
+                "receiver": {"agent_id": receiver_id, "org_id": Value::Null, "signature": Value::Null, "acknowledged_at": if is_stop { observed_at.clone() } else { Value::Null }},
                 "payload_hash": raw_hash,
                 "payload_uri": raw_uri,
                 "handoff_timestamp": observed_at,
-                "acknowledgement_status": if event_type == "SubagentStop" { "acknowledged" } else { "pending" },
+                "acknowledgement_status": if is_stop { "acknowledged" } else { "pending" },
             })
         }
         _ => json!({

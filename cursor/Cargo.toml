@@ -1,16 +1,16 @@
 [package]
-name = "tally"
+name = "tally-cursor"
+autobins = false
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 publish.workspace = true
 license.workspace = true
 
-[dependencies]
-tally-claude = { path = "../claude" }
-tally-codex = { path = "../codex" }
-tally-cursor = { path = "../cursor" }
-tally-common.workspace = true
+[lib]
+path = "src/main.rs"
 
-[build-dependencies]
-winres = "0.1.12"
+[dependencies]
+fs2.workspace = true
+serde_json.workspace = true
+tally-common.workspace = true

@@ -141,7 +141,7 @@ document.getElementById("installForm").addEventListener("submit", async (event) 
   show("installing");
   try {
     const selected = selectedClients();
-    if (selected.length === 0) throw new Error("Choose Codex, Claude Code, or both.");
+    if (selected.length === 0) throw new Error("Choose at least one client.");
     const unavailable = selected
       .map((selection) => clients.find((client) => client.id === selection.id))
       .filter((client) => !client.available);
@@ -197,7 +197,7 @@ document.getElementById("uninstallButton").addEventListener("click", () => {
   error.hidden = true;
   pendingRemovalClients = selectedClients();
   if (pendingRemovalClients.length === 0) {
-    error.textContent = "Choose Codex, Claude Code, or both.";
+    error.textContent = "Choose at least one client.";
     error.hidden = false;
     return;
   }

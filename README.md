@@ -1,8 +1,9 @@
 # Tally
 
-Tally connects Codex and Claude Code to OpenOrigins. It writes structured audit
-records to a small append-only segmented journal, then forwards them in capture
-order using an Agent API key from your OpenOrigins dashboard.
+Tally connects Codex, Claude Code, and Cursor to OpenOrigins. It writes
+structured audit records to a small append-only segmented journal, then
+forwards them in capture order using an Agent API key from your OpenOrigins
+dashboard.
 
 ## Install
 
@@ -12,6 +13,8 @@ Agent API key. Keep that page open so you can paste the key into Tally.
 For Codex, install the [Codex CLI](https://developers.openai.com/codex/cli)
 first and confirm that `codex --version` works in Terminal or PowerShell. Tally
 uses Codex's native lifecycle hooks and does not bypass Codex's hook review.
+Cursor needs no separate CLI: Tally writes into Cursor's own `hooks.json` and
+Cursor picks the change up the next time it runs a hook.
 
 ### macOS
 
@@ -20,8 +23,8 @@ uses Codex's native lifecycle hooks and does not bypass Codex's hook review.
    chip, or `tally-macos-x86_64.dmg` for an Intel Mac. **About This Mac** shows
    whether your computer has a **Chip** or an Intel **Processor**.
 3. Open the downloaded `.dmg`, drag **Tally** to **Applications**, and open Tally.
-4. Choose Codex, Claude Code, or both. Paste the Agent API key and select
-   **Install Tally**.
+4. Choose Codex, Claude Code, Cursor, or any combination. Paste the Agent API
+   key and select **Install Tally**.
 
 The macOS app and disk image are signed by OpenOrigins and notarized by Apple.
 
@@ -29,8 +32,8 @@ The macOS app and disk image are signed by OpenOrigins and notarized by Apple.
 
 1. Open the [latest Tally release](https://github.com/OpenOrigins/tally/releases/latest).
 2. Under **Assets**, download and open `tally-windows-x86_64.exe`.
-3. Choose Codex, Claude Code, or both. Paste the Agent API key and select
-   **Install Tally**.
+3. Choose Codex, Claude Code, Cursor, or any combination. Paste the Agent API
+   key and select **Install Tally**.
 
 The Windows installer is not yet publisher-signed. SmartScreen may show
 **Windows protected your PC**; select **More info**, then **Run anyway**. A
@@ -98,12 +101,14 @@ verification is documented under [docs](docs/).
 
 Tally is tested with Codex CLI/Desktop 0.149.1 and Claude Code 2.1.223. It is
 expected to remain compatible with Codex versions that support lifecycle hooks
-in `config.toml` and the `notify` callback, and Claude Code versions that support
-command hooks.
+in `config.toml` and the `notify` callback, Claude Code versions that support
+command hooks, and Cursor versions that support the hooks documented at
+[cursor.com/docs/agent/hooks](https://cursor.com/docs/agent/hooks).
 
 Codex requires hook commands to be reviewed and trusted in Codex CLI before
 they run. Tally writes the hook definitions but never writes Codex's trust
-hashes or bypasses this approval.
+hashes or bypasses this approval. Cursor's hooks run without a separate trust
+step.
 
 ## LangGraph Integration
 
