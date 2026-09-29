@@ -7,6 +7,7 @@ use serde_json::{json, Value};
 use std::path::Path;
 
 pub struct HookRecordProfile {
+    pub agent_name: &'static str,
     pub hook_field: &'static str,
     pub lifecycle_record_type: &'static str,
     pub default_tool_server: &'static str,
@@ -244,6 +245,7 @@ pub fn build_hook_record(
         with_workspace_context(record, metadata),
         profile.hook_field,
         event_type,
+        profile.agent_name,
     ))
 }
 
@@ -279,8 +281,9 @@ fn with_workspace_context(mut record: Value, metadata: &Value) -> Value {
     record
 }
 
-fn with_hook_event(mut record: Value, field: &str, event_type: &str) -> Value {
+fn with_hook_event(mut record: Value, field: &str, event_type: &str, agent_name: &str) -> Value {
     record[field] = Value::String(event_type.to_string());
+    record["agent_name"] = Value::String(agent_name.to_string());
     record
 }
 

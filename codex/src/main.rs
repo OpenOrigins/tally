@@ -827,6 +827,7 @@ fn build_tally_record(
     let action = action_id(payload);
     let turn = turn_id(payload);
     let profile = tally_common::records::HookRecordProfile {
+        agent_name: "Codex",
         hook_field: "codex_hook_event",
         lifecycle_record_type: "CODEX_LIFECYCLE",
         default_tool_server: "codex",
