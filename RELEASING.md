@@ -1,7 +1,8 @@
 # Releasing Tally
 
-A `v*` tag runs tests and builds the same graphical installer for Codex and
-Claude Code on macOS arm64, macOS Intel, Windows x86_64, and Linux x86_64.
+A `v*` tag runs tests and builds the same graphical installer for Codex,
+Claude Code, and Cursor on macOS arm64, macOS Intel, Windows x86_64, and
+Linux x86_64.
 
 Each release contains only:
 
