@@ -32,6 +32,7 @@ EVENTS = [
     "SessionEnd",
 ]
 INSTALLED_EVENT_COUNT = 11
+CURSOR_INSTALLED_EVENT_COUNT = 13
 EXPECTED_TYPES = [
     "ACTION_TAKEN",
     "INSTRUCTION_RECEIVED",
@@ -1179,10 +1180,13 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
     home = root / "combined" / "home"
     codex_config = home / ".codex" / "config.toml"
     claude_config = home / ".claude" / "settings.json"
+    cursor_config = home / ".cursor" / "hooks.json"
     codex_config.parent.mkdir(parents=True, exist_ok=True)
     codex_config.write_text('model = "combined"\n', encoding="utf-8")
     claude_config.parent.mkdir(parents=True, exist_ok=True)
     claude_config.write_text(json.dumps({"hooks": {}}), encoding="utf-8")
+    cursor_config.parent.mkdir(parents=True, exist_ok=True)
+    cursor_config.write_text(json.dumps({"version": 1, "hooks": {}}), encoding="utf-8")
 
     env = os.environ.copy()
     env.update({
@@ -1208,7 +1212,7 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
         key = secrets.token_urlsafe(32)
         result = gui_install(
             source_binary,
-            ["codex", "claude"],
+            ["codex", "claude", "cursor"],
             env,
             root,
             key,
@@ -1222,9 +1226,12 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
         assert Path(clients["claude"]["logsPath"]).resolve() == (
             home / ".tally-claude" / "logs"
         ).resolve()
-        handshakes = server.wait_for("/v1/tally/onboarding/client-connected", count=2)
-        assert {request["body"]["source"] for request in handshakes[-2:]} == {
-            "codex", "claude-code"
+        assert Path(clients["cursor"]["logsPath"]).resolve() == (
+            home / ".tally-cursor" / "logs"
+        ).resolve()
+        handshakes = server.wait_for("/v1/tally/onboarding/client-connected", count=3)
+        assert {request["body"]["source"] for request in handshakes[-3:]} == {
+            "codex", "claude-code", "cursor"
         }
         assert (
             len(tally_commands(read_client_config(codex_config, "codex")))
@@ -1234,6 +1241,127 @@ def smoke_combined_install(source_binary: Path, root: Path) -> None:
             len(tally_commands(json.loads(claude_config.read_text(encoding="utf-8"))))
             == INSTALLED_EVENT_COUNT
         )
+        cursor_hooks = json.loads(cursor_config.read_text(encoding="utf-8"))["hooks"]
+        assert sum(len(entries) for entries in cursor_hooks.values()) == CURSOR_INSTALLED_EVENT_COUNT
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+
+def smoke_cursor_install(source_binary: Path, root: Path) -> None:
+    home = root / "cursor" / "home with spaces"
+    config_path = home / ".cursor" / "hooks.json"
+    config_path.parent.mkdir(parents=True)
+    config_path.write_text(
+        json.dumps({
+            "version": 1,
+            "hooks": {
+                "sessionStart": [{"command": "echo keep", "type": "command"}],
+            },
+        }),
+        encoding="utf-8",
+    )
+    state_dir = config_path.parent / "tally" / "logs" / ".state"
+    env = os.environ.copy()
+    env.update({
+        "HOME": str(home),
+        "USERPROFILE": str(home),
+        "TALLY_LOG_ROOT": str(root / "cursor" / "logs"),
+        "TALLY_WORKSPACE": str(root),
+        "TALLY_RUN_ID": "native-cursor-smoke",
+        "TALLY_HOOK_HEARTBEAT_ENABLED": "0",
+    })
+    if os.name == "nt":
+        env["LOCALAPPDATA"] = str(home / "AppData" / "Local")
+    env.pop("CURSOR_HOOKS_PATH", None)
+    env.pop("TALLY_STATE_DIR", None)
+    installed_binary = installed_binary_path(config_path, "cursor", env)
+    server = CaptureServer([
+        config_path,
+        state_dir / "api_key.txt",
+        state_dir / "config.json",
+        installed_binary,
+    ])
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        api_key = secrets.token_urlsafe(32)
+        gui_install(
+            source_binary,
+            "cursor",
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+        )
+        assert server.wait_for("/v1/tally/onboarding/client-connected")[-1]["body"] == {
+            "source": "cursor"
+        }
+        assert installed_binary.exists()
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert config["version"] == 1
+        assert config["hooks"]["sessionStart"][0]["command"] == "echo keep"
+        cursor_hooks = [
+            entry
+            for entries in config["hooks"].values()
+            for entry in entries
+            if "tally-cursor" in entry["command"]
+        ]
+        assert len(cursor_hooks) == CURSOR_INSTALLED_EVENT_COUNT
+        assert all(command_references_path(hook["command"], installed_binary) for hook in cursor_hooks)
+
+        pre_tool = next(
+            entry["command"] for entry in config["hooks"]["preToolUse"]
+            if "tally-cursor" in entry["command"]
+        )
+        completed = subprocess.run(
+            pre_tool,
+            input=json.dumps({
+                "conversation_id": "native-cursor-session",
+                "tool_use_id": "tool-1",
+                "tool_name": "Shell",
+                "tool_input": {"command": "true"},
+            }),
+            text=True,
+            env=env,
+            shell=True,
+            capture_output=True,
+            timeout=30,
+        )
+        assert completed.returncode == 0, completed.stderr
+        assert json.loads(completed.stdout) == {"permission": "allow"}
+        forwarded = server.wait_for("/v1/tally/logs")[-1]
+        assert header(forwarded, "x-api-key") == api_key
+        assert forwarded["body"]["record_type"] == "ACTION_TAKEN"
+        assert forwarded["body"]["session_id"] == "native-cursor-session"
+
+        gui_install(
+            source_binary,
+            "cursor",
+            env,
+            root,
+            api_key,
+            server.api_url,
+            expect_connected=True,
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert len([
+            entry
+            for entries in config["hooks"].values()
+            for entry in entries
+            if "tally-cursor" in entry["command"]
+        ]) == CURSOR_INSTALLED_EVENT_COUNT, "Cursor reinstall duplicated hooks"
+        gui_uninstall(
+            source_binary, "cursor", env, root, config_path, remove_data=False
+        )
+        config = json.loads(config_path.read_text(encoding="utf-8"))
+        assert config["hooks"] == {
+            "sessionStart": [{"command": "echo keep", "type": "command"}]
+        }
+        assert not installed_binary.exists()
+        assert not (state_dir / "api_key.txt").exists()
     finally:
         server.shutdown()
         server.server_close()
@@ -1527,6 +1655,7 @@ def main() -> None:
         smoke_gui_requires_codex_cli(args.tally.resolve(), root)
         smoke(args.tally.resolve(), "codex", root)
         smoke(args.tally.resolve(), "claude", root)
+        smoke_cursor_install(args.tally.resolve(), root)
         smoke_combined_install(args.tally.resolve(), root)
         smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "codex")
         smoke_heartbeat_session_lifecycle(args.tally.resolve(), root, "claude")

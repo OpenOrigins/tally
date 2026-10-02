@@ -319,7 +319,13 @@ jobs:
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
-            Tally installs audit logging for Codex and Claude Code from one small graphical installer.
+            Tally installs audit logging for Codex, Claude Code, and Cursor from one graphical installer.
+
+            ## What's new in 0.1.14
+
+            - Install Cursor hooks from the same app as Codex and Claude Code.
+            - Capture cumulative Codex token usage and workspace fingerprints in Tally records.
+            - Resolve working directories in Claude Code records and use the new GitHub monitor LangGraph example.
 
             ## Install
 
@@ -340,13 +346,13 @@ jobs:
 
             **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`. The universal wheel supports Python 3.10 through 3.14. See the [LangGraph guide](https://github.com/OpenOrigins/tally/tree/${{ github.ref_name }}/integrations/langgraph) for setup.
 
-            Choose Codex, Claude Code, or both in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
+            Choose Codex, Claude Code, Cursor, or any combination in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 
             ## Compatibility
 
             Tested with Codex CLI/Desktop `${{ env.TESTED_CODEX_VERSION }}` and Claude Code `${{ env.TESTED_CLAUDE_VERSION }}`.
 
-            Tally is expected to remain compatible with Codex versions that support lifecycle hooks in `config.toml` and the `notify` callback, and Claude Code versions that support command hooks. Tally never writes Codex hook trust hashes or bypasses Codex CLI approval.
+            Tally is expected to remain compatible with Codex versions that support lifecycle hooks in `config.toml` and the `notify` callback, Claude Code versions that support command hooks, and Cursor versions that support its documented agent hooks. Tally never writes Codex hook trust hashes or bypasses Codex CLI approval.
 
       - name: Open Homebrew cask update pull request
         if: github.event_name == 'push'
@@ -360,14 +366,13 @@ jobs:
           if git diff --quiet -- Casks/tally.rb; then
             exit 0
           fi
-          cask_branch="chore/homebrew-${RELEASE_TAG#v}-${GITHUB_RUN_ID}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          release_version="${RELEASE_TAG#v}"
+          cask_branch="homebrew-${release_version//./-}"
+          git config user.name "Ekaterina Pavlova"
+          git config user.email "ekaterina@openorigins.com"
           git checkout -b "$cask_branch"
           git add Casks/tally.rb
-          git commit \
-            -m "Update Homebrew cask for $RELEASE_TAG" \
-            -m "Signed-off-by: Ekaterina Pavlova <ekaterina@openorigins.com>"
+          git commit -s -m "Update Homebrew cask for $RELEASE_TAG"
           git push --set-upstream origin "$cask_branch"
           gh pr create \
             --base dev \
@@ -390,7 +395,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ inputs.release_tag }}
           RELEASE_NOTES: |
-            Tally installs audit logging for Codex and Claude Code from one graphical installer.
+            Tally installs audit logging for Codex, Claude Code, and Cursor from one graphical installer.
 
             ## Install
 
@@ -402,13 +407,13 @@ jobs:
             - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
             - **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`.
 
-            Choose Codex, Claude Code, or both. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
+            Choose Codex, Claude Code, Cursor, or any combination. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 
             ## Compatibility
 
             Tested with Codex CLI/Desktop `${{ env.TESTED_CODEX_VERSION }}` and Claude Code `${{ env.TESTED_CLAUDE_VERSION }}`.
 
-            Tally is expected to remain compatible with Codex versions that support lifecycle hooks in `config.toml` and the `notify` callback, and Claude Code versions that support command hooks. Tally never writes Codex hook trust hashes or bypasses Codex CLI approval.
+            Tally is expected to remain compatible with Codex versions that support lifecycle hooks in `config.toml` and the `notify` callback, Claude Code versions that support command hooks, and Cursor versions that support its documented agent hooks. Tally never writes Codex hook trust hashes or bypasses Codex CLI approval.
 
             macOS apps and disk images are signed with OpenOrigins' Apple Developer ID and notarized by Apple. These assets were refreshed from tested commit `${{ github.sha }}` while retaining this existing release URL.
         run: gh release edit "$RELEASE_TAG" --notes "$RELEASE_NOTES" --repo "$GITHUB_REPOSITORY"

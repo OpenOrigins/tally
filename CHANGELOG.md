@@ -4,6 +4,20 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.14 - 2026-10-02
+
+### Added
+
+- Added Cursor installation and hooks to the graphical installer alongside
+  Codex and Claude Code.
+- Added cumulative Codex token usage and workspace fingerprints to Tally
+  records, improving attribution of sessions to the right workspace.
+- Added a tested GitHub monitor example for the LangGraph integration.
+
+### Changed
+
+- Resolve the working directory in Claude Code records from the hook context.
+
 ## 0.1.13 - 2026-09-14
 
 ### Added
