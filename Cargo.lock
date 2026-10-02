@@ -698,6 +698,7 @@ dependencies = [
  "tally-claude",
  "tally-codex",
  "tally-common",
+ "tally-cursor",
  "winres",
 ]
 
@@ -735,6 +736,15 @@ dependencies = [
  "ureq",
  "url",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "tally-cursor"
+version = "0.1.13"
+dependencies = [
+ "fs2",
+ "serde_json",
+ "tally-common",
 ]
 
 [[package]]

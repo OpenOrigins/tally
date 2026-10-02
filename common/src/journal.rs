@@ -100,6 +100,7 @@ fn validate_record_integrity(record: &Value) -> Result<()> {
         "HEARTBEAT",
         "CODEX_LIFECYCLE",
         "CLAUDE_LIFECYCLE",
+        "CURSOR_LIFECYCLE",
     ];
     let object = record
         .as_object()
