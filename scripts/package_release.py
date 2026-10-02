@@ -211,7 +211,20 @@ class MacSigning:
             "--output-format",
             "json",
         ]
-        result = subprocess.run(command, check=True, text=True, capture_output=True)
+        result = subprocess.run(command, check=False, text=True, capture_output=True)
+        if result.returncode:
+            details = " ".join((result.stderr or result.stdout).split())
+            for private_value in (
+                self.notary_key_path,
+                self.notary_key_id,
+                self.notary_issuer_id,
+            ):
+                if private_value:
+                    details = details.replace(private_value, "[redacted]")
+            raise SystemExit(
+                f"Apple notarization submission failed (exit {result.returncode}): "
+                f"{details[:1200] or 'no diagnostic returned'}"
+            )
         response = json.loads(result.stdout)
         submission_id = response.get("id", "unknown")
         status = response.get("status", "unknown")
