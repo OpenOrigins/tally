@@ -7,7 +7,7 @@ cask "tally" do
 
   url "https://github.com/OpenOrigins/tally/releases/download/v#{version}/tally-macos-#{arch}.dmg"
   name "Tally"
-  desc "Install audit logging for Codex and Claude Code"
+  desc "Install audit logging for Codex, Claude Code, and Cursor"
   homepage "https://github.com/OpenOrigins/tally"
 
   depends_on :macos

@@ -67,7 +67,7 @@ def render_cask(version: str, release_tag: str, checksums: dict[str, str]) -> st
 
   url "https://github.com/{REPOSITORY}/releases/download/{tag_component}/tally-macos-#{{arch}}.dmg"
   name "Tally"
-  desc "Install audit logging for Codex and Claude Code"
+  desc "Install audit logging for Codex, Claude Code, and Cursor"
   homepage "https://github.com/{REPOSITORY}"
 
   depends_on :macos
