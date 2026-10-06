@@ -4,6 +4,16 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Codex token usage now follows the newest rollout file for a thread, so
+  threads that Codex Desktop resumed into a continuation file are no longer
+  undercounted.
+- Codex records without token usage now report a `reason`:
+  `rollout_not_found` for threads Codex never persisted (ephemeral runs and
+  Desktop helper threads), or `token_count_not_found` when the rollout has
+  no usage yet.
+
 ## 0.1.14 - 2026-10-02
 
 ### Added

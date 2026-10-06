@@ -177,17 +177,22 @@ fn record_payload_event(
 /// Returns the latest cumulative token usage reported in the Codex CLI
 /// rollout file for the given session, in the shape of the OpenAI Responses
 /// API `usage` object.
+///
+/// When usage is unavailable, `reason` says why: `rollout_not_found` means
+/// Codex never persisted the thread (ephemeral threads such as
+/// `codex exec --ephemeral` and Codex Desktop's title/suggestion helpers),
+/// `token_count_not_found` means the rollout exists but has no usage yet.
 fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
-    let Some(rollout_path) = find_codex_rollout_file(codex_home, session_id) else {
-        return json!({"available": false});
-    };
-    let mut file = match fs::File::open(&rollout_path) {
-        Ok(file) => file,
-        Err(_) => return json!({"available": false}),
-    };
+    let rollout_paths = find_codex_rollout_files(codex_home, session_id);
+    if rollout_paths.is_empty() {
+        return json!({"available": false, "reason": "rollout_not_found"});
+    }
 
-    let Some(usage) = latest_codex_total_token_usage(&mut file) else {
-        return json!({"available": false});
+    let Some(usage) = rollout_paths.iter().find_map(|path| {
+        let mut file = fs::File::open(path).ok()?;
+        latest_codex_total_token_usage(&mut file)
+    }) else {
+        return json!({"available": false, "reason": "token_count_not_found"});
     };
     let field = |key: &str| usage.get(key).and_then(Value::as_u64).unwrap_or(0);
     json!({
@@ -243,8 +248,13 @@ fn codex_total_token_usage_from_line(line: &[u8]) -> Option<Value> {
     payload.get("info")?.get("total_token_usage").cloned()
 }
 
-fn find_codex_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBuf> {
+/// Returns every rollout file for the session, newest first. When Codex
+/// Desktop resumes a closed thread it starts a continuation file named
+/// `rollout-<timestamp>-<thread-id>_<new-id>.jsonl`; file names begin with
+/// their creation timestamp, so they sort chronologically.
+fn find_codex_rollout_files(codex_home: &Path, session_id: &str) -> Vec<PathBuf> {
     let session_marker = format!("-{session_id}");
+    let mut matches = Vec::new();
     let mut directories = vec![codex_home.join("sessions")];
     while let Some(directory) = directories.pop() {
         let Ok(entries) = fs::read_dir(&directory) else {
@@ -265,11 +275,12 @@ fn find_codex_rollout_file(codex_home: &Path, session_id: &str) -> Option<PathBu
                     .and_then(|stem| stem.rsplit_once(&session_marker))
                     .is_some_and(|(_, trailing)| trailing.is_empty() || trailing.starts_with('_'))
             {
-                return Some(path);
+                matches.push(path);
             }
         }
     }
-    None
+    matches.sort_by(|left, right| right.file_name().cmp(&left.file_name()));
+    matches
 }
 
 fn codex_home_dir() -> PathBuf {
@@ -1526,11 +1537,87 @@ mod tests {
         fs::remove_dir_all(codex_home).unwrap();
     }
 
+    fn write_codex_token_count(path: &Path, total_tokens: u64) {
+        let mut file = OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)
+            .unwrap();
+        writeln!(
+            file,
+            "{}",
+            json!({
+                "type": "event_msg",
+                "payload": {
+                    "type": "token_count",
+                    "info": {"total_token_usage": {"total_tokens": total_tokens}}
+                }
+            })
+        )
+        .unwrap();
+    }
+
+    #[test]
+    fn reads_codex_usage_from_newest_continuation_rollout() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a10fa1-901e-7141-bae3-6d61bcf8632a";
+        let first_day = codex_home.join("sessions/2026/10/06");
+        let next_day = codex_home.join("sessions/2026/10/07");
+        fs::create_dir_all(&first_day).unwrap();
+        fs::create_dir_all(&next_day).unwrap();
+        let original = first_day.join(format!("rollout-2026-10-06T10-43-28-{session_id}.jsonl"));
+        let continuation = first_day.join(format!(
+            "rollout-2026-10-06T10-44-41-{session_id}_01a10fa2-abb2-74f3-b82b-e5bcef3cc9ed.jsonl"
+        ));
+        let second_continuation = next_day.join(format!(
+            "rollout-2026-10-07T09-00-00-{session_id}_01a10fa3-0000-7000-8000-000000000000.jsonl"
+        ));
+        write_codex_token_count(&original, 133_243);
+        write_codex_token_count(&continuation, 248_538);
+        write_codex_token_count(&second_continuation, 300_000);
+
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id)["total_tokens"],
+            300_000
+        );
+
+        fs::write(&second_continuation, "").unwrap();
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id)["total_tokens"],
+            248_538
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn codex_rollout_without_token_count_reports_reason() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a10fa1-91ac-7f71-a77b-9dd43e195e45";
+        let sessions_dir = codex_home.join("sessions/2026/10/06");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        fs::write(
+            sessions_dir.join(format!("rollout-2026-10-06T10-43-28-{session_id}.jsonl")),
+            "",
+        )
+        .unwrap();
+
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id),
+            json!({"available": false, "reason": "token_count_not_found"})
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
     #[test]
     fn missing_codex_rollout_reports_unavailable() {
         let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
         let usage = codex_token_usage(&codex_home, "missing-session");
-        assert_eq!(usage, json!({"available": false}));
+        assert_eq!(
+            usage,
+            json!({"available": false, "reason": "rollout_not_found"})
+        );
     }
 
     #[test]
