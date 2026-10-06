@@ -174,9 +174,8 @@ fn record_payload_event(
     Ok(())
 }
 
-/// Returns the latest cumulative token usage reported in the Codex CLI
-/// rollout file for the given session, in the shape of the OpenAI Responses
-/// API `usage` object.
+/// Returns the session's token usage across its Codex CLI rollout files, in
+/// the shape of the OpenAI Responses API `usage` object.
 ///
 /// When usage is unavailable, `reason` says why: `rollout_not_found` means
 /// Codex never persisted the thread (ephemeral threads such as
@@ -197,23 +196,66 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
     // A fork's counter starts at its parent's total; report only the fork's own usage.
     let baseline = rollout_paths
         .last()
-        .and_then(|path| codex_fork_baseline(path))
+        .and_then(|path| codex_rollout_baseline(path, true, false))
         .unwrap_or(Value::Null);
-    let field = |key: &str| {
-        let total = usage.get(key).and_then(Value::as_u64).unwrap_or(0);
-        let inherited = baseline.get(key).and_then(Value::as_u64).unwrap_or(0);
-        total.saturating_sub(inherited)
+    let keys = [
+        "input_tokens",
+        "output_tokens",
+        "total_tokens",
+        "cached_input_tokens",
+        "reasoning_output_tokens",
+    ];
+    let newest: [u64; 5] = keys.map(|key| {
+        usage
+            .get(key)
+            .and_then(Value::as_u64)
+            .unwrap_or(0)
+            .saturating_sub(baseline.get(key).and_then(Value::as_u64).unwrap_or(0))
+    });
+
+    // A continuation may carry the previous counter, reset it, or branch from
+    // an earlier point. Count the usage added in each file once.
+    let mut stitched = [0_u64; 5];
+    for (index, path) in rollout_paths.iter().rev().enumerate() {
+        let Some(mut file) = fs::File::open(path).ok() else {
+            continue;
+        };
+        let Some(total) = latest_codex_total_token_usage(&mut file) else {
+            continue;
+        };
+        let file_baseline = if index == 0 {
+            baseline.clone()
+        } else {
+            let Some(value) = codex_rollout_baseline(path, false, true) else {
+                continue;
+            };
+            value
+        };
+        for (field, key) in keys.iter().enumerate() {
+            let own = total
+                .get(key)
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .saturating_sub(file_baseline.get(key).and_then(Value::as_u64).unwrap_or(0));
+            stitched[field] = stitched[field].saturating_add(own);
+        }
+    }
+    // Keep the newest cumulative total if an earlier rollout is unavailable.
+    let fields = if stitched[2] > newest[2] {
+        stitched
+    } else {
+        newest
     };
     json!({
         "available": true,
-        "input_tokens": field("input_tokens"),
-        "output_tokens": field("output_tokens"),
-        "total_tokens": field("total_tokens"),
+        "input_tokens": fields[0],
+        "output_tokens": fields[1],
+        "total_tokens": fields[2],
         "input_token_details": {
-            "cached_tokens": field("cached_input_tokens"),
+            "cached_tokens": fields[3],
         },
         "output_token_details": {
-            "reasoning_tokens": field("reasoning_output_tokens"),
+            "reasoning_tokens": fields[4],
         },
     })
 }
@@ -245,20 +287,20 @@ fn latest_codex_total_token_usage(file: &mut fs::File) -> Option<Value> {
     codex_total_token_usage_from_line(&partial_line)
 }
 
-/// Usage a forked thread inherited from its parent, or `None` when the rollout
-/// is not a fork. Codex starts a fork's cumulative counter at the parent's
-/// total, so the first `token_count` minus its own `last_token_usage` is the
-/// inherited amount. Continuation files also start above zero, so only the
-/// thread's original rollout with `forked_from_id` in its `session_meta` counts.
-fn codex_fork_baseline(path: &Path) -> Option<Value> {
+/// Counter value before a rollout's first usage event. The original file needs
+/// this adjustment only for forks; every continuation needs it to avoid
+/// recounting usage inherited from an earlier file.
+fn codex_rollout_baseline(path: &Path, require_fork: bool, require_last: bool) -> Option<Value> {
     let mut lines = BufReader::new(fs::File::open(path).ok()?).lines();
     let meta = serde_json::from_str::<Value>(&lines.next()?.ok()?).ok()?;
     if meta.get("type").and_then(Value::as_str) != Some("session_meta") {
         return None;
     }
-    meta.get("payload")?.get("forked_from_id")?.as_str()?;
+    if require_fork {
+        meta.get("payload")?.get("forked_from_id")?.as_str()?;
+    }
 
-    lines.map_while(|line| line.ok()).find_map(|line| {
+    let info = lines.map_while(|line| line.ok()).find_map(|line| {
         let entry = serde_json::from_str::<Value>(&line).ok()?;
         let payload = entry.get("payload")?;
         if entry.get("type").and_then(Value::as_str) != Some("event_msg")
@@ -267,20 +309,25 @@ fn codex_fork_baseline(path: &Path) -> Option<Value> {
             return None;
         }
         let info = payload.get("info")?;
-        let total = info.get("total_token_usage")?.as_object()?;
-        let last = info.get("last_token_usage").and_then(Value::as_object);
-        let inherited = total
-            .iter()
-            .filter_map(|(key, value)| {
-                let own = last
-                    .and_then(|l| l.get(key))
-                    .and_then(Value::as_u64)
-                    .unwrap_or(0);
-                Some((key.clone(), json!(value.as_u64()?.saturating_sub(own))))
-            })
-            .collect::<serde_json::Map<_, _>>();
-        Some(Value::Object(inherited))
-    })
+        info.get("total_token_usage")?.as_object()?;
+        Some(info.clone())
+    })?;
+    let total = info.get("total_token_usage")?.as_object()?;
+    let last = info.get("last_token_usage").and_then(Value::as_object);
+    if require_last && last.is_none() {
+        return None;
+    }
+    let inherited = total
+        .iter()
+        .filter_map(|(key, value)| {
+            let own = last
+                .and_then(|l| l.get(key))
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            Some((key.clone(), json!(value.as_u64()?.saturating_sub(own))))
+        })
+        .collect::<serde_json::Map<_, _>>();
+    Some(Value::Object(inherited))
 }
 
 fn codex_total_token_usage_from_line(line: &[u8]) -> Option<Value> {
@@ -1679,6 +1726,62 @@ mod tests {
     }
 
     #[test]
+    fn continuation_that_resets_its_counter_keeps_original_usage() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a03e98-521d-75a2-a5d2-047cb4229fee";
+        let sessions_dir = codex_home.join("sessions/2026/08/26");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let original = sessions_dir.join(format!("rollout-2026-08-26T18-02-45-{session_id}.jsonl"));
+        let continuation = sessions_dir.join(format!(
+            "rollout-2026-08-26T18-33-42-{session_id}_01a03eb4-aac1-7f11-bb6d-39a19e495063.jsonl"
+        ));
+        write_codex_session_meta(&original, session_id, None);
+        write_codex_token_count_with_last(&original, 16_999, 16_999);
+        write_codex_token_count_with_last(&original, 7_524_110, 166_994);
+        write_codex_session_meta(&continuation, session_id, None);
+        write_codex_token_count_with_last(&continuation, 167_521, 167_521);
+        write_codex_token_count_with_last(&continuation, 337_825, 170_304);
+
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id)["total_tokens"],
+            7_861_935
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn continuations_from_the_same_snapshot_each_contribute_usage() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a0ae4a-48fb-7570-8c86-b59934a2cdfe";
+        let sessions_dir = codex_home.join("sessions/2026/09/17");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let original = sessions_dir.join(format!("rollout-2026-09-17T10-34-59-{session_id}.jsonl"));
+        let first_continuation = sessions_dir.join(format!(
+            "rollout-2026-09-17T19-21-04-{session_id}_01a0b02b-ee7f-7e10-bd53-bd2dada435cf.jsonl"
+        ));
+        let second_continuation = sessions_dir.join(format!(
+            "rollout-2026-09-17T19-42-53-{session_id}_01a0b03f-e7d6-78d3-b30a-0f05f4f26ccd.jsonl"
+        ));
+        write_codex_session_meta(&original, session_id, None);
+        write_codex_token_count_with_last(&original, 80_000, 80_000);
+        write_codex_token_count_with_last(&original, 100_000, 20_000);
+        write_codex_session_meta(&first_continuation, session_id, None);
+        write_codex_token_count_with_last(&first_continuation, 85_000, 5_000);
+        write_codex_token_count_with_last(&first_continuation, 90_000, 5_000);
+        write_codex_session_meta(&second_continuation, session_id, None);
+        write_codex_token_count_with_last(&second_continuation, 87_000, 7_000);
+        write_codex_token_count_with_last(&second_continuation, 110_000, 23_000);
+
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id)["total_tokens"],
+            140_000
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
     fn forked_codex_rollout_reports_only_its_own_usage() {
         let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
         let session_id = "01a10ffe-fa34-7f33-9f68-56dad306d455";
@@ -1724,6 +1827,35 @@ mod tests {
         assert_eq!(
             codex_token_usage(&codex_home, session_id)["total_tokens"],
             61_500
+        );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn resumed_fork_with_reset_counter_adds_only_fork_usage() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a10ffe-fa34-7f33-9f68-56dad306d455";
+        let sessions_dir = codex_home.join("sessions/2026/10/06");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let fork = sessions_dir.join(format!("rollout-2026-10-06T12-25-30-{session_id}.jsonl"));
+        let continuation = sessions_dir.join(format!(
+            "rollout-2026-10-06T13-00-00-{session_id}_01a11000-0000-7000-8000-000000000000.jsonl"
+        ));
+        write_codex_session_meta(
+            &fork,
+            session_id,
+            Some("01a10ffd-846f-7191-beb4-4205e87a9d4b"),
+        );
+        write_codex_token_count_with_last(&fork, 103_916, 15_416);
+        write_codex_token_count_with_last(&fork, 119_366, 15_450);
+        write_codex_session_meta(&continuation, session_id, None);
+        write_codex_token_count_with_last(&continuation, 10_000, 10_000);
+        write_codex_token_count_with_last(&continuation, 20_000, 10_000);
+
+        assert_eq!(
+            codex_token_usage(&codex_home, session_id)["total_tokens"],
+            50_866
         );
 
         fs::remove_dir_all(codex_home).unwrap();
