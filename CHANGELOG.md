@@ -13,6 +13,9 @@ All notable changes to Tally are documented in this file.
   `rollout_not_found` for threads Codex never persisted (ephemeral runs and
   Desktop helper threads), or `token_count_not_found` when the rollout has
   no usage yet.
+- Forked Codex threads now report only their own token usage. Codex starts a
+  fork's counter at the parent's total, which counted the parent's tokens
+  twice in org and user totals.
 
 ## 0.1.14 - 2026-10-02
 
