@@ -3,7 +3,7 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use super::agent_runtime::{env_enabled, env_u64, sha256_str, sha256_value};
+use super::agent_runtime::{env_enabled, env_u64, sha256_value};
 
 /// A readable, bounded copy of one field actually exposed by a hook. This is
 /// separate from the short evidence projection used by the rule evaluator.
@@ -37,14 +37,12 @@ fn captured_content_with_policy(
         Value::String(text) => text.clone(),
         _ => serde_json::to_string(value).unwrap_or_default(),
     };
-    let content_hash = sha256_str(&original);
     if !enabled {
         return json!({
             "schema_version": "tally-content.v1",
             "kind": kind,
             "source_field": field,
             "capture_status": "excluded",
-            "content_hash": content_hash,
             "text": Value::Null,
         });
     }
@@ -70,7 +68,6 @@ fn captured_content_with_policy(
         "capture_status": if truncated { "partial" } else { "complete" },
         "text": &text[..end],
         "source_bytes": original.len(),
-        "content_hash": content_hash,
         "redaction_count": redaction_count,
         "truncated": truncated,
     })
@@ -437,10 +434,7 @@ mod tests {
         assert!(captured["text"].as_str().unwrap().len() <= 20);
         assert!(!captured["text"].as_str().unwrap().contains("THIS_SECRET"));
         assert!(captured["redaction_count"].as_u64().unwrap() > 0);
-        assert_eq!(
-            captured["content_hash"],
-            json!(super::sha256_str(input.as_str().unwrap()))
-        );
+        assert!(captured.get("content_hash").is_none());
 
         let missing = captured_content_with_policy("agent.output", None, true, 20);
         assert_eq!(missing["capture_status"], "unavailable");
@@ -450,6 +444,7 @@ mod tests {
             captured_content_with_policy("user.input", Some(("prompt", &input)), false, 20);
         assert_eq!(excluded["capture_status"], "excluded");
         assert!(excluded["text"].is_null());
+        assert!(excluded.get("content_hash").is_none());
     }
 
     #[test]

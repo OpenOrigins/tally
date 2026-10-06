@@ -50,7 +50,7 @@ parameters, tool results, and turn results, the record contains:
 - a SHA-256 hash and `private://` URI for the complete raw hook payload; and
 - by default, an up-to-8,192-character projection in `server_evidence.text`; and
 - `captured_content` with the readable redacted hook field, its type, source
-  byte count, hash, and `complete`, `partial`, `unavailable`, or `excluded` status.
+  byte count, and `complete`, `partial`, `unavailable`, or `excluded` status.
 
 The content field is limited to 256 KiB. A larger
 value is sent as a labeled partial capture. Missing hook fields stay
