@@ -2,6 +2,7 @@ use crate::agent_runtime::{
     evidence_summary, first_mapping_by_key, first_string_by_key, first_value_by_key,
     server_evidence, sha256_str, stable_id, AuditSink,
 };
+use crate::server_evidence::captured_content;
 use crate::Result;
 use serde_json::{json, Value};
 use std::path::Path;
@@ -85,6 +86,7 @@ pub fn build_hook_record(
                 },
                 "instruction_summary": format!("[ARB] {summary}"),
                 "server_evidence": evidence,
+                "captured_content": captured_content("user.input", direct_field(payload, &["prompt", "input_messages", "user_prompt", "input", "text", "content"])),
             })
         }
         "PreToolUse"
@@ -122,6 +124,7 @@ pub fn build_hook_record(
                 "action_timestamp": observed_at,
                 "deviance_flag": {"deviated": Value::Null, "evaluation_status": "unavailable", "delta_category": Value::Null, "delta_hash": Value::Null, "delta_uri": Value::Null},
                 "server_evidence": evidence,
+                "captured_content": captured_content("tool.input", direct_field(payload, &["tool_input", "tool_params", "arguments", "args", "params", "input", "command", "file_path"])),
                 "raw_hook_hash": raw_ref["hash"],
                 "raw_hook_uri": raw_ref["uri"],
             })
@@ -164,6 +167,7 @@ pub fn build_hook_record(
                     "description_uri": if has_error { raw_ref["uri"].clone() } else { Value::Null },
                 },
                 "server_evidence": evidence,
+                "captured_content": captured_content("tool.output", direct_field(payload, &["tool_response", "tool_result", "result", "output", "content", "tool_error", "error", "failure_reason"])),
             })
         }
         "Stop" | "stop" => {
@@ -188,6 +192,7 @@ pub fn build_hook_record(
                 "outcome_uri": raw_ref["uri"],
                 "turn_ended_at": observed_at,
                 "server_evidence": server_evidence(evidence_source),
+                "captured_content": captured_content("agent.output", direct_field(payload, &["last_assistant_message", "response", "result", "output", "content"])),
             })
         }
         "SessionEnd" | "sessionEnd" => json!({
@@ -247,6 +252,18 @@ pub fn build_hook_record(
         event_type,
         profile.agent_name,
     ))
+}
+
+fn direct_field<'a>(
+    payload: &'a Value,
+    names: &[&'static str],
+) -> Option<(&'static str, &'a Value)> {
+    names.iter().find_map(|name| {
+        payload
+            .get(*name)
+            .filter(|value| !value.is_null())
+            .map(|value| (*name, value))
+    })
 }
 
 /// Send stable folder and branch fingerprints for server-side task matching. The local event

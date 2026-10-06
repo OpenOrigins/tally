@@ -5,7 +5,53 @@ from enum import Enum
 from pathlib import Path
 from uuid import UUID
 
-from tally_langgraph.evidence import canonical_json, private_evidence, server_evidence, to_jsonable
+from tally_langgraph.evidence import (
+    canonical_json,
+    captured_content,
+    private_evidence,
+    server_evidence,
+    to_jsonable,
+)
+
+
+def test_captured_content_is_redacted_bounded_and_labeled() -> None:
+    value = {"prompt": "hello 🙂", "api_key": "THIS_SECRET_MUST_NOT_LEAVE"}
+    captured = captured_content(
+        value, kind="user.input", source_field="value", enabled=True, max_bytes=32
+    )
+    assert captured["capture_status"] == "partial"
+    assert len(captured["text"].encode("utf-8")) <= 32
+    assert "THIS_SECRET_MUST_NOT_LEAVE" not in captured["text"]
+    assert captured["redaction_count"] == 1
+    missing = captured_content(
+        None, kind="agent.output", source_field="value", enabled=True, max_bytes=32
+    )
+    excluded = captured_content(
+        value, kind="user.input", source_field="value", enabled=False, max_bytes=32
+    )
+    assert missing["capture_status"] == "unavailable"
+    assert excluded["capture_status"] == "excluded"
+
+
+def test_personal_information_is_removed_from_readable_content() -> None:
+    captured = captured_content(
+        {
+            "prompt": "Email ada@example.test or call phone: +1 415 555 0123 about the sprint",
+            "full_name": "Ada Example",
+            "email_address": "other@example.test",
+            "command": "git status",
+        },
+        kind="user.input",
+        source_field="value",
+        enabled=True,
+        max_bytes=4096,
+    )
+    text = captured["text"]
+    for personal in ("ada@example.test", "+1 415 555 0123", "Ada Example", "other@example.test"):
+        assert personal not in text
+    assert "git status" in text
+    assert captured["capture_status"] == "complete"
+    assert captured["redaction_count"] == 4
 
 
 @dataclass

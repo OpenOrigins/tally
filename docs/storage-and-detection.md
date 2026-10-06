@@ -48,14 +48,27 @@ Tally sends each structured record as one JSON request. For prompts, tool
 parameters, tool results, and turn results, the record contains:
 
 - a SHA-256 hash and `private://` URI for the complete raw hook payload; and
-- by default, an up-to-8,192-character projection in `server_evidence.text`.
+- by default, an up-to-8,192-character projection in `server_evidence.text`; and
+- `captured_content` with the readable redacted hook field, its type, source
+  byte count, hash, and `complete`, `partial`, `unavailable`, or `excluded` status.
 
-The projection is bounded and redacts credential-like keys and common secret
-formats before transmission, but this redaction is best effort rather than a
-complete data-loss-prevention boundary. Set `TALLY_SERVER_EVIDENCE_ENABLED=0`
-to send `text: null`, hashes, and private URIs without prompt or result
-plaintext. Raw evidence addressed by a `private://` URI remains on the local
-machine.
+The content field is limited to 256 KiB. A larger
+value is sent as a labeled partial capture. Missing hook fields stay
+`unavailable`; Tally does not substitute the entire hook JSON for a missing
+assistant response. The API stores the submitted record, so readable content
+is available to authorised log readers. Deploy the server's public-export
+filter before enabling this client version: `captured_content` and
+`server_evidence` must stay out of public anchor packages.
+
+The projection and readable content redact credential-like keys and common
+secret formats, email addresses, labeled phone numbers, and values under common
+personal-information keys before transmission. This is best effort: unlabelled
+names, addresses, and uncommon personal identifiers can still pass through.
+Do not enable full-content upload for sensitive sessions until the redaction
+policy and its coverage are accepted. Set
+`TALLY_FULL_CONTENT_ENABLED=0` to exclude the readable capture and
+`TALLY_SERVER_EVIDENCE_ENABLED=0` to exclude the shorter evidence projection.
+Raw evidence addressed by a `private://` URI remains on the local machine.
 
 The defaults can be changed for managed deployments:
 
@@ -74,6 +87,8 @@ The defaults can be changed for managed deployments:
 | `TALLY_STORAGE_GC_MAX_ENTRIES` | `250000` | Safety bound for one managed-storage traversal |
 | `TALLY_SERVER_EVIDENCE_MAX_CHARS` | `8192` | Maximum plaintext evidence sent per record |
 | `TALLY_SERVER_EVIDENCE_ENABLED` | `1` | Set to `0` to send hashes and URIs without plaintext evidence |
+| `TALLY_FULL_CONTENT_ENABLED` | follows `TALLY_SERVER_EVIDENCE_ENABLED` | Set to `0` to exclude readable captured fields, or `1` to explicitly enable them |
+| `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Maximum readable field bytes per record (clamped to 4096–262144) |
 | `TALLY_DEBUG_JSONL` | `0` | Set to `1` only when duplicate local debug streams are needed |
 
 The size limit is intentionally soft: delivery safety wins over disk limits. A

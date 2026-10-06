@@ -62,6 +62,9 @@ def test_full_manual_lifecycle_is_ordered_and_delivered(tmp_path: Path) -> None:
         "SESSION_END",
     ]
     assert client.journal.statuses() == ["delivered"] * 6
+    assert [record[1]["captured_content"]["kind"] for record in transport.deliveries[1:5]] == [
+        "user.input", "tool.input", "tool.output", "agent.output"
+    ]
 
 
 def test_transient_failure_remains_pending_then_retries(tmp_path: Path) -> None:
@@ -99,6 +102,7 @@ def test_secret_is_local_and_server_projection_is_redacted(tmp_path: Path) -> No
     record = client.journal.records()[1]
     assert "do-not-send" not in json.dumps(record)
     assert record["server_evidence"]["text"] == '{"api_key":"[REDACTED]","prompt":"hello"}'
+    assert record["captured_content"]["text"] == '{"api_key":"[REDACTED]","prompt":"hello"}'
     assert "do-not-send" in (client.journal.evidence_payload(record["instruction_hash"]) or "")
 
 

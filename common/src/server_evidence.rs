@@ -3,7 +3,78 @@ use serde_json::{json, Value};
 use std::collections::BTreeSet;
 use std::sync::OnceLock;
 
-use super::agent_runtime::{env_enabled, env_u64, sha256_value};
+use super::agent_runtime::{env_enabled, env_u64, sha256_str, sha256_value};
+
+/// A readable, bounded copy of one field actually exposed by a hook. This is
+/// separate from the short evidence projection used by the rule evaluator.
+pub fn captured_content(kind: &str, source: Option<(&str, &Value)>) -> Value {
+    // Preserve an existing no-plaintext deployment setting on upgrade unless
+    // an operator explicitly enables the new content channel.
+    let enabled = env_enabled(
+        "TALLY_FULL_CONTENT_ENABLED",
+        env_enabled("TALLY_SERVER_EVIDENCE_ENABLED", true),
+    );
+    let max_bytes =
+        env_u64("TALLY_FULL_CONTENT_MAX_BYTES", 256 * 1024).clamp(4 * 1024, 256 * 1024) as usize;
+    captured_content_with_policy(kind, source, enabled, max_bytes)
+}
+
+fn captured_content_with_policy(
+    kind: &str,
+    source: Option<(&str, &Value)>,
+    enabled: bool,
+    max_bytes: usize,
+) -> Value {
+    let Some((field, value)) = source.filter(|(_, value)| !value.is_null()) else {
+        return json!({
+            "schema_version": "tally-content.v1",
+            "kind": kind,
+            "capture_status": "unavailable",
+            "text": Value::Null,
+        });
+    };
+    let original = match value {
+        Value::String(text) => text.clone(),
+        _ => serde_json::to_string(value).unwrap_or_default(),
+    };
+    let content_hash = sha256_str(&original);
+    if !enabled {
+        return json!({
+            "schema_version": "tally-content.v1",
+            "kind": kind,
+            "source_field": field,
+            "capture_status": "excluded",
+            "content_hash": content_hash,
+            "text": Value::Null,
+        });
+    }
+
+    let mut redaction_count = 0_u64;
+    let redacted = redact_sensitive_value(value, None, &mut redaction_count);
+    let text = match redacted {
+        Value::String(text) => text,
+        other => serde_json::to_string(&other).unwrap_or_default(),
+    };
+    // Keep a single record safely below common JSON ingress limits, including
+    // the existing evidence and metadata fields. Never cut a UTF-8 code point.
+    let mut end = text.len().min(max_bytes);
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    let truncated = end < text.len();
+    json!({
+        "schema_version": "tally-content.v1",
+        "kind": kind,
+        "source_field": field,
+        "media_type": if value.is_string() { "text/plain" } else { "application/json" },
+        "capture_status": if truncated { "partial" } else { "complete" },
+        "text": &text[..end],
+        "source_bytes": original.len(),
+        "content_hash": content_hash,
+        "redaction_count": redaction_count,
+        "truncated": truncated,
+    })
+}
 
 pub fn server_evidence(value: &Value) -> Value {
     let content_hash = sha256_value(value);
@@ -140,6 +211,23 @@ fn sensitive_key(key: &str) -> bool {
             | "apikey"
             | "access_key"
             | "private_key"
+            | "name"
+            | "full_name"
+            | "first_name"
+            | "last_name"
+            | "email"
+            | "email_address"
+            | "phone"
+            | "phone_number"
+            | "telephone"
+            | "mobile"
+            | "address"
+            | "street_address"
+            | "date_of_birth"
+            | "dob"
+            | "ssn"
+            | "national_id"
+            | "passport_number"
     ) || ["_password", "_secret", "_token", "_api_key", "_credential"]
         .iter()
         .any(|suffix| normalized.ends_with(suffix))
@@ -151,6 +239,8 @@ fn redact_inline_secrets(value: &str, redactions: &mut u64) -> String {
     static AUTHORIZATION_VALUE: OnceLock<Regex> = OnceLock::new();
     static KNOWN_SECRET: OnceLock<Regex> = OnceLock::new();
     static PRIVATE_KEY: OnceLock<Regex> = OnceLock::new();
+    static EMAIL: OnceLock<Regex> = OnceLock::new();
+    static LABELED_PHONE: OnceLock<Regex> = OnceLock::new();
     let assignment = SECRET_ASSIGNMENT.get_or_init(|| {
         Regex::new(
             r#"(?i)\b([A-Z0-9_]*(?:API[_-]?KEY|ACCESS[_-]?KEY|SECRET|TOKEN|PASSWORD|PASSWD|CREDENTIAL)[A-Z0-9_]*)\b\s*=\s*(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\s;&|]+)"#,
@@ -179,6 +269,13 @@ fn redact_inline_secrets(value: &str, redactions: &mut u64) -> String {
         )
         .expect("valid private-key pattern")
     });
+    let email = EMAIL.get_or_init(|| {
+        Regex::new(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b").expect("valid email pattern")
+    });
+    let labeled_phone = LABELED_PHONE.get_or_init(|| {
+        Regex::new(r"(?i)\b(phone|mobile|telephone|tel)\s*[:=]\s*\+?[0-9][0-9 ()-]{6,}[0-9]")
+            .expect("valid labeled-phone pattern")
+    });
     let assigned = assignment
         .replace_all(value, |captures: &regex::Captures<'_>| {
             *redactions += 1;
@@ -203,10 +300,22 @@ fn redact_inline_secrets(value: &str, redactions: &mut u64) -> String {
             "[REDACTED]".to_string()
         })
         .into_owned();
-    private_key
+    let without_private_keys = private_key
         .replace_all(&known, |_: &regex::Captures<'_>| {
             *redactions += 1;
             "[REDACTED PRIVATE KEY]".to_string()
+        })
+        .into_owned();
+    let without_emails = email
+        .replace_all(&without_private_keys, |_: &regex::Captures<'_>| {
+            *redactions += 1;
+            "[REDACTED]".to_string()
+        })
+        .into_owned();
+    labeled_phone
+        .replace_all(&without_emails, |captures: &regex::Captures<'_>| {
+            *redactions += 1;
+            format!("{}: [REDACTED]", &captures[1])
         })
         .into_owned()
 }
@@ -292,7 +401,7 @@ fn truncate_chars(value: &str, max_chars: usize) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::server_evidence;
+    use super::{captured_content_with_policy, server_evidence};
     use serde_json::json;
 
     #[test]
@@ -315,5 +424,55 @@ mod tests {
         assert!(signals.contains(&json!("destructive_change")));
         assert!(signals.contains(&json!("external_transfer")));
         assert!(signals.contains(&json!("privilege_escalation")));
+    }
+
+    #[test]
+    fn full_content_reports_redaction_truncation_and_missing_fields() {
+        let input = json!("first line\napi_key=THIS_SECRET_MUST_NOT_LEAVE\n🙂 trailing text");
+        let captured =
+            captured_content_with_policy("user.input", Some(("prompt", &input)), true, 20);
+        assert_eq!(captured["capture_status"], "partial");
+        assert_eq!(captured["source_field"], "prompt");
+        assert!(captured["source_bytes"].as_u64().unwrap() > 20);
+        assert!(captured["text"].as_str().unwrap().len() <= 20);
+        assert!(!captured["text"].as_str().unwrap().contains("THIS_SECRET"));
+        assert!(captured["redaction_count"].as_u64().unwrap() > 0);
+        assert_eq!(
+            captured["content_hash"],
+            json!(super::sha256_str(input.as_str().unwrap()))
+        );
+
+        let missing = captured_content_with_policy("agent.output", None, true, 20);
+        assert_eq!(missing["capture_status"], "unavailable");
+        assert!(missing["text"].is_null());
+
+        let excluded =
+            captured_content_with_policy("user.input", Some(("prompt", &input)), false, 20);
+        assert_eq!(excluded["capture_status"], "excluded");
+        assert!(excluded["text"].is_null());
+    }
+
+    #[test]
+    fn personal_information_is_removed_from_readable_content() {
+        let input = json!({
+            "prompt": "Email ada@example.test or call phone: +1 415 555 0123 about the sprint",
+            "full_name": "Ada Example",
+            "email_address": "other@example.test",
+            "command": "git status",
+        });
+        let captured =
+            captured_content_with_policy("user.input", Some(("input", &input)), true, 4096);
+        let text = captured["text"].as_str().unwrap();
+        for personal in [
+            "ada@example.test",
+            "+1 415 555 0123",
+            "Ada Example",
+            "other@example.test",
+        ] {
+            assert!(!text.contains(personal));
+        }
+        assert!(text.contains("git status"));
+        assert_eq!(captured["capture_status"], "complete");
+        assert_eq!(captured["redaction_count"], 4);
     }
 }

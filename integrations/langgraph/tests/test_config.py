@@ -19,6 +19,10 @@ def test_from_env_and_explicit_override(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert config.agent_id == "agent:explicit"
     assert config.agent_version == "agent/1"
     assert config.server_evidence_enabled is False
+    assert config.full_content_enabled is False
+
+    monkeypatch.setenv("TALLY_FULL_CONTENT_ENABLED", "true")
+    assert TallyConfig.from_env().full_content_enabled is True
 
 
 @pytest.mark.parametrize(
@@ -29,6 +33,7 @@ def test_from_env_and_explicit_override(monkeypatch: pytest.MonkeyPatch, tmp_pat
         ({"api_url": "https://user:password@example.com/logs"}, "credentials"),
         ({"heartbeat_interval_seconds": 599}, "at least 600"),
         ({"server_evidence_max_chars": 128}, "between 256"),
+        ({"full_content_max_bytes": 262_145}, "between 4096"),
         ({"retry_base_seconds": 2, "retry_max_seconds": 1}, "must not exceed"),
         ({"max_record_bytes": 1_023}, "at least 1024"),
         ({"worker_poll_seconds": 0}, "greater than zero"),

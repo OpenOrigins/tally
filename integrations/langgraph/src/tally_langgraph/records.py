@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from typing import Any
 
 from .config import TallyConfig
-from .evidence import evidence_summary, private_evidence, server_evidence
+from .evidence import captured_content, evidence_summary, private_evidence, server_evidence
 
 Evidence = list[tuple[str, str]]
 
@@ -102,6 +102,10 @@ def instruction_received(
         },
         "instruction_summary": f"[ARB] {evidence_summary(projection, 'Instruction received')}",
         "server_evidence": projection,
+        "captured_content": captured_content(
+            value, kind="user.input", source_field="value",
+            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+        ),
     }
     return record, evidence + context_evidence
 
@@ -148,6 +152,10 @@ def action_taken(
             "delta_uri": None,
         },
         "server_evidence": projection,
+        "captured_content": captured_content(
+            params, kind="tool.input", source_field="params",
+            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+        ),
     }
     return record, evidence
 
@@ -188,6 +196,10 @@ def result_received(
             "description_uri": result_uri if error is not None else None,
         },
         "server_evidence": projection,
+        "captured_content": captured_content(
+            value, kind="tool.output", source_field="value",
+            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+        ),
     }
     return record, evidence
 
@@ -250,6 +262,10 @@ def turn_end(
         "outcome_uri": outcome_uri,
         "turn_ended_at": now_iso(),
         "server_evidence": projection,
+        "captured_content": captured_content(
+            value, kind="agent.output", source_field="value",
+            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+        ),
     }
     return record, evidence
 
