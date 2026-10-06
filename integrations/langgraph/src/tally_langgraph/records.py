@@ -103,8 +103,11 @@ def instruction_received(
         "instruction_summary": f"[ARB] {evidence_summary(projection, 'Instruction received')}",
         "server_evidence": projection,
         "captured_content": captured_content(
-            value, kind="user.input", source_field="value",
-            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+            value,
+            kind="user.input",
+            source_field="value",
+            enabled=config.full_content_enabled,
+            max_bytes=config.full_content_max_bytes,
         ),
     }
     return record, evidence + context_evidence
@@ -153,8 +156,11 @@ def action_taken(
         },
         "server_evidence": projection,
         "captured_content": captured_content(
-            params, kind="tool.input", source_field="params",
-            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+            params,
+            kind="tool.input",
+            source_field="params",
+            enabled=config.full_content_enabled,
+            max_bytes=config.full_content_max_bytes,
         ),
     }
     return record, evidence
@@ -197,8 +203,11 @@ def result_received(
         },
         "server_evidence": projection,
         "captured_content": captured_content(
-            value, kind="tool.output", source_field="value",
-            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+            value,
+            kind="tool.output",
+            source_field="value",
+            enabled=config.full_content_enabled,
+            max_bytes=config.full_content_max_bytes,
         ),
     }
     return record, evidence
@@ -263,8 +272,11 @@ def turn_end(
         "turn_ended_at": now_iso(),
         "server_evidence": projection,
         "captured_content": captured_content(
-            value, kind="agent.output", source_field="value",
-            enabled=config.full_content_enabled, max_bytes=config.full_content_max_bytes,
+            value,
+            kind="agent.output",
+            source_field="value",
+            enabled=config.full_content_enabled,
+            max_bytes=config.full_content_max_bytes,
         ),
     }
     return record, evidence
