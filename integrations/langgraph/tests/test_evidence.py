@@ -20,10 +20,9 @@ def test_captured_content_is_redacted_bounded_and_labeled() -> None:
     captured = captured_content(
         value, kind="user.input", source_field="value", enabled=True, max_bytes=32
     )
-    assert captured["capture_status"] == "partial"
-    assert len(captured["text"].encode("utf-8")) <= 32
-    assert "THIS_SECRET_MUST_NOT_LEAVE" not in captured["text"]
-    assert captured["redaction_count"] == 1
+    assert captured["capture_status"] == "too_large"
+    assert captured["text"] is None
+    assert captured["redaction_count"] == 0
     expected_hash = "sha256:" + hashlib.sha256(canonical_json(value).encode("utf-8")).hexdigest()
     assert captured["content_hash"] == expected_hash
     missing = captured_content(
@@ -56,6 +55,27 @@ def test_personal_information_is_removed_from_readable_content() -> None:
     assert "git status" in text
     assert captured["capture_status"] == "complete"
     assert captured["redaction_count"] == 4
+
+
+def test_content_above_inline_limit_is_complete_until_safety_limit() -> None:
+    within = captured_content(
+        "x" * (256 * 1024 + 1),
+        kind="agent.output",
+        source_field="value",
+        enabled=True,
+        max_bytes=8 * 1024 * 1024,
+    )
+    assert within["capture_status"] == "complete"
+    assert len(within["text"]) == 256 * 1024 + 1
+    beyond = captured_content(
+        "x" * (8 * 1024 * 1024 + 1),
+        kind="agent.output",
+        source_field="value",
+        enabled=True,
+        max_bytes=8 * 1024 * 1024,
+    )
+    assert beyond["capture_status"] == "too_large"
+    assert beyond["text"] is None
 
 
 @dataclass

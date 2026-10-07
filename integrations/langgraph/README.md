@@ -149,9 +149,11 @@ own ID when the receiver needs to emit the matching acknowledgement.
 Complete evidence is serialized deterministically, hashed with SHA-256, and stored in
 `.tally/langgraph/journal.sqlite3`. Records sent to OpenOrigins contain the hash,
 `private://sha256/...` URI, a bounded server-evidence projection, and readable
-`captured_content` (up to 256 KiB by default). Values under credential-like
-keys and common inline token forms are redacted from both text fields. Larger
-values are marked partial; missing outputs are marked unavailable.
+`captured_content` (up to 8 MiB by default). Values under credential-like
+keys and common inline token forms are redacted from both text fields. Values
+above 256 KiB upload as bounded chunks before the log record; values above
+8 MiB are marked `too_large` without sending text. Missing outputs are marked
+unavailable.
 
 Redaction is defense in depth, not a complete data-loss-prevention boundary. To send no
 prompt, parameter, or result text, set:
@@ -184,8 +186,8 @@ immutable dataclass and can also be constructed directly for dependency injectio
 | `TALLY_SERVER_EVIDENCE_ENABLED` | `true` | Include bounded redacted arbitrator text |
 | `TALLY_SERVER_EVIDENCE_MAX_CHARS` | `8192` | Projection limit, clamped to 256–32768 |
 | `TALLY_FULL_CONTENT_ENABLED` | follows server evidence setting | Include readable captured input/output |
-| `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Readable content limit, 4096–262144 bytes |
-| `TALLY_MAX_RECORD_BYTES` | `16777216` | Maximum serialized record size |
+| `TALLY_FULL_CONTENT_MAX_BYTES` | `8388608` | Readable content limit, 4096–8388608 bytes |
+| `TALLY_MAX_RECORD_BYTES` | `67108864` | Maximum serialized journal record size, including JSON escaping |
 | `TALLY_HEARTBEAT_ENABLED` | `false` | Enable inactivity heartbeats |
 | `TALLY_HEARTBEAT_SECONDS` | `600` | Inactivity interval; values below 600 are rejected |
 | `TALLY_WORKER_POLL_SECONDS` | `1` | Idle background-worker polling interval |

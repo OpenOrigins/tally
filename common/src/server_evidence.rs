@@ -14,8 +14,8 @@ pub fn captured_content(kind: &str, source: Option<(&str, &Value)>) -> Value {
         "TALLY_FULL_CONTENT_ENABLED",
         env_enabled("TALLY_SERVER_EVIDENCE_ENABLED", true),
     );
-    let max_bytes =
-        env_u64("TALLY_FULL_CONTENT_MAX_BYTES", 256 * 1024).clamp(4 * 1024, 256 * 1024) as usize;
+    let max_bytes = env_u64("TALLY_FULL_CONTENT_MAX_BYTES", 8 * 1024 * 1024)
+        .clamp(4 * 1024, 8 * 1024 * 1024) as usize;
     captured_content_with_policy(kind, source, enabled, max_bytes)
 }
 
@@ -49,30 +49,40 @@ fn captured_content_with_policy(
         });
     }
 
+    if original.len() > max_bytes {
+        return json!({
+            "schema_version": "tally-content.v1",
+            "kind": kind,
+            "source_field": field,
+            "capture_status": "too_large",
+            "text": Value::Null,
+            "source_bytes": original.len(),
+            "content_hash": content_hash,
+            "redaction_count": 0,
+            "truncated": true,
+        });
+    }
+
     let mut redaction_count = 0_u64;
     let redacted = redact_sensitive_value(value, None, &mut redaction_count);
     let text = match redacted {
         Value::String(text) => text,
         other => serde_json::to_string(&other).unwrap_or_default(),
     };
-    // Keep a single record safely below common JSON ingress limits, including
-    // the existing evidence and metadata fields. Never cut a UTF-8 code point.
-    let mut end = text.len().min(max_bytes);
-    while !text.is_char_boundary(end) {
-        end -= 1;
-    }
-    let truncated = end < text.len();
+    // The forwarder uploads larger values in bounded chunks before sending
+    // the log. Never send a fragment when the safety limit is exceeded.
+    let too_large = text.len() > max_bytes;
     json!({
         "schema_version": "tally-content.v1",
         "kind": kind,
         "source_field": field,
         "media_type": if value.is_string() { "text/plain" } else { "application/json" },
-        "capture_status": if truncated { "partial" } else { "complete" },
-        "text": &text[..end],
+        "capture_status": if too_large { "too_large" } else { "complete" },
+        "text": if too_large { Value::Null } else { Value::String(text) },
         "source_bytes": original.len(),
         "content_hash": content_hash,
         "redaction_count": redaction_count,
-        "truncated": truncated,
+        "truncated": too_large,
     })
 }
 
@@ -431,12 +441,11 @@ mod tests {
         let input = json!("first line\napi_key=THIS_SECRET_MUST_NOT_LEAVE\n🙂 trailing text");
         let captured =
             captured_content_with_policy("user.input", Some(("prompt", &input)), true, 20);
-        assert_eq!(captured["capture_status"], "partial");
+        assert_eq!(captured["capture_status"], "too_large");
         assert_eq!(captured["source_field"], "prompt");
         assert!(captured["source_bytes"].as_u64().unwrap() > 20);
-        assert!(captured["text"].as_str().unwrap().len() <= 20);
-        assert!(!captured["text"].as_str().unwrap().contains("THIS_SECRET"));
-        assert!(captured["redaction_count"].as_u64().unwrap() > 0);
+        assert!(captured["text"].is_null());
+        assert_eq!(captured["redaction_count"], 0);
         assert_eq!(
             captured["content_hash"],
             json!(super::sha256_str(input.as_str().unwrap()))
@@ -474,5 +483,28 @@ mod tests {
         assert!(text.contains("git status"));
         assert_eq!(captured["capture_status"], "complete");
         assert_eq!(captured["redaction_count"], 4);
+    }
+
+    #[test]
+    fn content_above_inline_limit_is_complete_until_the_safety_limit() {
+        let within = json!("x".repeat(256 * 1024 + 1));
+        let captured = captured_content_with_policy(
+            "agent.output",
+            Some(("output", &within)),
+            true,
+            8 * 1024 * 1024,
+        );
+        assert_eq!(captured["capture_status"], "complete");
+        assert_eq!(captured["text"].as_str().unwrap().len(), 256 * 1024 + 1);
+
+        let beyond = json!("x".repeat(8 * 1024 * 1024 + 1));
+        let captured = captured_content_with_policy(
+            "agent.output",
+            Some(("output", &beyond)),
+            true,
+            8 * 1024 * 1024,
+        );
+        assert_eq!(captured["capture_status"], "too_large");
+        assert!(captured["text"].is_null());
     }
 }

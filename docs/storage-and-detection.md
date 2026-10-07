@@ -39,8 +39,9 @@ journal/
 ```
 
 Journal segments contain local-only metadata and staged private payloads. The
-wire request contains only the structured `record` object; local paths and raw
-private values are never included in the request body.
+log request contains the structured `record` object; large redacted text uses
+preceding chunk requests. Local paths and raw private values never leave the
+machine.
 
 ## What the API receives
 
@@ -50,10 +51,14 @@ parameters, tool results, and turn results, the record contains:
 - a SHA-256 hash and `private://` URI for the complete raw hook payload; and
 - by default, an up-to-8,192-character projection in `server_evidence.text`; and
 - `captured_content` with the readable redacted hook field, its type, source
-  byte count, hash, and `complete`, `partial`, `unavailable`, or `excluded` status.
+  byte count, hash, and `complete`, `too_large`, `unavailable`, or `excluded` status.
 
-The content field is limited to 256 KiB. A larger
-value is sent as a labeled partial capture. Missing hook fields stay
+Values up to 256 KiB are inline. The forwarder uploads larger redacted values
+in 128 KiB chunks before sending the log; the log then carries a `content_id`
+instead of `text`. The API stores chunks by organisation and record, redacts
+the reassembled text again, and serves bounded chunks to authorised Logs readers.
+Logs verifies the reassembled SHA-256. The default safety limit is 8 MiB; above
+it, `capture_status` is `too_large` and no text is sent. Missing hook fields stay
 `unavailable`; Tally does not substitute the entire hook JSON for a missing
 assistant response. The API stores the submitted record, so readable content
 is available to authorised log readers. Deploy the server's public-export
@@ -88,7 +93,7 @@ The defaults can be changed for managed deployments:
 | `TALLY_SERVER_EVIDENCE_MAX_CHARS` | `8192` | Maximum plaintext evidence sent per record |
 | `TALLY_SERVER_EVIDENCE_ENABLED` | `1` | Set to `0` to send hashes and URIs without plaintext evidence |
 | `TALLY_FULL_CONTENT_ENABLED` | follows `TALLY_SERVER_EVIDENCE_ENABLED` | Set to `0` to exclude readable captured fields, or `1` to explicitly enable them |
-| `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Maximum readable field bytes per record (clamped to 4096–262144) |
+| `TALLY_FULL_CONTENT_MAX_BYTES` | `8388608` | Maximum readable field bytes (clamped to 4096–8388608) |
 | `TALLY_HOOK_HEARTBEAT_ENABLED` | `0` | Set to `1` to emit inactivity heartbeats from Codex, Claude Code, and Cursor hooks |
 | `TALLY_DEBUG_JSONL` | `0` | Set to `1` only when duplicate local debug streams are needed |
 

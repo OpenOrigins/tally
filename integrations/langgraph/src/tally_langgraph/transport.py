@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import json
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -14,6 +16,9 @@ from ._version import __version__
 from .config import TallyConfig
 
 _MAX_RESPONSE_BYTES = 64 * 1024
+_INLINE_BYTES = 256 * 1024
+_CHUNK_BYTES = 128 * 1024
+_MAX_CONTENT_BYTES = 8 * 1024 * 1024
 
 
 @dataclass(frozen=True, slots=True)
@@ -45,10 +50,73 @@ class HttpTransport:
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult:
         if not self.config.forwarding_enabled:
             return DeliveryResult("retry", "forwarding is disabled", retry_after_seconds=60)
-        if not self.config.api_key:
+        api_key = self.config.api_key
+        if not api_key:
             return DeliveryResult(
                 "retry", "TALLY_API_KEY is not configured", retry_after_seconds=60
             )
+
+        captured = record.get("captured_content")
+        if (
+            isinstance(captured, dict)
+            and captured.get("capture_status") == "complete"
+            and isinstance(captured.get("text"), str)
+        ):
+            encoded = captured["text"].encode("utf-8")
+            if len(encoded) > _MAX_CONTENT_BYTES:
+                return DeliveryResult("dead_letter", "captured content exceeds 8 MiB")
+            if len(encoded) > _INLINE_BYTES:
+                object_id = hashlib.sha256(record_id.encode("utf-8") + b"\0" + encoded).hexdigest()
+                chunk_count = (len(encoded) + _CHUNK_BYTES - 1) // _CHUNK_BYTES
+                for index in range(chunk_count):
+                    chunk = encoded[index * _CHUNK_BYTES : (index + 1) * _CHUNK_BYTES]
+                    result = self._send(
+                        record_id,
+                        f"{record_id}:content:{index}",
+                        {
+                            "tally_content_upload": {
+                                "operation": "chunk",
+                                "object_id": object_id,
+                                "chunk_index": index,
+                                "chunk_count": chunk_count,
+                                "upload_bytes": len(encoded),
+                                "data_base64": base64.b64encode(chunk).decode("ascii"),
+                            }
+                        },
+                        api_key,
+                    )
+                    if not _matching_receipt(result, object_id, {"stored", "ready"}):
+                        return (
+                            result
+                            if result.disposition != "delivered"
+                            else DeliveryResult(
+                                "retry", "Tally content chunk returned no matching receipt"
+                            )
+                        )
+                result = self._send(
+                    record_id,
+                    f"{record_id}:content:complete",
+                    {"tally_content_upload": {"operation": "complete", "object_id": object_id}},
+                    api_key,
+                )
+                if not _matching_receipt(result, object_id, {"ready"}):
+                    return (
+                        result
+                        if result.disposition != "delivered"
+                        else DeliveryResult(
+                            "retry", "Tally content completion returned no matching receipt"
+                        )
+                    )
+                record = {
+                    **record,
+                    "captured_content": {**captured, "text": None, "content_id": object_id},
+                }
+
+        return self._send(record_id, record_id, record, api_key)
+
+    def _send(
+        self, record_id: str, idempotency_key: str, record: dict[str, Any], api_key: str
+    ) -> DeliveryResult:
 
         body = json.dumps(
             record,
@@ -63,9 +131,9 @@ class HttpTransport:
             method="POST",
             headers={
                 "Content-Type": "application/json",
-                "Idempotency-Key": record_id,
+                "Idempotency-Key": idempotency_key,
                 "User-Agent": f"tally-langgraph/{__version__}",
-                "X-Api-Key": self.config.api_key,
+                "X-Api-Key": api_key,
                 "X-Oo-Tally-Ingest-Path": "tally-langgraph",
                 "X-Oo-Tally-Source": "sdk",
                 "X-Tally-Record-Id": record_id,
@@ -128,6 +196,15 @@ class HttpTransport:
         if delay is None and status in {401, 403, 404}:
             delay = 60
         return DeliveryResult("retry", detail, retry_after_seconds=delay)
+
+
+def _matching_receipt(result: DeliveryResult, object_id: str, statuses: set[str]) -> bool:
+    return (
+        result.disposition == "delivered"
+        and isinstance(result.receipt, dict)
+        and result.receipt.get("object_id") == object_id
+        and result.receipt.get("status") in statuses
+    )
 
 
 def _retry_after_seconds(value: str | None) -> float | None:
