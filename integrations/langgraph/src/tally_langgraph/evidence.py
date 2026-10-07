@@ -259,10 +259,12 @@ def captured_content(
         }
     jsonable = to_jsonable(value)
     original = jsonable if isinstance(jsonable, str) else canonical_json(jsonable)
+    content_hash = f"sha256:{hashlib.sha256(original.encode('utf-8')).hexdigest()}"
     base = {
         "schema_version": "tally-content.v1",
         "kind": kind,
         "source_field": source_field,
+        "content_hash": content_hash,
     }
     if not enabled:
         return {**base, "capture_status": "excluded", "text": None}

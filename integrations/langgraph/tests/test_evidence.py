@@ -23,7 +23,6 @@ def test_captured_content_is_redacted_bounded_and_labeled() -> None:
     assert len(captured["text"].encode("utf-8")) <= 32
     assert "THIS_SECRET_MUST_NOT_LEAVE" not in captured["text"]
     assert captured["redaction_count"] == 1
-    assert "content_hash" not in captured
     missing = captured_content(
         None, kind="agent.output", source_field="value", enabled=True, max_bytes=32
     )
@@ -32,7 +31,6 @@ def test_captured_content_is_redacted_bounded_and_labeled() -> None:
     )
     assert missing["capture_status"] == "unavailable"
     assert excluded["capture_status"] == "excluded"
-    assert "content_hash" not in excluded
 
 
 def test_personal_information_is_removed_from_readable_content() -> None:
