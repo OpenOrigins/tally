@@ -62,6 +62,12 @@ def test_full_manual_lifecycle_is_ordered_and_delivered(tmp_path: Path) -> None:
         "SESSION_END",
     ]
     assert client.journal.statuses() == ["delivered"] * 6
+    assert [record[1]["captured_content"]["kind"] for record in transport.deliveries[1:5]] == [
+        "user.input",
+        "tool.input",
+        "tool.output",
+        "agent.output",
+    ]
 
 
 def test_transient_failure_remains_pending_then_retries(tmp_path: Path) -> None:
@@ -99,6 +105,7 @@ def test_secret_is_local_and_server_projection_is_redacted(tmp_path: Path) -> No
     record = client.journal.records()[1]
     assert "do-not-send" not in json.dumps(record)
     assert record["server_evidence"]["text"] == '{"api_key":"[REDACTED]","prompt":"hello"}'
+    assert record["captured_content"]["text"] == '{"api_key":"[REDACTED]","prompt":"hello"}'
     assert "do-not-send" in (client.journal.evidence_payload(record["instruction_hash"]) or "")
 
 
@@ -111,7 +118,9 @@ def test_agent_identity_persists(tmp_path: Path) -> None:
 
 
 def test_agent_scoped_heartbeat_contains_all_active_sessions(tmp_path: Path) -> None:
-    client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
+    client = TallyClient(
+        _config(tmp_path, heartbeat_enabled=True), transport=RecordingTransport(), background=False
+    )
     client.start_session("session-b", source="test")
     client.start_session("session-a", source="test")
 
@@ -119,6 +128,14 @@ def test_agent_scoped_heartbeat_contains_all_active_sessions(tmp_path: Path) -> 
     heartbeat = client.journal.records()[-1]
     assert heartbeat["record_type"] == "HEARTBEAT"
     assert heartbeat["active_sessions"] == ["session-a", "session-b"]
+
+
+def test_heartbeat_is_disabled_by_default(tmp_path: Path) -> None:
+    client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
+    client.start_session("session-a", source="test")
+
+    assert client._maybe_emit_heartbeat(now=time.time() + 601) is False
+    assert all(record["record_type"] != "HEARTBEAT" for record in client.journal.records())
 
 
 def test_background_worker_delivers_and_stops(tmp_path: Path) -> None:

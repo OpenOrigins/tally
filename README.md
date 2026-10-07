@@ -5,6 +5,12 @@ structured audit records to a small append-only segmented journal, then
 forwards them in capture order using an Agent API key from your OpenOrigins
 dashboard.
 
+Tally also sends readable, redacted user prompts, tool inputs and outputs, and
+assistant responses exposed by the client hooks. Each record says whether that
+content is complete, partial, unavailable, or excluded. See the
+[capture and storage policy](docs/storage-and-detection.md) for limits and
+controls.
+
 ## Install
 
 First, open **Connect a client** in the OpenOrigins dashboard and generate an

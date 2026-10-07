@@ -31,7 +31,7 @@ Each organisation runs its own Anchor instance independently. This means:
 - Organisations do not send their full logs to OpenOrigins. They send hashes and, for certain fields, plaintext.
 - OpenOrigins receives independent transmissions from each party. Neither party can alter what the other's Anchor has already sent.
 - In a dispute, OpenOrigins holds two independent anchored records. Contradictions between them — different hashes for the same claimed event — are themselves findings.
-- Gaps in one party's log are detectable because Anchor emits a periodic heartbeat. Silence is distinguishable from absence.
+- When heartbeats are enabled, gaps in one party's log can be investigated alongside other missing records.
 
 ---
 
@@ -77,7 +77,7 @@ keyed by record ID and sequence rather than inserted into the original record.
 No record may be modified after being written. Corrections are made by appending a new record referencing the corrected one. A local delivery journal may remove its copy only after the receiving Anchor has accepted the immutable record. Private evidence may use a documented retention policy; its hash remains part of the anchored record.
 
 **7. Heartbeat ensures gap detection.**  
-Anchor emits one agent-scoped `HEARTBEAT` record every 10 minutes (600 seconds) whenever no other records are being written for that agent. Concurrent sessions share the same heartbeat window.
+Optional heartbeat mode emits one agent-scoped `HEARTBEAT` record after 10 minutes (600 seconds) without other records for that agent. Concurrent sessions share the same heartbeat window. Current clients and backend disable this mode by default.
 
 ---
 
@@ -405,7 +405,7 @@ Emitted once when the agent's task session concludes.
 
 ### 8. `HEARTBEAT`
 
-Emitted by Anchor every 10 minutes (600 seconds) whenever no other records are being written for the same agent. Concurrent sessions share one heartbeat window. This allows OpenOrigins to distinguish genuine inactivity from a stopped or tampered Anchor instance without multiplying records by session count.
+When enabled, emitted after 10 minutes (600 seconds) without other records for the same agent. Concurrent sessions share one heartbeat window. Current clients and backend disable heartbeats by default.
 
 ```json
 {
@@ -443,7 +443,7 @@ These record types must each receive an individual Anchor receipt (not batched):
 - `SESSION_START`
 - Every `HANDOFF`
 - `SESSION_END`
-- Every `HEARTBEAT`
+- Every `HEARTBEAT`, when heartbeat mode is enabled
 
 `INSTRUCTION_RECEIVED`, `ACTION_TAKEN`, `RESULT_RECEIVED`, and `TURN_END`
 records may be batched into a Merkle root and anchored together.
@@ -463,7 +463,7 @@ records may be batched into a Merkle root and anchored together.
 
 | Level | Requirement |
 |---|---|
-| **Level 1 — Basic** | Emits all eight record types. Runs Anchor locally. Anchors SESSION_START, HANDOFF, SESSION_END, and HEARTBEAT individually. |
+| **Level 1 — Basic** | Emits session, instruction, action, result, turn, and handoff records. Runs Anchor locally. Anchors SESSION_START, HANDOFF, and SESSION_END individually; HEARTBEAT is optional. |
 | **Level 2 — Standard** | Level 1 plus: all three visibility tiers correctly implemented; private-field URIs resolvable on request during dispute; Data Processing Agreement with OpenOrigins signed. |
 | **Level 3 — Full** | Level 2 plus: Cambium proof required before each cross-agent handoff; real-time streaming to Anchor rather than batch submission. |
 

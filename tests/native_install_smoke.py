@@ -739,6 +739,15 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 }
                 for request in desktop_requests
             ]
+            desktop_records = {
+                request["body"]["record_type"]: request["body"]
+                for request in desktop_requests
+            }
+            assert (
+                desktop_records["INSTRUCTION_RECEIVED"]["captured_content"]["text"]
+                == "desktop prompt"
+            )
+            assert desktop_records["TURN_END"]["captured_content"]["text"] == "desktop response"
 
             run(
                 installed_binary,
@@ -755,7 +764,9 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
             ) == 3
 
             desktop_payload["turn-id"] = "native-desktop-turn-2"
-            desktop_payload["input-messages"] = ["second desktop prompt"]
+            desktop_payload["input-messages"] = [
+                "second desktop prompt", {"image": "attachment"}
+            ]
             run(
                 installed_binary,
                 "codex",
@@ -774,6 +785,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 "INSTRUCTION_RECEIVED",
                 "TURN_END",
             ]
+            second_instruction = next(
+                request["body"] for request in second_turn
+                if request["body"]["record_type"] == "INSTRUCTION_RECEIVED"
+            )
+            assert "second desktop prompt" in second_instruction["captured_content"]["text"]
+            assert "attachment" in second_instruction["captured_content"]["text"]
         run(
             binary,
             agent,
@@ -1096,9 +1113,12 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         "PostToolUse": {
             "session_id": "native-smoke-session",
             "tool_call_id": "tool-1",
-            "tool_response": {"stdout": ""},
+            "tool_response": {"stdout": "tool says done"},
         },
-        "Stop": {"session_id": "native-smoke-session"},
+        "Stop": {
+            "session_id": "native-smoke-session",
+            "last_assistant_message": "the answer\nsecond line",
+        },
         "SessionEnd": {
             "session_id": "native-smoke-session",
             "reason": "prompt_input_exit",
@@ -1131,6 +1151,11 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
     )
     assert records_by_type["SESSION_END"]["outcome"] is None
     assert records_by_type["SESSION_END"]["outcome_capture_status"] == "unavailable"
+    assert records_by_type["INSTRUCTION_RECEIVED"]["captured_content"]["text"] == "test prompt"
+    assert records_by_type["INSTRUCTION_RECEIVED"]["captured_content"]["capture_status"] == "complete"
+    assert '"command":"true"' in records_by_type["ACTION_TAKEN"]["captured_content"]["text"]
+    assert "tool says done" in records_by_type["RESULT_RECEIVED"]["captured_content"]["text"]
+    assert records_by_type["TURN_END"]["captured_content"]["text"] == "the answer\nsecond line"
     action_ids = {
         record["record_type"]: record.get("action_id")
         for record in records

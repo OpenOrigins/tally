@@ -31,6 +31,23 @@ _SENSITIVE_KEYS = {
     "private_key",
     "secret",
     "token",
+    "name",
+    "full_name",
+    "first_name",
+    "last_name",
+    "email",
+    "email_address",
+    "phone",
+    "phone_number",
+    "telephone",
+    "mobile",
+    "address",
+    "street_address",
+    "date_of_birth",
+    "dob",
+    "ssn",
+    "national_id",
+    "passport_number",
 }
 _SECRET_PATTERNS = (
     re.compile(
@@ -51,6 +68,10 @@ _SECRET_PATTERNS = (
         r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?-----END [A-Z0-9 ]*PRIVATE KEY-----",
         re.DOTALL,
     ),
+)
+_PERSONAL_PATTERNS = (
+    re.compile(r"(?i)\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b"),
+    re.compile(r"(?i)\b(phone|mobile|telephone|tel)\s*[:=]\s*\+?[0-9][0-9 ()-]{6,}[0-9]"),
 )
 _RISK_RULES = {
     "credential_access": (
@@ -192,6 +213,8 @@ def _redact_string(value: str) -> tuple[str, int]:
     result = value
     for pattern in _SECRET_PATTERNS:
         result = pattern.sub(replacement, result)
+    for pattern in _PERSONAL_PATTERNS:
+        result = pattern.sub(replacement, result)
     return result, redactions
 
 
@@ -217,6 +240,49 @@ def _redact(value: Any, key: str | None = None) -> tuple[Any, int]:
     if isinstance(value, str):
         return _redact_string(value)
     return value, 0
+
+
+def captured_content(
+    value: Any,
+    *,
+    kind: str,
+    source_field: str,
+    enabled: bool,
+    max_bytes: int,
+) -> dict[str, Any]:
+    if value is None:
+        return {
+            "schema_version": "tally-content.v1",
+            "kind": kind,
+            "capture_status": "unavailable",
+            "text": None,
+        }
+    jsonable = to_jsonable(value)
+    original = jsonable if isinstance(jsonable, str) else canonical_json(jsonable)
+    content_hash = f"sha256:{hashlib.sha256(original.encode('utf-8')).hexdigest()}"
+    base = {
+        "schema_version": "tally-content.v1",
+        "kind": kind,
+        "source_field": source_field,
+        "content_hash": content_hash,
+    }
+    if not enabled:
+        return {**base, "capture_status": "excluded", "text": None}
+    redacted, redaction_count = _redact(jsonable)
+    text = redacted if isinstance(redacted, str) else canonical_json(redacted)
+    encoded = text.encode("utf-8")
+    truncated = len(encoded) > max_bytes
+    if truncated:
+        text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    return {
+        **base,
+        "media_type": "text/plain" if isinstance(jsonable, str) else "application/json",
+        "capture_status": "partial" if truncated else "complete",
+        "text": text,
+        "source_bytes": len(original.encode("utf-8")),
+        "redaction_count": redaction_count,
+        "truncated": truncated,
+    }
 
 
 def server_evidence(value: Any, *, enabled: bool, max_chars: int) -> dict[str, Any]:

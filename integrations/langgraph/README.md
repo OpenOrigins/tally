@@ -12,9 +12,9 @@ important delivery properties of the Rust clients:
 - each retry uses a stable record ID as its idempotency key;
 - non-2xx responses never advance a record as delivered;
 - malformed records are dead-lettered while transient failures remain queued;
-- complete inputs, parameters, and results stay in local private evidence;
-- only a bounded, best-effort-redacted projection is sent to the server; and
-- one agent-scoped heartbeat covers all active sessions after ten minutes of inactivity.
+- complete raw values stay in local private evidence;
+- readable redacted inputs and outputs are sent with explicit capture status and size bounds; and
+- optional agent-scoped heartbeats cover active sessions after ten minutes of inactivity.
 
 ## Install
 
@@ -114,7 +114,7 @@ One top-level graph invocation becomes one Tally session and one turn:
 | `on_tool_start` | `ACTION_TAKEN` |
 | `on_tool_end` / `on_tool_error` | `RESULT_RECEIVED` |
 | Root `on_chain_end` / `on_chain_error` | `TURN_END`, `SESSION_END` |
-| Ten minutes with active sessions and no records | `HEARTBEAT` |
+| Ten minutes with active sessions and no records, when enabled | `HEARTBEAT` |
 
 Only operations exposed as LangChain tools generate action/result records. Direct API,
 database, or subprocess calls inside ordinary node functions are not observable through
@@ -148,14 +148,17 @@ own ID when the receiver needs to emit the matching acknowledgement.
 
 Complete evidence is serialized deterministically, hashed with SHA-256, and stored in
 `.tally/langgraph/journal.sqlite3`. Records sent to OpenOrigins contain the hash,
-`private://sha256/...` URI, and a bounded server-evidence projection. Values under
-credential-like keys and common inline token forms are redacted from that projection.
+`private://sha256/...` URI, a bounded server-evidence projection, and readable
+`captured_content` (up to 256 KiB by default). Values under credential-like
+keys and common inline token forms are redacted from both text fields. Larger
+values are marked partial; missing outputs are marked unavailable.
 
 Redaction is defense in depth, not a complete data-loss-prevention boundary. To send no
 prompt, parameter, or result text, set:
 
 ```bash
 export TALLY_SERVER_EVIDENCE_ENABLED=0
+export TALLY_FULL_CONTENT_ENABLED=0
 ```
 
 On POSIX systems, the state directory is set to mode `0700` and SQLite files to `0600`.
@@ -180,7 +183,10 @@ immutable dataclass and can also be constructed directly for dependency injectio
 | `TALLY_FORWARDING_ENABLED` | `true` | Keep records local when false |
 | `TALLY_SERVER_EVIDENCE_ENABLED` | `true` | Include bounded redacted arbitrator text |
 | `TALLY_SERVER_EVIDENCE_MAX_CHARS` | `8192` | Projection limit, clamped to 256–32768 |
+| `TALLY_FULL_CONTENT_ENABLED` | follows server evidence setting | Include readable captured input/output |
+| `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Readable content limit, 4096–262144 bytes |
 | `TALLY_MAX_RECORD_BYTES` | `16777216` | Maximum serialized record size |
+| `TALLY_HEARTBEAT_ENABLED` | `false` | Enable inactivity heartbeats |
 | `TALLY_HEARTBEAT_SECONDS` | `600` | Inactivity interval; values below 600 are rejected |
 | `TALLY_WORKER_POLL_SECONDS` | `1` | Idle background-worker polling interval |
 | `TALLY_REQUEST_TIMEOUT_SECONDS` | `5` | HTTP timeout |

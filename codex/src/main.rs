@@ -464,18 +464,19 @@ fn record_desktop_turn(raw: &str) -> Result<()> {
         )?;
     }
 
-    let prompt = payload["input-messages"]
-        .as_array()
+    let messages = payload["input-messages"].as_array();
+    let prompt = messages
+        .filter(|messages| !messages.is_empty() && messages.iter().all(Value::is_string))
         .map(|messages| {
             messages
                 .iter()
                 .filter_map(Value::as_str)
                 .collect::<Vec<_>>()
                 .join("\n")
-        })
-        .unwrap_or_default();
+        });
     let mut instruction = base.clone();
-    instruction["prompt"] = Value::String(prompt);
+    instruction["prompt"] = prompt.map(Value::String).unwrap_or(Value::Null);
+    instruction["input_messages"] = payload["input-messages"].clone();
     record_payload_event(
         "UserPromptSubmit",
         raw,
