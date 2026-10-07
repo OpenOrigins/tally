@@ -118,7 +118,9 @@ def test_agent_identity_persists(tmp_path: Path) -> None:
 
 
 def test_agent_scoped_heartbeat_contains_all_active_sessions(tmp_path: Path) -> None:
-    client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
+    client = TallyClient(
+        _config(tmp_path, heartbeat_enabled=True), transport=RecordingTransport(), background=False
+    )
     client.start_session("session-b", source="test")
     client.start_session("session-a", source="test")
 
@@ -126,6 +128,14 @@ def test_agent_scoped_heartbeat_contains_all_active_sessions(tmp_path: Path) -> 
     heartbeat = client.journal.records()[-1]
     assert heartbeat["record_type"] == "HEARTBEAT"
     assert heartbeat["active_sessions"] == ["session-a", "session-b"]
+
+
+def test_heartbeat_is_disabled_by_default(tmp_path: Path) -> None:
+    client = TallyClient(_config(tmp_path), transport=RecordingTransport(), background=False)
+    client.start_session("session-a", source="test")
+
+    assert client._maybe_emit_heartbeat(now=time.time() + 601) is False
+    assert all(record["record_type"] != "HEARTBEAT" for record in client.journal.records())
 
 
 def test_background_worker_delivers_and_stops(tmp_path: Path) -> None:

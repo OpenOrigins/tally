@@ -216,7 +216,7 @@ pub fn update_heartbeat_state(
     session_id: Option<String>,
     observed_at: &str,
 ) -> Result<()> {
-    if !env_enabled("TALLY_HOOK_HEARTBEAT_ENABLED", true) {
+    if !env_enabled("TALLY_HOOK_HEARTBEAT_ENABLED", false) {
         return Ok(());
     }
 
@@ -241,6 +241,9 @@ pub fn update_heartbeat_state(
 }
 
 pub fn run_heartbeat_daemon(sink: &AuditSink, files: &HeartbeatFiles) -> Result<()> {
+    if !env_enabled("TALLY_HOOK_HEARTBEAT_ENABLED", false) {
+        return Ok(());
+    }
     let Some(pid_file) = claim_heartbeat_daemon(&files.pid)? else {
         return Ok(());
     };

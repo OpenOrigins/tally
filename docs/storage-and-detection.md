@@ -89,6 +89,7 @@ The defaults can be changed for managed deployments:
 | `TALLY_SERVER_EVIDENCE_ENABLED` | `1` | Set to `0` to send hashes and URIs without plaintext evidence |
 | `TALLY_FULL_CONTENT_ENABLED` | follows `TALLY_SERVER_EVIDENCE_ENABLED` | Set to `0` to exclude readable captured fields, or `1` to explicitly enable them |
 | `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Maximum readable field bytes per record (clamped to 4096–262144) |
+| `TALLY_HOOK_HEARTBEAT_ENABLED` | `0` | Set to `1` to emit inactivity heartbeats from Codex, Claude Code, and Cursor hooks |
 | `TALLY_DEBUG_JSONL` | `0` | Set to `1` only when duplicate local debug streams are needed |
 
 The size limit is intentionally soft: delivery safety wins over disk limits. A

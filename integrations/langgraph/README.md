@@ -14,7 +14,7 @@ important delivery properties of the Rust clients:
 - malformed records are dead-lettered while transient failures remain queued;
 - complete raw values stay in local private evidence;
 - readable redacted inputs and outputs are sent with explicit capture status and size bounds; and
-- one agent-scoped heartbeat covers all active sessions after ten minutes of inactivity.
+- optional agent-scoped heartbeats cover active sessions after ten minutes of inactivity.
 
 ## Install
 
@@ -114,7 +114,7 @@ One top-level graph invocation becomes one Tally session and one turn:
 | `on_tool_start` | `ACTION_TAKEN` |
 | `on_tool_end` / `on_tool_error` | `RESULT_RECEIVED` |
 | Root `on_chain_end` / `on_chain_error` | `TURN_END`, `SESSION_END` |
-| Ten minutes with active sessions and no records | `HEARTBEAT` |
+| Ten minutes with active sessions and no records, when enabled | `HEARTBEAT` |
 
 Only operations exposed as LangChain tools generate action/result records. Direct API,
 database, or subprocess calls inside ordinary node functions are not observable through
@@ -186,6 +186,7 @@ immutable dataclass and can also be constructed directly for dependency injectio
 | `TALLY_FULL_CONTENT_ENABLED` | follows server evidence setting | Include readable captured input/output |
 | `TALLY_FULL_CONTENT_MAX_BYTES` | `262144` | Readable content limit, 4096–262144 bytes |
 | `TALLY_MAX_RECORD_BYTES` | `16777216` | Maximum serialized record size |
+| `TALLY_HEARTBEAT_ENABLED` | `false` | Enable inactivity heartbeats |
 | `TALLY_HEARTBEAT_SECONDS` | `600` | Inactivity interval; values below 600 are rejected |
 | `TALLY_WORKER_POLL_SECONDS` | `1` | Idle background-worker polling interval |
 | `TALLY_REQUEST_TIMEOUT_SECONDS` | `5` | HTTP timeout |

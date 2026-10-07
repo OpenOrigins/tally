@@ -81,6 +81,7 @@ class TallyConfig:
     full_content_enabled: bool = True
     full_content_max_bytes: int = 256 * 1024
     max_record_bytes: int = 16 * 1024 * 1024
+    heartbeat_enabled: bool = False
     heartbeat_interval_seconds: int = MIN_HEARTBEAT_SECONDS
     worker_poll_seconds: float = 1.0
     request_timeout_seconds: float = 5.0
@@ -139,6 +140,7 @@ class TallyConfig:
             ),
             "full_content_max_bytes": _env_int("TALLY_FULL_CONTENT_MAX_BYTES", 256 * 1024),
             "max_record_bytes": _env_int("TALLY_MAX_RECORD_BYTES", 16 * 1024 * 1024),
+            "heartbeat_enabled": _env_bool("TALLY_HEARTBEAT_ENABLED", False),
             "heartbeat_interval_seconds": _env_int(
                 "TALLY_HEARTBEAT_SECONDS", MIN_HEARTBEAT_SECONDS
             ),

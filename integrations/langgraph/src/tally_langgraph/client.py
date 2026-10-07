@@ -313,6 +313,8 @@ class TallyClient:
             self._wake.clear()
 
     def _maybe_emit_heartbeat(self, *, now: float | None = None) -> bool:
+        if not self.config.heartbeat_enabled:
+            return False
         with self._state_lock:
             if self._closed:
                 return False

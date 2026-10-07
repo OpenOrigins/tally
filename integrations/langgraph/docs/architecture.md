@@ -78,6 +78,7 @@ A callback maps one top-level `.invoke()`/`.ainvoke()`/`.stream()`/`.astream()` 
 one session and one turn. A long-lived `TallyClient` owns any number of concurrent
 sessions.
 
+Heartbeats are disabled by default and can be enabled with `TALLY_HEARTBEAT_ENABLED=true`.
 Active sessions and the last-record timestamp are stored in SQLite. Heartbeat claiming
 is transactional, so multiple processes sharing a state directory emit one agent-level
 heartbeat rather than one heartbeat per request. Any normal record resets the ten-minute

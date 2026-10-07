@@ -20,9 +20,12 @@ def test_from_env_and_explicit_override(monkeypatch: pytest.MonkeyPatch, tmp_pat
     assert config.agent_version == "agent/1"
     assert config.server_evidence_enabled is False
     assert config.full_content_enabled is False
+    assert config.heartbeat_enabled is False
 
     monkeypatch.setenv("TALLY_FULL_CONTENT_ENABLED", "true")
+    monkeypatch.setenv("TALLY_HEARTBEAT_ENABLED", "true")
     assert TallyConfig.from_env().full_content_enabled is True
+    assert TallyConfig.from_env().heartbeat_enabled is True
 
 
 @pytest.mark.parametrize(
