@@ -79,8 +79,8 @@ class TallyConfig:
     server_evidence_enabled: bool = True
     server_evidence_max_chars: int = 8_192
     full_content_enabled: bool = True
-    full_content_max_bytes: int = 256 * 1024
-    max_record_bytes: int = 16 * 1024 * 1024
+    full_content_max_bytes: int = 8 * 1024 * 1024
+    max_record_bytes: int = 64 * 1024 * 1024
     heartbeat_enabled: bool = False
     heartbeat_interval_seconds: int = MIN_HEARTBEAT_SECONDS
     worker_poll_seconds: float = 1.0
@@ -100,8 +100,8 @@ class TallyConfig:
             raise ValueError(f"heartbeat_interval_seconds must be at least {MIN_HEARTBEAT_SECONDS}")
         if not 256 <= self.server_evidence_max_chars <= 32_768:
             raise ValueError("server_evidence_max_chars must be between 256 and 32768")
-        if not 4_096 <= self.full_content_max_bytes <= 262_144:
-            raise ValueError("full_content_max_bytes must be between 4096 and 262144")
+        if not 4_096 <= self.full_content_max_bytes <= 8 * 1024 * 1024:
+            raise ValueError("full_content_max_bytes must be between 4096 and 8388608")
         if self.max_record_bytes < 1_024:
             raise ValueError("max_record_bytes must be at least 1024")
         for name in (
@@ -138,8 +138,8 @@ class TallyConfig:
             "full_content_enabled": _env_bool(
                 "TALLY_FULL_CONTENT_ENABLED", _env_bool("TALLY_SERVER_EVIDENCE_ENABLED", True)
             ),
-            "full_content_max_bytes": _env_int("TALLY_FULL_CONTENT_MAX_BYTES", 256 * 1024),
-            "max_record_bytes": _env_int("TALLY_MAX_RECORD_BYTES", 16 * 1024 * 1024),
+            "full_content_max_bytes": _env_int("TALLY_FULL_CONTENT_MAX_BYTES", 8 * 1024 * 1024),
+            "max_record_bytes": _env_int("TALLY_MAX_RECORD_BYTES", 64 * 1024 * 1024),
             "heartbeat_enabled": _env_bool("TALLY_HEARTBEAT_ENABLED", False),
             "heartbeat_interval_seconds": _env_int(
                 "TALLY_HEARTBEAT_SECONDS", MIN_HEARTBEAT_SECONDS

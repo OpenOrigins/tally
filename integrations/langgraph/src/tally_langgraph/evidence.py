@@ -268,20 +268,28 @@ def captured_content(
     }
     if not enabled:
         return {**base, "capture_status": "excluded", "text": None}
+    source_bytes = len(original.encode("utf-8"))
+    if source_bytes > max_bytes:
+        return {
+            **base,
+            "capture_status": "too_large",
+            "text": None,
+            "source_bytes": source_bytes,
+            "redaction_count": 0,
+            "truncated": True,
+        }
     redacted, redaction_count = _redact(jsonable)
     text = redacted if isinstance(redacted, str) else canonical_json(redacted)
     encoded = text.encode("utf-8")
-    truncated = len(encoded) > max_bytes
-    if truncated:
-        text = encoded[:max_bytes].decode("utf-8", errors="ignore")
+    too_large = len(encoded) > max_bytes
     return {
         **base,
         "media_type": "text/plain" if isinstance(jsonable, str) else "application/json",
-        "capture_status": "partial" if truncated else "complete",
-        "text": text,
-        "source_bytes": len(original.encode("utf-8")),
+        "capture_status": "too_large" if too_large else "complete",
+        "text": None if too_large else text,
+        "source_bytes": source_bytes,
         "redaction_count": redaction_count,
-        "truncated": truncated,
+        "truncated": too_large,
     }
 
 

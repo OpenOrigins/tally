@@ -14,6 +14,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use url::Url;
 
 pub mod agent_runtime;
+mod content_upload;
 mod installer_gui;
 mod journal;
 pub mod records;
@@ -1550,14 +1551,34 @@ fn post_json_with_agent(
     body: &str,
     idempotency_key: Option<&str>,
 ) -> std::result::Result<PostResponse, PostFailure> {
+    let prepared = content_upload::upload_if_needed(agent, url, api_key, body, idempotency_key)?;
+    send_json_with_agent(
+        agent,
+        url,
+        api_key,
+        prepared.as_deref().unwrap_or(body),
+        idempotency_key,
+        idempotency_key,
+    )
+}
+
+fn send_json_with_agent(
+    agent: &ureq::Agent,
+    url: &str,
+    api_key: &str,
+    body: &str,
+    idempotency_key: Option<&str>,
+    record_id: Option<&str>,
+) -> std::result::Result<PostResponse, PostFailure> {
     let mut request = agent
         .post(url)
         .set("x-api-key", api_key)
         .set("content-type", "application/json");
     if let Some(idempotency_key) = idempotency_key {
-        request = request
-            .set("idempotency-key", idempotency_key)
-            .set("x-tally-record-id", idempotency_key);
+        request = request.set("idempotency-key", idempotency_key);
+    }
+    if let Some(record_id) = record_id {
+        request = request.set("x-tally-record-id", record_id);
     }
     match request.send_string(body) {
         Ok(response) if (200..300).contains(&response.status()) => {

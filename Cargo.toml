@@ -10,6 +10,7 @@ publish = false
 license = "Apache-2.0"
 
 [workspace.dependencies]
+base64 = "0.22"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 fs2 = "0.4"
 getrandom = "0.3"

@@ -1,3 +1,5 @@
+import base64
+import hashlib
 import json
 import threading
 from collections.abc import Iterator
@@ -74,6 +76,44 @@ def test_success_sends_stable_idempotency_headers(tmp_path: Path) -> None:
     assert server.requests[0]["headers"]["X-Tally-Record-Id"] == "record-1"
     assert server.requests[0]["headers"]["X-Api-Key"] == "test-key"
     assert server.requests[0]["headers"]["User-Agent"] == f"tally-langgraph/{__version__}"
+
+
+def test_large_content_uploads_before_its_log_record(tmp_path: Path) -> None:
+    text = "x" * (256 * 1024 + 1)
+    object_id = hashlib.sha256(b"record-1\0" + text.encode()).hexdigest()
+    replies = [
+        (200, {}, json.dumps({"status": "stored", "object_id": object_id}).encode())
+        for _ in range(3)
+    ] + [
+        (200, {}, json.dumps({"status": "ready", "object_id": object_id}).encode()),
+        (200, {}, b'{"status":"accepted"}'),
+    ]
+    record = {
+        "record_type": "TURN_END",
+        "captured_content": {"capture_status": "complete", "text": text, "kind": "agent.output"},
+    }
+    with _server(*replies) as server:
+        result = _transport(server, tmp_path).deliver("record-1", record)
+
+    assert result.disposition == "delivered"
+    chunks = [request["body"]["tally_content_upload"] for request in server.requests[:3]]
+    assert b"".join(base64.b64decode(chunk["data_base64"]) for chunk in chunks) == text.encode()
+    assert [chunk["chunk_index"] for chunk in chunks] == [0, 1, 2]
+    assert server.requests[3]["body"]["tally_content_upload"]["operation"] == "complete"
+    assert server.requests[4]["body"]["captured_content"]["content_id"] == object_id
+    assert server.requests[4]["body"]["captured_content"]["text"] is None
+    assert record["captured_content"]["text"] == text  # the durable journal copy is unchanged
+    assert all(request["headers"]["X-Tally-Record-Id"] == "record-1" for request in server.requests)
+
+
+def test_failed_chunk_keeps_the_log_pending(tmp_path: Path) -> None:
+    record = {"captured_content": {"capture_status": "complete", "text": "x" * (256 * 1024 + 1)}}
+    with _server((503, {}, b'{"message":"temporary"}')) as server:
+        result = _transport(server, tmp_path).deliver("record-1", record)
+    assert result.disposition == "retry"
+    assert len(server.requests) == 1
+    assert server.requests[0]["body"]["tally_content_upload"]["operation"] == "chunk"
+    assert record["captured_content"]["text"] is not None
 
 
 def test_server_error_retries_and_honors_retry_after(tmp_path: Path) -> None:
