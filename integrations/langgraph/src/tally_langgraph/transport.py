@@ -50,7 +50,8 @@ class HttpTransport:
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult:
         if not self.config.forwarding_enabled:
             return DeliveryResult("retry", "forwarding is disabled", retry_after_seconds=60)
-        if not self.config.api_key:
+        api_key = self.config.api_key
+        if not api_key:
             return DeliveryResult(
                 "retry", "TALLY_API_KEY is not configured", retry_after_seconds=60
             )
@@ -82,6 +83,7 @@ class HttpTransport:
                                 "data_base64": base64.b64encode(chunk).decode("ascii"),
                             }
                         },
+                        api_key,
                     )
                     if not _matching_receipt(result, object_id, {"stored", "ready"}):
                         return (
@@ -95,6 +97,7 @@ class HttpTransport:
                     record_id,
                     f"{record_id}:content:complete",
                     {"tally_content_upload": {"operation": "complete", "object_id": object_id}},
+                    api_key,
                 )
                 if not _matching_receipt(result, object_id, {"ready"}):
                     return (
@@ -109,9 +112,11 @@ class HttpTransport:
                     "captured_content": {**captured, "text": None, "content_id": object_id},
                 }
 
-        return self._send(record_id, record_id, record)
+        return self._send(record_id, record_id, record, api_key)
 
-    def _send(self, record_id: str, idempotency_key: str, record: dict[str, Any]) -> DeliveryResult:
+    def _send(
+        self, record_id: str, idempotency_key: str, record: dict[str, Any], api_key: str
+    ) -> DeliveryResult:
 
         body = json.dumps(
             record,
@@ -128,7 +133,7 @@ class HttpTransport:
                 "Content-Type": "application/json",
                 "Idempotency-Key": idempotency_key,
                 "User-Agent": f"tally-langgraph/{__version__}",
-                "X-Api-Key": self.config.api_key,
+                "X-Api-Key": api_key,
                 "X-Oo-Tally-Ingest-Path": "tally-langgraph",
                 "X-Oo-Tally-Source": "sdk",
                 "X-Tally-Record-Id": record_id,
