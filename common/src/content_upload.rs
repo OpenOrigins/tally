@@ -89,6 +89,7 @@ pub(super) fn upload_if_needed(
     for (index, chunk) in bytes.chunks(CHUNK_BYTES).enumerate() {
         let request = json!({"tally_content_upload": {
             "operation": "chunk",
+            "record_id": record_id,
             "object_id": upload.object_id,
             "chunk_index": index,
             "chunk_count": chunk_count,
@@ -109,7 +110,7 @@ pub(super) fn upload_if_needed(
         }
     }
     let complete = json!({"tally_content_upload": {
-        "operation": "complete", "object_id": upload.object_id,
+        "operation": "complete", "record_id": record_id, "object_id": upload.object_id,
     }});
     let idempotency_key = format!("{record_id}:content:complete");
     let response = send_json_with_agent(
@@ -192,6 +193,7 @@ mod tests {
         let mut uploaded = Vec::new();
         for (index, record) in received[..3].iter().enumerate() {
             let chunk = &record["tally_content_upload"];
+            assert_eq!(chunk["record_id"], "rec-1");
             assert_eq!(chunk["chunk_index"], index);
             uploaded.extend(
                 STANDARD
@@ -201,7 +203,51 @@ mod tests {
         }
         assert_eq!(uploaded, text.as_bytes());
         assert_eq!(received[3]["tally_content_upload"]["operation"], "complete");
+        assert_eq!(received[3]["tally_content_upload"]["record_id"], "rec-1");
         assert!(received[4]["captured_content"]["text"].is_null());
         assert!(received[4]["captured_content"]["content_id"].is_string());
+    }
+
+    #[test]
+    fn gateway_wrapped_upload_error_keeps_the_record_pending() {
+        let server = Server::http(("127.0.0.1", 0)).unwrap();
+        let url = format!("http://{}/v1/tally/logs", server.server_addr());
+        let listener = thread::spawn(move || {
+            let mut request = server.recv().unwrap();
+            let mut body = String::new();
+            request.as_reader().read_to_string(&mut body).unwrap();
+            let has_record_id_header = request.headers().iter().any(|header| {
+                header.field.equiv("X-Tally-Record-Id") && header.value.as_str() == "rec-1"
+            });
+            request
+                .respond(Response::from_string(
+                    json!({"status_code": 400, "message": "invalid Tally record id"}).to_string(),
+                ))
+                .unwrap();
+            (
+                serde_json::from_str::<Value>(&body).unwrap(),
+                has_record_id_header,
+            )
+        });
+        let text = "x".repeat(INLINE_BYTES + 1);
+        let body = json!({"record_type": "TURN_END", "captured_content": {
+            "capture_status": "complete", "text": text,
+        }})
+        .to_string();
+        let error = match crate::post_json_with_agent(
+            &crate::http_agent(),
+            &url,
+            "test-key",
+            &body,
+            Some("rec-1"),
+        ) {
+            Ok(_) => panic!("gateway error was accepted"),
+            Err(error) => error,
+        };
+        assert!(!error.permanent_record_failure);
+        assert!(!error.retryable);
+        let (upload, has_record_id_header) = listener.join().unwrap();
+        assert!(has_record_id_header);
+        assert_eq!(upload["tally_content_upload"]["operation"], "chunk");
     }
 }

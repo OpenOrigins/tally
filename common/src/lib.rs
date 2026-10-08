@@ -1588,12 +1588,7 @@ fn send_json_with_agent(
                 retryable: true,
                 retry_after: None,
             })?;
-            response_body_error(response_body.trim()).map_err(|message| PostFailure {
-                message,
-                permanent_record_failure: false,
-                retryable: false,
-                retry_after: None,
-            })?;
+            response_body_error(response_body.trim())?;
             let receipt = serde_json::from_str::<Value>(response_body.trim())
                 .ok()
                 .and_then(|value| {
@@ -1664,7 +1659,7 @@ fn status_failure(status: u16, body: Option<&str>, retry_after: Option<Duration>
     }
 }
 
-fn response_body_error(body: &str) -> std::result::Result<(), String> {
+fn response_body_error(body: &str) -> std::result::Result<(), PostFailure> {
     if body.is_empty() {
         return Ok(());
     }
@@ -1678,9 +1673,14 @@ fn response_body_error(body: &str) -> std::result::Result<(), String> {
     if status_code < 400 {
         return Ok(());
     }
+    let mut failure = status_failure(u16::try_from(status_code).unwrap_or(500), Some(body), None);
+    // A non-proxy gateway can wrap a backend error in HTTP 200. Do not discard
+    // the journaled record based on an embedded status with ambiguous origin.
+    failure.permanent_record_failure = false;
     let code = value["code"].as_str().unwrap_or("api_error");
     let message = value["message"].as_str().unwrap_or(code);
-    Err(format!("server returned {status_code}: {message}"))
+    failure.message = format!("server returned {status_code}: {message}");
+    Err(failure)
 }
 
 fn write_forward_status(state_dir: &Path, ok: bool, error: Option<&str>) -> Result<()> {
@@ -2298,7 +2298,16 @@ mod tests {
             r#"{"billingSetupRequired":true,"code":"billing_setup_required","message":"billing_setup_required: Add a payment method before ingesting Agent Logs","status_code":402}"#,
         )
         .unwrap_err();
-        assert!(error.contains("402"));
-        assert!(error.contains("billing_setup_required"));
+        assert!(error.message.contains("402"));
+        assert!(error.message.contains("billing_setup_required"));
+        let invalid =
+            response_body_error(r#"{"status_code":400,"message":"invalid upload"}"#).unwrap_err();
+        assert!(!invalid.permanent_record_failure);
+        assert!(!invalid.retryable);
+        let unavailable =
+            response_body_error(r#"{"status_code":503,"message":"unavailable"}"#).unwrap_err();
+        assert!(!unavailable.permanent_record_failure);
+        assert!(unavailable.retryable);
+        assert_eq!(unavailable.message, "server returned 503: unavailable");
     }
 }

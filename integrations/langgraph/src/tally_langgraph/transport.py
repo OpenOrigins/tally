@@ -76,6 +76,7 @@ class HttpTransport:
                         {
                             "tally_content_upload": {
                                 "operation": "chunk",
+                                "record_id": record_id,
                                 "object_id": object_id,
                                 "chunk_index": index,
                                 "chunk_count": chunk_count,
@@ -96,7 +97,13 @@ class HttpTransport:
                 result = self._send(
                     record_id,
                     f"{record_id}:content:complete",
-                    {"tally_content_upload": {"operation": "complete", "object_id": object_id}},
+                    {
+                        "tally_content_upload": {
+                            "operation": "complete",
+                            "record_id": record_id,
+                            "object_id": object_id,
+                        }
+                    },
                     api_key,
                 )
                 if not _matching_receipt(result, object_id, {"ready"}):
