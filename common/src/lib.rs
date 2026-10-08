@@ -55,6 +55,15 @@ fn executable_is_in_app_bundle(path: &Path) -> bool {
 pub fn installation_source_executable() -> Result<PathBuf> {
     let executable = env::current_exe()?;
     #[cfg(target_os = "macos")]
+    return macos_installation_source(&executable);
+    #[cfg(not(target_os = "macos"))]
+    Ok(executable)
+}
+
+#[cfg(target_os = "macos")]
+fn macos_installation_source(executable: &Path) -> Result<PathBuf> {
+    // current_exe may report a symlink outside the app bundle (for example ~/.local/bin/tally).
+    let executable = executable.canonicalize()?;
     if let Some(app) = executable
         .ancestors()
         .find(|path| path.extension().and_then(|value| value.to_str()) == Some("app"))
@@ -1941,6 +1950,29 @@ mod tests {
         assert!(!executable_is_in_app_bundle(Path::new(
             "/usr/local/bin/tally-codex"
         )));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn uses_signed_helper_for_symlinked_app_executable() {
+        use std::os::unix::fs::symlink;
+
+        let directory = test_directory("symlinked-app");
+        let app = directory.join("Tally.app");
+        let executable = app.join("Contents/MacOS/tally");
+        let helper = app.join("Contents/Helpers/tally-hook");
+        fs::create_dir_all(executable.parent().unwrap()).unwrap();
+        fs::create_dir_all(helper.parent().unwrap()).unwrap();
+        fs::write(&executable, b"app").unwrap();
+        fs::write(&helper, b"helper").unwrap();
+        let link = directory.join("tally");
+        symlink(&executable, &link).unwrap();
+
+        assert_eq!(
+            super::macos_installation_source(&link).unwrap(),
+            helper.canonicalize().unwrap()
+        );
+        fs::remove_dir_all(directory).unwrap();
     }
 
     #[cfg(windows)]
