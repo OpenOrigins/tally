@@ -4,6 +4,19 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.15 - 2026-10-08
+
+### Added
+
+- Capture readable input, output, and tool content exposed by Codex, Claude
+  Code, Cursor, and LangGraph, with personal data and credentials redacted.
+- Upload redacted content above 256 KiB in chunks, up to the 8 MiB safety limit.
+- Allow local repository exclusions before capture and delivery.
+
+### Changed
+
+- Disable heartbeat records by default; explicit opt-in remains available.
+
 ### Fixed
 
 - Codex token usage now combines each rollout file's own usage, so continued

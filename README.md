@@ -148,11 +148,11 @@ standard callback interface. Its guide includes installation instructions,
 copy-paste examples, explicit handoff events, failure behavior, and local data
 management.
 
-Download `tally_langgraph-0.1.0-py3-none-any.whl` from the
+Download `tally_langgraph-0.1.1-py3-none-any.whl` from the
 [latest release](https://github.com/OpenOrigins/tally/releases/latest), then run:
 
 ```sh
-python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl
+python -m pip install ~/Downloads/tally_langgraph-0.1.1-py3-none-any.whl
 ```
 
 The universal wheel supports Python 3.10 through 3.14. See the

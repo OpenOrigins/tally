@@ -321,11 +321,11 @@ jobs:
           body: |
             Tally installs audit logging for Codex, Claude Code, and Cursor from one graphical installer.
 
-            ## What's new in 0.1.14
+            ## What's new in 0.1.15
 
-            - Install Cursor hooks from the same app as Codex and Claude Code.
-            - Capture cumulative Codex token usage and workspace fingerprints in Tally records.
-            - Resolve working directories in Claude Code records and use the new GitHub monitor LangGraph example.
+            - Capture redacted input, output, and tool content exposed by Codex, Claude Code, Cursor, and LangGraph. Larger content is uploaded in chunks up to 8 MiB.
+            - Disable heartbeats by default and support local repository exclusions before capture and delivery.
+            - Improve Codex token usage across resumed and forked threads.
 
             ## Install
 
@@ -344,7 +344,7 @@ jobs:
 
             **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
 
-            **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`. The universal wheel supports Python 3.10 through 3.14. See the [LangGraph guide](https://github.com/OpenOrigins/tally/tree/${{ github.ref_name }}/integrations/langgraph) for setup.
+            **Python / LangGraph (package 0.1.1):** Download `tally_langgraph-0.1.1-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.1-py3-none-any.whl`. The universal wheel supports Python 3.10 through 3.14. See the [LangGraph guide](https://github.com/OpenOrigins/tally/tree/${{ github.ref_name }}/integrations/langgraph) for setup.
 
             Choose Codex, Claude Code, Cursor, or any combination in the installer. Tally stores the dashboard Agent API key locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 
@@ -405,7 +405,7 @@ jobs:
             - **macOS:** Download the `.dmg` for your Mac, open it, drag Tally to Applications, and open Tally.
             - **Windows:** Download and open `tally-windows-x86_64.exe`. The executable is currently unsigned, so SmartScreen may require **More info** > **Run anyway**; managed enterprise devices may block it.
             - **Linux:** Download `tally-linux-x86_64`, allow it to run, and open it.
-            - **Python / LangGraph (package 0.1.0):** Download `tally_langgraph-0.1.0-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.0-py3-none-any.whl`.
+            - **Python / LangGraph (package 0.1.1):** Download `tally_langgraph-0.1.1-py3-none-any.whl`, then run `python -m pip install ~/Downloads/tally_langgraph-0.1.1-py3-none-any.whl`.
 
             Choose Codex, Claude Code, Cursor, or any combination. The installer asks for the Agent API key, stores it locally, installs the selected hooks, and confirms each selected client with the dashboard. Codex users must install Codex CLI first, then run `codex`, review the new OpenOrigins Tally hooks, press `t` to trust all, and reopen Codex Desktop.
 
