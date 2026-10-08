@@ -33,7 +33,7 @@ python -m pip install './integrations/langgraph[langgraph]'
 From a built wheel:
 
 ```bash
-python -m pip install 'tally_langgraph-0.1.0-py3-none-any.whl[langgraph]'
+python -m pip install 'tally_langgraph-0.1.1-py3-none-any.whl[langgraph]'
 ```
 
 The `langgraph` extra is convenient for a new project. Existing LangGraph projects can

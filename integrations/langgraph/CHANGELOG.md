@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.1.1
+
+- Capture redacted input, output, and tool content with chunked delivery.
+- Support local repository exclusions before capture and delivery.
+- Disable heartbeat records by default.
+
 ## 0.1.0
 
 - Initial supported `tally-langgraph` package.
