@@ -12,11 +12,15 @@ All notable changes to Tally are documented in this file.
   Code, Cursor, and LangGraph, with personal data and credentials redacted.
 - Upload redacted content above 256 KiB in chunks, up to the 8 MiB safety limit.
 - Allow local repository exclusions before capture and delivery.
+- Claude Code and Codex `token_usage` now includes `context_tokens`, the
+  current context size from the latest reply, alongside the running totals.
+  Claude Code also reports `context_model`, and Codex reports
+  `context_window`, the model's context limit.
+- Compaction records now include `compaction_trigger` (`auto` or `manual`).
 
 ### Changed
 
 - Disable heartbeat records by default; explicit opt-in remains available.
-
 ### Fixed
 
 - Codex token usage now combines each rollout file's own usage, so continued
