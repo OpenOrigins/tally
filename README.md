@@ -103,6 +103,30 @@ policy is documented under [docs](docs/storage-and-detection.md).
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).
 
+### Local repository exclusions
+
+Create `~/.config/tally/privacy.json` to exclude GitHub owners and local paths
+from capture and delivery:
+
+```json
+{
+  "excluded_git_owners": ["example-organisation"],
+  "excluded_paths": ["/absolute/path/to/private-repository"]
+}
+```
+
+Tally checks the current workspace and workspace paths supplied by hooks before
+writing records. The forwarder checks queued records again before sending. A
+queued record without a workspace is suppressed while this policy is active.
+Unreadable policies and Git repositories whose remotes cannot be classified
+also stop capture or delivery. With an excluded Git owner configured, sessions
+outside a classifiable Git repository are also blocked. The LangGraph integration
+uses the same policy.
+
+This is a workspace boundary. Content copied from an excluded repository into
+another workspace cannot be identified reliably from hook events. Keep Tally
+disabled for sessions that may access excluded files from elsewhere.
+
 ## Compatibility
 
 Tally is tested with Codex CLI/Desktop 0.149.1 and Claude Code 2.1.223. It is

@@ -104,10 +104,12 @@ fn print_help() {
 }
 
 fn record_hook_event(event_type: &str) -> Result<()> {
-    set_runtime_defaults();
-
     let raw = read_stdin()?;
     let payload = parse_payload(&raw);
+    if tally_common::privacy::capture_blocked(&workspace_path(), &payload) {
+        return Ok(());
+    }
+    set_runtime_defaults();
     if env::var("TALLY_RUN_ID").unwrap_or_default().is_empty() {
         if let Some(run_id) = derive_run_id(&payload) {
             env::set_var("TALLY_RUN_ID", run_id);
@@ -168,7 +170,10 @@ fn wrap_claude(args: Vec<String>) -> Result<i32> {
     set_runtime_defaults();
 
     let is_print_mode = matches!(args.first().map(String::as_str), Some("-p" | "--print"));
-    if is_print_mode && env_enabled("TALLY_TEE_CLAUDE_STDIO", false) {
+    if is_print_mode
+        && env_enabled("TALLY_TEE_CLAUDE_STDIO", false)
+        && !tally_common::privacy::capture_blocked(&workspace_path(), &Value::Null)
+    {
         run_claude_with_tee(&args)
     } else {
         let status = Command::new("claude").args(&args).status()?;
@@ -251,6 +256,9 @@ fn update_heartbeat_state(
 
 fn run_heartbeat_daemon() -> Result<()> {
     set_runtime_defaults();
+    if tally_common::privacy::capture_blocked(&workspace_path(), &Value::Null) {
+        return Ok(());
+    }
     let sink = audit_sink("hook-heartbeat")?;
     tally_common::agent_runtime::run_heartbeat_daemon(
         &sink,
