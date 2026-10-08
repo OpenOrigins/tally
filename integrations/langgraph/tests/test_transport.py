@@ -99,7 +99,9 @@ def test_large_content_uploads_before_its_log_record(tmp_path: Path) -> None:
     chunks = [request["body"]["tally_content_upload"] for request in server.requests[:3]]
     assert b"".join(base64.b64decode(chunk["data_base64"]) for chunk in chunks) == text.encode()
     assert [chunk["chunk_index"] for chunk in chunks] == [0, 1, 2]
+    assert all(chunk["record_id"] == "record-1" for chunk in chunks)
     assert server.requests[3]["body"]["tally_content_upload"]["operation"] == "complete"
+    assert server.requests[3]["body"]["tally_content_upload"]["record_id"] == "record-1"
     assert server.requests[4]["body"]["captured_content"]["content_id"] == object_id
     assert server.requests[4]["body"]["captured_content"]["text"] is None
     assert record["captured_content"]["text"] == text  # the durable journal copy is unchanged
@@ -114,6 +116,18 @@ def test_failed_chunk_keeps_the_log_pending(tmp_path: Path) -> None:
     assert len(server.requests) == 1
     assert server.requests[0]["body"]["tally_content_upload"]["operation"] == "chunk"
     assert record["captured_content"]["text"] is not None
+
+
+def test_gateway_wrapped_upload_error_keeps_the_log_pending(tmp_path: Path) -> None:
+    text = "x" * (256 * 1024 + 1)
+    record = {"captured_content": {"capture_status": "complete", "text": text}}
+    with _server((200, {}, b'{"status_code":400,"message":"invalid Tally record id"}')) as server:
+        result = _transport(server, tmp_path).deliver("record-1", record)
+
+    assert result.disposition == "retry"
+    assert len(server.requests) == 1
+    assert server.requests[0]["headers"]["X-Tally-Record-Id"] == "record-1"
+    assert record["captured_content"]["text"] == text
 
 
 def test_server_error_retries_and_honors_retry_after(tmp_path: Path) -> None:
@@ -163,6 +177,7 @@ def test_disabled_forwarding_keeps_record_pending(tmp_path: Path) -> None:
         (b'["receipt"]', ["receipt"], "delivered"),
         (b'{"anchor_receipt":{"id":"legacy"}}', {"id": "legacy"}, "delivered"),
         (b'{"statusCode":500,"error":"embedded"}', None, "retry"),
+        (b'{"status_code":400,"message":"invalid upload"}', None, "retry"),
     ],
 )
 def test_success_response_shapes(body: bytes, receipt: Any, disposition: str) -> None:
