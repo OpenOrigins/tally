@@ -107,6 +107,10 @@ fn print_help() {
 fn record_hook_event(event_type: &str) -> Result<()> {
     let raw = read_stdin()?;
     let payload = parse_payload(&raw);
+    if tally_common::privacy::capture_blocked(&workspace_path(), &payload) {
+        println!("{}", response_for(event_type));
+        return Ok(());
+    }
     set_runtime_defaults(&payload);
     if env::var("TALLY_RUN_ID").unwrap_or_default().is_empty() {
         if let Some(run_id) = derive_run_id(&payload) {
@@ -284,6 +288,9 @@ fn update_heartbeat_state(
 
 fn run_heartbeat_daemon() -> Result<()> {
     set_runtime_defaults(&json!({}));
+    if tally_common::privacy::capture_blocked(&workspace_path(), &Value::Null) {
+        return Ok(());
+    }
     let sink = audit_sink("hook-heartbeat")?;
     tally_common::agent_runtime::run_heartbeat_daemon(
         &sink,

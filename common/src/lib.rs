@@ -17,6 +17,7 @@ pub mod agent_runtime;
 mod content_upload;
 mod installer_gui;
 mod journal;
+pub mod privacy;
 pub mod records;
 mod server_evidence;
 
@@ -835,6 +836,16 @@ pub fn forward_pending(state_dir: &Path) -> Result<()> {
             }
         }
         for record in records {
+            if privacy::delivery_blocked(&record.record) {
+                journal::append_delivery_outcome(
+                    state_dir,
+                    &record,
+                    "suppressed",
+                    None,
+                    Some("workspace excluded by local privacy policy"),
+                )?;
+                continue;
+            }
             materialize_private_objects(&record)?;
             let body = serde_json::to_string(&record.record)?;
             let mut attempt = 0_u32;

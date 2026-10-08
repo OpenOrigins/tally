@@ -44,6 +44,9 @@ pub struct AuditSink {
 
 impl AuditSink {
     pub fn new(config: AuditSinkConfig<'_>) -> Result<Self> {
+        if super::privacy::capture_blocked(&config.workspace, &Value::Null) {
+            return Err("workspace excluded by local privacy policy".into());
+        }
         let source = safe_slug(config.source, "source");
         let log_root = config.log_root;
         super::mark_tally_data_directory(&log_root)?;

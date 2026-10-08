@@ -14,6 +14,7 @@ from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from ._version import __version__
 from .config import TallyConfig
+from .privacy import delivery_blocked
 
 _MAX_RESPONSE_BYTES = 64 * 1024
 _INLINE_BYTES = 256 * 1024
@@ -48,6 +49,8 @@ class HttpTransport:
         self._opener = build_opener(_NoRedirectHandler())
 
     def deliver(self, record_id: str, record: dict[str, Any]) -> DeliveryResult:
+        if delivery_blocked(record):
+            return DeliveryResult("dead_letter", "workspace excluded by local privacy policy")
         if not self.config.forwarding_enabled:
             return DeliveryResult("retry", "forwarding is disabled", retry_after_seconds=60)
         api_key = self.config.api_key
