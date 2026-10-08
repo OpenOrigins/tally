@@ -742,12 +742,20 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
         let model = message
             .get("model")
             .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
+            .unwrap_or("unknown");
+        let message_totals = TokenTotals::from_usage(usage);
         // Streamed replies repeat a message id with growing usage, so the last line wins.
         // `<synthetic>` replies are local errors with zero usage, not real context.
         if model != "<synthetic>" {
-            context = Some((TokenTotals::from_usage(usage).total(), model.clone()));
+            match &mut context {
+                Some((tokens, context_model)) => {
+                    *tokens = message_totals.total();
+                    if context_model != model {
+                        model.clone_into(context_model);
+                    }
+                }
+                None => context = Some((message_totals.total(), model.to_string())),
+            }
         }
         if message
             .get("id")
@@ -757,10 +765,14 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
             continue;
         }
 
-        let message_totals = TokenTotals::from_usage(usage);
         totals.add(message_totals);
         assistant_messages = assistant_messages.saturating_add(1);
-        per_model.entry(model).or_default().add(message_totals);
+        match per_model.get_mut(model) {
+            Some(model_totals) => model_totals.add(message_totals),
+            None => {
+                per_model.insert(model.to_string(), message_totals);
+            }
+        }
     }
 
     let by_model = per_model
