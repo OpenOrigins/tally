@@ -709,7 +709,8 @@ impl TokenTotals {
     }
 }
 
-/// Returns cumulative token usage from the assistant messages in a Claude Code transcript.
+/// Returns cumulative token usage from the assistant messages in a Claude Code transcript,
+/// plus the current context size (`context_tokens`) taken from the latest real reply.
 pub fn transcript_token_usage(transcript_path: &Path) -> Value {
     let file = match fs::File::open(transcript_path) {
         Ok(file) => file,
@@ -720,6 +721,7 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
     let mut per_model: BTreeMap<String, TokenTotals> = BTreeMap::new();
     let mut seen_message_ids = HashSet::new();
     let mut assistant_messages = 0_u64;
+    let mut context: Option<(u64, String)> = None;
 
     for line in BufReader::new(file)
         .lines()
@@ -737,6 +739,24 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
         let Some(usage) = message.get("usage") else {
             continue;
         };
+        let model = message
+            .get("model")
+            .and_then(Value::as_str)
+            .unwrap_or("unknown");
+        let message_totals = TokenTotals::from_usage(usage);
+        // Streamed replies repeat a message id with growing usage, so the last line wins.
+        // `<synthetic>` replies are local errors with zero usage, not real context.
+        if model != "<synthetic>" {
+            match &mut context {
+                Some((tokens, context_model)) => {
+                    *tokens = message_totals.total();
+                    if context_model != model {
+                        model.clone_into(context_model);
+                    }
+                }
+                None => context = Some((message_totals.total(), model.to_string())),
+            }
+        }
         if message
             .get("id")
             .and_then(Value::as_str)
@@ -745,15 +765,14 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
             continue;
         }
 
-        let message_totals = TokenTotals::from_usage(usage);
         totals.add(message_totals);
         assistant_messages = assistant_messages.saturating_add(1);
-        let model = message
-            .get("model")
-            .and_then(Value::as_str)
-            .unwrap_or("unknown")
-            .to_string();
-        per_model.entry(model).or_default().add(message_totals);
+        match per_model.get_mut(model) {
+            Some(model_totals) => model_totals.add(message_totals),
+            None => {
+                per_model.insert(model.to_string(), message_totals);
+            }
+        }
     }
 
     let by_model = per_model
@@ -769,6 +788,10 @@ pub fn transcript_token_usage(transcript_path: &Path) -> Value {
             "by_model": by_model,
         }),
     );
+    if let Some((context_tokens, context_model)) = context {
+        result["context_tokens"] = json!(context_tokens);
+        result["context_model"] = json!(context_model);
+    }
     result
 }
 
@@ -1225,6 +1248,46 @@ mod tests {
             usage["by_model"]["claude-haiku"]["cache_read_input_tokens"],
             100
         );
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn context_tokens_come_from_the_last_line_of_the_latest_real_reply() {
+        let path = env::temp_dir().join(format!("tally-transcript-{}.jsonl", unique_suffix()));
+        let mut file = fs::File::create(&path).unwrap();
+        for entry in [
+            json!({"type": "assistant", "message": {"id": "msg_1", "model": "claude-opus", "usage": {"input_tokens": 5, "output_tokens": 50}}}),
+            json!({"type": "assistant", "message": {"id": "msg_2", "model": "claude-opus", "usage": {"input_tokens": 2, "cache_creation_input_tokens": 30, "cache_read_input_tokens": 1000, "output_tokens": 1}}}),
+            json!({"type": "assistant", "message": {"id": "msg_2", "model": "claude-opus", "usage": {"input_tokens": 2, "cache_creation_input_tokens": 30, "cache_read_input_tokens": 1000, "output_tokens": 400}}}),
+            json!({"type": "assistant", "message": {"id": "msg_3", "model": "<synthetic>", "usage": {"input_tokens": 0, "output_tokens": 0}}}),
+        ] {
+            writeln!(file, "{entry}").unwrap();
+        }
+
+        let usage = transcript_token_usage(&path);
+        assert_eq!(usage["context_tokens"], 1432);
+        assert_eq!(usage["context_model"], "claude-opus");
+        assert_eq!(usage["output_tokens"], 51);
+
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn transcript_without_replies_has_no_context_tokens() {
+        let path = env::temp_dir().join(format!("tally-transcript-{}.jsonl", unique_suffix()));
+        fs::write(
+            &path,
+            format!(
+                "{}\n",
+                json!({"type": "user", "message": {"content": "hi"}})
+            ),
+        )
+        .unwrap();
+
+        let usage = transcript_token_usage(&path);
+        assert_eq!(usage["available"], true);
+        assert!(usage.get("context_tokens").is_none());
 
         fs::remove_file(path).unwrap();
     }

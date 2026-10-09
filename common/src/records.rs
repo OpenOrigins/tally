@@ -236,15 +236,19 @@ pub fn build_hook_record(
                 "acknowledgement_status": if is_stop { "acknowledged" } else { "pending" },
             })
         }
-        _ => json!({
-            "record_type": profile.lifecycle_record_type,
-            "schema_version": "0.2",
-            "session_id": identity.session_id,
-            "event_hash": raw_ref["hash"],
-            "event_uri": raw_ref["uri"],
-            "observed_at": observed_at,
-            "metadata": metadata,
-        }),
+        _ => with_compaction_trigger(
+            json!({
+                "record_type": profile.lifecycle_record_type,
+                "schema_version": "0.2",
+                "session_id": identity.session_id,
+                "event_hash": raw_ref["hash"],
+                "event_uri": raw_ref["uri"],
+                "observed_at": observed_at,
+                "metadata": metadata,
+            }),
+            event_type,
+            payload,
+        ),
     };
     Ok(with_hook_event(
         with_workspace_context(record, metadata),
@@ -252,6 +256,17 @@ pub fn build_hook_record(
         event_type,
         profile.agent_name,
     ))
+}
+
+/// Compaction records say whether the agent compacted on its own (`auto`) or was asked to
+/// (`manual`); only automatic compactions show where the context window ran out.
+fn with_compaction_trigger(mut record: Value, event_type: &str, payload: &Value) -> Value {
+    if matches!(event_type, "PreCompact" | "preCompact") {
+        if let Some(trigger) = payload.get("trigger").and_then(Value::as_str) {
+            record["compaction_trigger"] = Value::String(trigger.to_string());
+        }
+    }
+    record
 }
 
 fn direct_field<'a>(
@@ -334,5 +349,16 @@ mod tests {
         }
         let action = with_workspace_context(json!({"record_type": "ACTION_TAKEN"}), &metadata);
         assert!(action.get("metadata").is_none());
+    }
+
+    #[test]
+    fn compaction_records_carry_the_trigger() {
+        let payload = json!({"trigger": "auto"});
+        for event_type in ["PreCompact", "preCompact"] {
+            let record = with_compaction_trigger(json!({}), event_type, &payload);
+            assert_eq!(record["compaction_trigger"], "auto");
+        }
+        let other = with_compaction_trigger(json!({}), "Notification", &payload);
+        assert!(other.get("compaction_trigger").is_none());
     }
 }

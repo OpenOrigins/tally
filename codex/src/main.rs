@@ -193,12 +193,13 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
         return json!({"available": false, "reason": "rollout_not_found"});
     }
 
-    let Some(usage) = rollout_paths.iter().find_map(|path| {
+    let Some(info) = rollout_paths.iter().find_map(|path| {
         let mut file = fs::File::open(path).ok()?;
-        latest_codex_total_token_usage(&mut file)
+        latest_codex_token_info(&mut file)
     }) else {
         return json!({"available": false, "reason": "token_count_not_found"});
     };
+    let usage = &info["total_token_usage"];
     // A fork's counter starts at its parent's total; report only the fork's own usage.
     let baseline = rollout_paths
         .last()
@@ -226,9 +227,10 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
         let Some(mut file) = fs::File::open(path).ok() else {
             continue;
         };
-        let Some(total) = latest_codex_total_token_usage(&mut file) else {
+        let Some(info) = latest_codex_token_info(&mut file) else {
             continue;
         };
+        let total = &info["total_token_usage"];
         let file_baseline = if index == 0 {
             baseline.clone()
         } else {
@@ -252,7 +254,7 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
     } else {
         newest
     };
-    json!({
+    let mut result = json!({
         "available": true,
         "input_tokens": fields[0],
         "output_tokens": fields[1],
@@ -263,10 +265,18 @@ fn codex_token_usage(codex_home: &Path, session_id: &str) -> Value {
         "output_token_details": {
             "reasoning_tokens": fields[4],
         },
-    })
+    });
+    // The latest turn's usage is what is in the context window right now.
+    if let Some(context_tokens) = info["last_token_usage"]["total_tokens"].as_u64() {
+        result["context_tokens"] = json!(context_tokens);
+    }
+    if let Some(context_window) = info["model_context_window"].as_u64() {
+        result["context_window"] = json!(context_window);
+    }
+    result
 }
 
-fn latest_codex_total_token_usage(file: &mut fs::File) -> Option<Value> {
+fn latest_codex_token_info(file: &mut fs::File) -> Option<Value> {
     const CHUNK_SIZE: usize = 64 * 1024;
 
     let mut position = file.seek(SeekFrom::End(0)).ok()?;
@@ -282,15 +292,15 @@ fn latest_codex_total_token_usage(file: &mut fs::File) -> Option<Value> {
 
         let mut line_end = chunk.len();
         while let Some(newline) = chunk[..line_end].iter().rposition(|byte| *byte == b'\n') {
-            if let Some(usage) = codex_total_token_usage_from_line(&chunk[newline + 1..line_end]) {
-                return Some(usage);
+            if let Some(info) = codex_token_info_from_line(&chunk[newline + 1..line_end]) {
+                return Some(info);
             }
             line_end = newline;
         }
         partial_line = chunk[..line_end].to_vec();
     }
 
-    codex_total_token_usage_from_line(&partial_line)
+    codex_token_info_from_line(&partial_line)
 }
 
 /// Counter value before a rollout's first usage event. The original file needs
@@ -336,7 +346,8 @@ fn codex_rollout_baseline(path: &Path, require_fork: bool, require_last: bool) -
     Some(Value::Object(inherited))
 }
 
-fn codex_total_token_usage_from_line(line: &[u8]) -> Option<Value> {
+/// The `info` of a `token_count` event that carries a cumulative total.
+fn codex_token_info_from_line(line: &[u8]) -> Option<Value> {
     let entry = serde_json::from_slice::<Value>(line).ok()?;
     if entry.get("type").and_then(Value::as_str) != Some("event_msg") {
         return None;
@@ -345,7 +356,9 @@ fn codex_total_token_usage_from_line(line: &[u8]) -> Option<Value> {
     if payload.get("type").and_then(Value::as_str) != Some("token_count") {
         return None;
     }
-    payload.get("info")?.get("total_token_usage").cloned()
+    let info = payload.get("info")?;
+    info.get("total_token_usage")?;
+    Some(info.clone())
 }
 
 /// Returns every rollout file for the session, newest first. When Codex
@@ -1694,6 +1707,42 @@ mod tests {
             codex_token_usage(&codex_home, session_id)["total_tokens"],
             248_538
         );
+
+        fs::remove_dir_all(codex_home).unwrap();
+    }
+
+    #[test]
+    fn reads_codex_context_from_the_newest_token_count() {
+        let codex_home = env::temp_dir().join(format!("tally-codex-home-{}", unique_suffix()));
+        let session_id = "01a10fa1-901e-7141-bae3-6d61bcf8632b";
+        let sessions_dir = codex_home.join("sessions/2026/10/08");
+        fs::create_dir_all(&sessions_dir).unwrap();
+        let rollout_path =
+            sessions_dir.join(format!("rollout-2026-10-08T10-00-00-{session_id}.jsonl"));
+        let mut file = fs::File::create(&rollout_path).unwrap();
+        for (total, last) in [(50_000, 50_000), (180_000, 130_000)] {
+            writeln!(
+                file,
+                "{}",
+                json!({
+                    "type": "event_msg",
+                    "payload": {
+                        "type": "token_count",
+                        "info": {
+                            "total_token_usage": {"total_tokens": total},
+                            "last_token_usage": {"input_tokens": last - 1_000, "output_tokens": 1_000, "total_tokens": last},
+                            "model_context_window": 272_000,
+                        }
+                    }
+                })
+            )
+            .unwrap();
+        }
+
+        let usage = codex_token_usage(&codex_home, session_id);
+        assert_eq!(usage["total_tokens"], 180_000);
+        assert_eq!(usage["context_tokens"], 130_000);
+        assert_eq!(usage["context_window"], 272_000);
 
         fs::remove_dir_all(codex_home).unwrap();
     }
