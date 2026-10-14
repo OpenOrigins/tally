@@ -20,6 +20,7 @@ mod journal;
 pub mod privacy;
 pub mod records;
 mod server_evidence;
+pub mod task_assist;
 
 pub use installer_gui::{run_installer_gui, GuiClient};
 

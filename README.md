@@ -103,6 +103,28 @@ policy is documented under [docs](docs/storage-and-detection.md).
 More help is available in the [account setup guide](SETUP.md). Technical release
 verification is documented under [docs](docs/).
 
+### Task matching and descriptions
+
+For Codex and Claude Code, Tally's `UserPromptSubmit` hook fetches a bounded
+list of your active tasks from the authenticated Tally API and gives it to the
+model in the turn you are already using. The model adds a small JSON HTML
+comment to its final answer with its match, title, goal, and actual progress.
+The `Stop` hook validates that comment and a Tally helper sends it through
+the existing authenticated ingest endpoint. Classification makes no second
+model call or Codex/Claude CLI invocation and needs no MCP server or model
+API key. The comment is
+usually hidden in rendered Markdown but can be visible in raw transcripts.
+
+The backend checks the authenticated user and selected task before saving the
+result. If hook execution, candidate lookup, or model output fails, a deterministic backend
+matcher takes over after a short grace period without a backend model call. Set
+`TALLY_TASK_ASSIST_ENABLED=0` in the hook environment to disable local task
+classification. The latest local delivery result is recorded in
+`task-assist-status.json` beside the selected client's Tally credentials.
+Workspace exclusions apply before candidate lookup and again before delivery.
+The [in-turn task metadata protocol](docs/task-assist-in-turn.md) documents the
+hook output, validation, and fallback behavior.
+
 ### Local repository exclusions
 
 Create `~/.config/tally/privacy.json` to exclude GitHub owners and local paths

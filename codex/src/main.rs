@@ -61,6 +61,12 @@ pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
             tally_common::forward_pending(&onboarding_state_dir())?;
             Ok(0)
         }
+        Some("task-assist-deliver") => {
+            let state_dir = PathBuf::from(args.next().ok_or("missing task assist state dir")?);
+            let payload_path = PathBuf::from(args.next().ok_or("missing task assist payload")?);
+            tally_common::task_assist::deliver("codex", &state_dir, &payload_path)?;
+            Ok(0)
+        }
         Some("notify") => {
             handle_desktop_notification(args.collect())?;
             Ok(0)
@@ -106,6 +112,12 @@ fn record_hook_event(event_type: &str) -> Result<()> {
         return Ok(());
     }
     record_payload_event(event_type, &raw, &payload, "codex-hooks", true)?;
+    match tally_common::task_assist::on_hook("codex", event_type, &payload, &onboarding_state_dir())
+    {
+        Ok(Some(output)) => println!("{output}"),
+        Ok(None) => {}
+        Err(error) => eprintln!("Tally task assist: {error}"),
+    }
     if event_type == "Stop" {
         mark_turn_complete(&onboarding_state_dir(), "hook", &payload)?;
     }

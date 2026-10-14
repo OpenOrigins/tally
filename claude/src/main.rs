@@ -68,6 +68,12 @@ pub fn dispatch(arguments: Vec<String>) -> Result<i32> {
             tally_common::forward_pending(&onboarding_state_dir())?;
             Ok(0)
         }
+        Some("task-assist-deliver") => {
+            let state_dir = PathBuf::from(args.next().ok_or("missing task assist state dir")?);
+            let payload_path = PathBuf::from(args.next().ok_or("missing task assist payload")?);
+            tally_common::task_assist::deliver("claude", &state_dir, &payload_path)?;
+            Ok(0)
+        }
         Some("install-desktop-hooks" | "install") => {
             let options =
                 tally_common::parse_install_options(args.collect::<Vec<_>>(), "Claude Code")?;
@@ -163,6 +169,16 @@ fn record_hook_event(event_type: &str) -> Result<()> {
     record["audit_event_id"] = event["event_id"].clone();
     record["token_usage"] = token_usage;
     sink.write_tally_record(&record)?;
+    match tally_common::task_assist::on_hook(
+        "claude",
+        event_type,
+        &payload,
+        &onboarding_state_dir(),
+    ) {
+        Ok(Some(output)) => println!("{output}"),
+        Ok(None) => {}
+        Err(error) => eprintln!("Tally task assist: {error}"),
+    }
     Ok(())
 }
 
