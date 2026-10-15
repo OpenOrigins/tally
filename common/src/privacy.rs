@@ -160,6 +160,11 @@ fn collect_paths(value: &Value, paths: &mut Vec<PathBuf>) {
     match value {
         Value::Object(object) => {
             for (key, value) in object {
+                // Claude's transcript lives in client-owned state outside the workspace.
+                // Classify the actual workspace and referenced work files, not this log path.
+                if key == "transcript_path" {
+                    continue;
+                }
                 if matches!(
                     key.as_str(),
                     "cwd"
@@ -259,7 +264,16 @@ mod tests {
         };
         assert!(policy.excludes_workspace(&blocked).unwrap());
         assert!(policy
-            .excludes_context(&allowed, &serde_json::json!({"cwd": blocked}))
+            .excludes_context(&allowed, &serde_json::json!({"cwd": blocked.clone()}))
+            .unwrap());
+        assert!(!policy
+            .excludes_context(
+                &allowed,
+                &serde_json::json!({"transcript_path": blocked.clone()})
+            )
+            .unwrap());
+        assert!(policy
+            .excludes_context(&allowed, &serde_json::json!({"file_path": blocked}))
             .unwrap());
         assert!(!policy.excludes_workspace(&allowed).unwrap());
         fs::remove_dir_all(root).unwrap();
