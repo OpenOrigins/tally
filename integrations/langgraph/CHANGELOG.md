@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.1.2
+
+- Collect configured LangGraph runs without local repository exclusion rules.
+
 ## 0.1.1
 
 - Capture redacted input, output, and tool content with chunked delivery.

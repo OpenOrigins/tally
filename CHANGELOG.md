@@ -4,6 +4,27 @@ All notable changes to Tally are documented in this file.
 
 ## Unreleased
 
+## 0.1.16 - 2026-10-16
+
+### Added
+
+- Generate task matches, titles, goals, and progress within active Codex and
+  Claude Code turns, then send validated metadata through Tally's existing
+  hooks. The backend supplies a summary when the client does not produce one.
+
+### Changed
+
+- Collect records from every configured workspace; remove local workspace and
+  Git-owner exclusion rules from the native clients and LangGraph package.
+- Include context size and compaction trigger in Codex and Claude Code records.
+
+### Fixed
+
+- Preserve failed task-metadata deliveries for retry and keep exact-format
+  responses free of metadata comments.
+- Keep native GUI installer smoke tests reliable on Windows and avoid replacing
+  an identical installed hook executable.
+
 ## 0.1.15 - 2026-10-08
 
 ### Added
