@@ -117,37 +117,14 @@ usually hidden in rendered Markdown but can be visible in raw transcripts.
 
 The backend checks the authenticated user and selected task before saving the
 result. If hook execution, candidate lookup, or model output fails, a deterministic backend
-matcher takes over after a short grace period without a backend model call. Set
+matcher takes over after the turn ends and the delivery grace period expires.
+The backend may generate a task summary when no client summary was stored;
+it preserves client summaries. Set
 `TALLY_TASK_ASSIST_ENABLED=0` in the hook environment to disable local task
 classification. The latest local delivery result is recorded in
 `task-assist-status.json` beside the selected client's Tally credentials.
-Workspace exclusions apply before candidate lookup and again before delivery.
 The [in-turn task metadata protocol](docs/task-assist-in-turn.md) documents the
 hook output, validation, and fallback behavior.
-
-### Local repository exclusions
-
-Create `~/.config/tally/privacy.json` to exclude GitHub owners and local paths
-from capture and delivery:
-
-```json
-{
-  "excluded_git_owners": ["example-organisation"],
-  "excluded_paths": ["/absolute/path/to/private-repository"]
-}
-```
-
-Tally checks the current workspace and workspace paths supplied by hooks before
-writing records. The forwarder checks queued records again before sending. A
-queued record without a workspace is suppressed while this policy is active.
-Unreadable policies and Git repositories whose remotes cannot be classified
-also stop capture or delivery. With an excluded Git owner configured, sessions
-outside a classifiable Git repository are also blocked. The LangGraph integration
-uses the same policy.
-
-This is a workspace boundary. Content copied from an excluded repository into
-another workspace cannot be identified reliably from hook events. Keep Tally
-disabled for sessions that may access excluded files from elsewhere.
 
 ## Compatibility
 
@@ -164,8 +141,8 @@ step.
 
 ## LangGraph Integration
 
-The [`tally-langgraph`](integrations/langgraph/) Python package adds durable,
-privacy-aware Tally audit records to an existing LangGraph agent through the
+The [`tally-langgraph`](integrations/langgraph/) Python package adds durable
+Tally audit records to an existing LangGraph agent through the
 standard callback interface. Its guide includes installation instructions,
 copy-paste examples, explicit handoff events, failure behavior, and local data
 management.

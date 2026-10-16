@@ -1005,6 +1005,10 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
         heartbeat_run_id = f"native-heartbeat-volume-{agent}"
         heartbeat_env["TALLY_RUN_ID"] = heartbeat_run_id
         forwarded_count = len(server.recorded("/v1/tally/logs"))
+        instruction_count = len(server.recorded_matching(
+            "/v1/tally/logs",
+            lambda request: request["body"].get("record_type") == "INSTRUCTION_RECEIVED",
+        ))
         user_prompt = next(
             command
             for command in tally_commands(config)
@@ -1021,12 +1025,18 @@ def smoke(source_binary: Path, agent: str, root: Path) -> None:
                 ),
             },
         )
-        server.wait_for("/v1/tally/logs", count=forwarded_count + 1)
-        time.sleep(0.5)
-        emitted = server.recorded("/v1/tally/logs")[forwarded_count:]
+        server.wait_for_matching(
+            "/v1/tally/logs",
+            lambda request: request["body"].get("record_type") == "INSTRUCTION_RECEIVED",
+            count=instruction_count + 1,
+        )
+        requests = server.recorded("/v1/tally/logs")[forwarded_count:]
+        emitted = [request for request in requests if request["body"].get("record_type")]
         assert len(emitted) == 1, (
             f"one {agent} hook produced {len(emitted)} forwarded records"
         )
+        assert any(request["body"].get("tally_task_assist", {}).get("operation") == "candidates"
+                   for request in requests)
         instruction = emitted[0]["body"]
         assert instruction["record_type"] == "INSTRUCTION_RECEIVED"
         evidence = instruction["server_evidence"]

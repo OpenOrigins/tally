@@ -1,8 +1,9 @@
 # Task metadata from the active turn
 
 Tally obtains task matching and task descriptions from the Codex or Claude Code
-turn the user is already running. It does not start either client's CLI or make
-a separate model request.
+turn the user is already running. It does not start either client's CLI. If the
+client does not provide task metadata, the backend may generate a task summary
+after the delivery grace period.
 
 ## Protocol
 
@@ -17,18 +18,25 @@ a separate model request.
    checks that a selected task was offered, and hands an authenticated
    `submit` request to Tally's own delivery helper. The helper retries while
    ingest materializes the session. The backend rechecks ownership, source,
-   task state, timing, and duplicate turns before storing anything.
+   task state, timing, and duplicate turns before storing anything. Failed
+   delivery packets remain on disk and are retried by the next client hook.
 4. Missing hooks, unavailable candidates, malformed model output, and
    delivery failures leave the user turn alone. The backend's deterministic
-   matcher and description fallback run after the client grace period.
+   matcher and summary fallback run after the turn ends and the client grace period.
 
 The HTML comment is hidden in most rendered Markdown views but can appear in
-raw transcripts. It is necessary because the portable Stop-hook interface
-exposes the final assistant message, not a private model result channel.
+raw transcripts. For explicit exact-format prompts Tally skips the comment and
+uses the backend fallback. The hook context also tells the assistant to omit it
+when an output schema requires a strict response. A CLI output schema is not
+currently included in the prompt-hook payload, so automatic detection depends
+on the assistant following that instruction. The comment is necessary because
+the portable Stop-hook interface exposes the final assistant message, not a
+private model result channel.
 Tally does not use a blocking Stop-hook retry: a retry would create an extra
 user-visible assistant continuation and could overwrite the prompt snapshot.
 
-This first version keeps a session's existing task link. It does not split a
+This first version keeps a session's client-selected task link. A late client
+decision can replace a provisional backend match. It does not split a
 single Codex or Claude Code session into separate tasks when the user changes
 goals midway through that session. The backend places new turns on the linked
 task without a second model-based match for those clients.
@@ -50,5 +58,4 @@ does not affect this protocol; disabling command hooks does.
 
 No production configuration is changed by source builds or tests. The
 `TALLY_TASK_ASSIST_ENABLED=0` environment setting disables the in-turn
-metadata path. Workspace privacy exclusions run before candidate lookup and
-before delivery.
+metadata path.
