@@ -334,18 +334,22 @@ def gui_install(
             "TALLY_GUI_URL_FILE": str(url_file),
         }
     )
+    stdout_file = tempfile.TemporaryFile()
+    stderr_file = tempfile.TemporaryFile()
     process = subprocess.Popen(
         [str(binary), "gui"],
-        text=True,
         env=gui_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
     )
     try:
         deadline = time.monotonic() + 10
         while not url_file.exists() and time.monotonic() < deadline:
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read().decode("utf-8", errors="replace")
+                stderr = stderr_file.read().decode("utf-8", errors="replace")
                 raise AssertionError(f"GUI exited before startup\n{stdout}\n{stderr}")
             time.sleep(0.05)
         assert url_file.exists(), "GUI did not publish its local URL"
@@ -457,7 +461,11 @@ def gui_install(
         elif not expect_connected:
             gui_request(origin, token, "/api/shutdown", {})
 
-        stdout, stderr = process.communicate(timeout=10)
+        process.wait(timeout=10)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", errors="replace")
+        stderr = stderr_file.read().decode("utf-8", errors="replace")
         assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
         assert api_key not in stdout
         assert api_key not in stderr
@@ -465,7 +473,9 @@ def gui_install(
     finally:
         if process.poll() is None:
             process.terminate()
-            process.communicate(timeout=5)
+            process.wait(timeout=5)
+        stdout_file.close()
+        stderr_file.close()
 
 
 def gui_uninstall(
@@ -485,18 +495,22 @@ def gui_uninstall(
             "TALLY_GUI_URL_FILE": str(url_file),
         }
     )
+    stdout_file = tempfile.TemporaryFile()
+    stderr_file = tempfile.TemporaryFile()
     process = subprocess.Popen(
         [str(binary), "gui"],
-        text=True,
         env=gui_env,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
+        stdout=stdout_file,
+        stderr=stderr_file,
     )
     try:
         deadline = time.monotonic() + 10
         while not url_file.exists() and time.monotonic() < deadline:
             if process.poll() is not None:
-                stdout, stderr = process.communicate()
+                stdout_file.seek(0)
+                stderr_file.seek(0)
+                stdout = stdout_file.read().decode("utf-8", errors="replace")
+                stderr = stderr_file.read().decode("utf-8", errors="replace")
                 raise AssertionError(f"GUI exited before startup\n{stdout}\n{stderr}")
             time.sleep(0.05)
         assert url_file.exists(), "GUI did not publish its local URL"
@@ -520,13 +534,19 @@ def gui_uninstall(
         assert detail["configPath"] == str(config_path)
         assert detail["dataRemoved"] is remove_data
 
-        stdout, stderr = process.communicate(timeout=10)
+        process.wait(timeout=10)
+        stdout_file.seek(0)
+        stderr_file.seek(0)
+        stdout = stdout_file.read().decode("utf-8", errors="replace")
+        stderr = stderr_file.read().decode("utf-8", errors="replace")
         assert process.returncode == 0, f"GUI failed\n{stdout}\n{stderr}"
         return result
     finally:
         if process.poll() is None:
             process.terminate()
-            process.communicate(timeout=5)
+            process.wait(timeout=5)
+        stdout_file.close()
+        stderr_file.close()
 
 
 def smoke(source_binary: Path, agent: str, root: Path) -> None:
