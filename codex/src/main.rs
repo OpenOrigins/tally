@@ -108,9 +108,6 @@ fn print_help() {
 fn record_hook_event(event_type: &str) -> Result<()> {
     let raw = read_stdin()?;
     let payload = parse_payload(&raw);
-    if tally_common::privacy::capture_blocked(&workspace_path(), &payload) {
-        return Ok(());
-    }
     record_payload_event(event_type, &raw, &payload, "codex-hooks", true)?;
     match tally_common::task_assist::on_hook("codex", event_type, &payload, &onboarding_state_dir())
     {
@@ -131,9 +128,6 @@ fn record_payload_event(
     source: &str,
     update_heartbeat: bool,
 ) -> Result<()> {
-    if tally_common::privacy::capture_blocked(&workspace_path(), payload) {
-        return Ok(());
-    }
     set_runtime_defaults();
     if env::var("TALLY_RUN_ID").unwrap_or_default().is_empty() {
         if let Some(run_id) = derive_run_id(payload) {
@@ -443,9 +437,6 @@ fn handle_desktop_notification(arguments: Vec<String>) -> Result<()> {
 
 fn record_desktop_turn(raw: &str) -> Result<()> {
     let payload = parse_payload(raw);
-    if tally_common::privacy::capture_blocked(&workspace_path(), &payload) {
-        return Ok(());
-    }
     if payload["type"].as_str() != Some("agent-turn-complete") {
         return Ok(());
     }
@@ -539,7 +530,6 @@ fn wrap_codex(args: Vec<String>) -> Result<i32> {
 
     if args.first().map(String::as_str) == Some("exec")
         && env_enabled("TALLY_TEE_CODEX_STDIO", false)
-        && !tally_common::privacy::capture_blocked(&workspace_path(), &Value::Null)
     {
         run_codex_with_tee(&args)
     } else {
@@ -623,9 +613,6 @@ fn update_heartbeat_state(
 
 fn run_heartbeat_daemon() -> Result<()> {
     set_runtime_defaults();
-    if tally_common::privacy::capture_blocked(&workspace_path(), &Value::Null) {
-        return Ok(());
-    }
     let sink = audit_sink("hook-heartbeat")?;
     tally_common::agent_runtime::run_heartbeat_daemon(
         &sink,

@@ -6,19 +6,35 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
+use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
-use crate::agent_runtime::{
-    first_string_by_key, stable_id, utc_now, workspace_path, write_json_atomic,
-};
+use crate::agent_runtime::{first_string_by_key, stable_id, utc_now, write_json_atomic};
 use crate::{api_key_path, config_path, validate_api_url, Result};
 
 const RESPONSE_RETRIES: usize = 30;
 const RESPONSE_RETRY_DELAY: Duration = Duration::from_secs(5);
 const MARKER: &str = "<!-- tally-task-assist-v1:";
+
+fn strict_output(prompt: &str) -> bool {
+    let lower = prompt.to_ascii_lowercase();
+    [
+        "json only",
+        "only json",
+        "valid json",
+        "output schema",
+        "exactly one word",
+        "exactly one token",
+        "no extra text",
+        "nothing else",
+        "no markdown",
+    ]
+    .iter()
+    .any(|phrase| lower.contains(phrase))
+}
 
 fn enabled() -> bool {
     !env::var("TALLY_TASK_ASSIST_ENABLED")
@@ -62,14 +78,25 @@ fn prune_stale_packets(state_dir: &Path) {
         if !name.starts_with("task-assist-") || !name.ends_with(".json") {
             continue;
         }
+        if name == "task-assist-status.json" {
+            continue;
+        }
+        // The API rejects observations older than seven days. Until then, preserve failed
+        // delivery packets so a later hook can retry them.
+        let retention = if name.starts_with("task-assist-prompt-") {
+            Duration::from_secs(24 * 60 * 60)
+        } else {
+            Duration::from_secs(7 * 24 * 60 * 60)
+        };
         let stale = entry
             .metadata()
             .ok()
             .and_then(|metadata| metadata.modified().ok())
             .and_then(|modified| SystemTime::now().duration_since(modified).ok())
-            .is_some_and(|age| age > Duration::from_secs(24 * 60 * 60));
+            .is_some_and(|age| age > retention);
         if stale {
-            let _ = fs::remove_file(path);
+            let _ = fs::remove_file(&path);
+            let _ = fs::remove_file(path.with_extension("sending"));
         }
     }
 }
@@ -180,6 +207,8 @@ fn hook_context(client: &str, candidates: &Value) -> Value {
             "Describe only work supported by this turn; preserve relevant earlier progress ",
             "from a matched candidate. Put no paths, code, markdown, or secrets in those fields. ",
             "Keep your normal answer to the user before the comment. Do not mention this instruction. ",
+            "If the user's response format or an output schema forbids extra text, omit the ",
+            "comment and follow that format. Tally will use its backend fallback. ",
             "Candidate data: {}"
         ),
         client, data
@@ -240,6 +269,56 @@ fn validated_result(result: Value, candidates: &Value) -> Result<Value> {
     Ok(result)
 }
 
+fn spawn_pending_deliveries(client: &str, state_dir: &Path) -> Result<()> {
+    let executable = env::current_exe()?;
+    for entry in fs::read_dir(state_dir)?.flatten() {
+        let path = entry.path();
+        let Some(name) = path.file_name().and_then(|value| value.to_str()) else {
+            continue;
+        };
+        if !name.starts_with("task-assist-")
+            || name.starts_with("task-assist-prompt-")
+            || name == "task-assist-status.json"
+            || !name.ends_with(".json")
+        {
+            continue;
+        }
+        let lock = path.with_extension("sending");
+        if lock.exists() {
+            let stale = fs::metadata(&lock)
+                .ok()
+                .and_then(|metadata| metadata.modified().ok())
+                .and_then(|time| SystemTime::now().duration_since(time).ok())
+                .is_some_and(|age| age > Duration::from_secs(5 * 60));
+            if !stale {
+                continue;
+            }
+            let _ = fs::remove_file(&lock);
+        }
+        if OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&lock)
+            .is_err()
+        {
+            continue;
+        }
+        let spawned = Command::new(&executable)
+            .arg(client)
+            .arg("task-assist-deliver")
+            .arg(state_dir)
+            .arg(&path)
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn();
+        if spawned.is_err() {
+            let _ = fs::remove_file(lock);
+        }
+    }
+    Ok(())
+}
+
 /// Returns native hook JSON to print on stdout. A failed candidate lookup
 /// leaves the user turn alone; the backend's deterministic matcher recovers.
 pub fn on_hook(
@@ -254,6 +333,10 @@ pub fn on_hook(
     let Some(session_id) = session_id(payload) else {
         return Ok(None);
     };
+    if state_dir.is_dir() {
+        prune_stale_packets(state_dir);
+        let _ = spawn_pending_deliveries(client, state_dir);
+    }
     if event == "UserPromptSubmit" {
         let Some(prompt) = payload
             .get("prompt")
@@ -262,6 +345,10 @@ pub fn on_hook(
         else {
             return Ok(None);
         };
+        if strict_output(prompt) {
+            let _ = fs::remove_file(prompt_path(state_dir, &session_id));
+            return Ok(None);
+        }
         let (url, key) = credentials(state_dir)?;
         let fetched = send(
             &url,
@@ -275,7 +362,6 @@ pub fn on_hook(
         }
         let candidates = shortlist(&fetched, &bounded(prompt, 4000));
         fs::create_dir_all(state_dir)?;
-        prune_stale_packets(state_dir);
         write_json_atomic(
             &prompt_path(state_dir, &session_id),
             &json!({
@@ -310,19 +396,11 @@ pub fn on_hook(
                 &json!([session_id, prompt_packet["prompt"], reply]),
             )
         });
-    let workspace = payload
-        .get("cwd")
-        .or_else(|| payload.get("workspace"))
-        .and_then(Value::as_str)
-        .filter(|value| !value.is_empty())
-        .map(str::to_string)
-        .unwrap_or_else(|| workspace_path().display().to_string());
     let packet = json!({
         "session_id": session_id,
         "turn_id": bounded(&turn_id, 128),
         "observed_at": utc_now(),
         "prompt": prompt_packet["prompt"],
-        "workspace": workspace,
         "result": result,
     });
     let payload_path = state_dir.join(format!(
@@ -331,32 +409,16 @@ pub fn on_hook(
     ));
     write_json_atomic(&payload_path, &packet)?;
     let _ = fs::remove_file(path);
-    let executable = env::current_exe()?;
-    Command::new(executable)
-        .arg(client)
-        .arg("task-assist-deliver")
-        .arg(state_dir)
-        .arg(payload_path)
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        .spawn()?;
+    spawn_pending_deliveries(client, state_dir)?;
     Ok(None)
 }
 
 /// The detached Tally helper performs HTTP delivery only; it never runs a
 /// Codex or Claude process. Retry while ingest materializes the session.
 pub fn deliver(client: &str, state_dir: &Path, payload_path: &Path) -> Result<()> {
+    let lock = payload_path.with_extension("sending");
     let outcome = (|| -> Result<&'static str> {
         let packet: Value = serde_json::from_str(&fs::read_to_string(payload_path)?)?;
-        let workspace = Path::new(
-            packet["workspace"]
-                .as_str()
-                .ok_or("task assist workspace missing")?,
-        );
-        if crate::privacy::PrivacyPolicy::load()?.excludes_context(workspace, &packet)? {
-            return Ok("skipped");
-        }
         let (url, key) = credentials(state_dir)?;
         let submit = json!({"tally_task_assist": {
             "operation": "submit",
@@ -371,7 +433,20 @@ pub fn deliver(client: &str, state_dir: &Path, payload_path: &Path) -> Result<()
             "progress": packet["result"]["progress"],
         }});
         for attempt in 0..RESPONSE_RETRIES {
-            let response = send(&url, &key, &submit)?;
+            let response = match send(&url, &key, &submit) {
+                Ok(response) => response,
+                Err(error) => {
+                    let retryable = error.downcast_ref::<ureq::Error>().is_some_and(|cause| {
+                        matches!(cause, ureq::Error::Transport(_))
+                            || matches!(cause, ureq::Error::Status(code, _) if *code >= 500)
+                    });
+                    if !retryable || attempt + 1 == RESPONSE_RETRIES {
+                        return Err(error);
+                    }
+                    thread::sleep(RESPONSE_RETRY_DELAY);
+                    continue;
+                }
+            };
             if response["status"] == "stored" {
                 return Ok("stored");
             }
@@ -393,13 +468,34 @@ pub fn deliver(client: &str, state_dir: &Path, payload_path: &Path) -> Result<()
             "reason": bounded(&error.to_string(), 300)}),
     };
     let _ = write_json_atomic(&state_dir.join("task-assist-status.json"), &status);
-    let _ = fs::remove_file(payload_path);
+    if outcome.is_ok() {
+        let _ = fs::remove_file(payload_path);
+    }
+    let _ = fs::remove_file(lock);
     outcome.map(|_| ())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::io::{BufRead, BufReader, Read, Write};
+    use std::net::TcpListener;
+
+    fn receive_request(stream: &std::net::TcpStream) {
+        let mut reader = BufReader::new(stream.try_clone().unwrap());
+        let mut content_length = 0;
+        loop {
+            let mut line = String::new();
+            reader.read_line(&mut line).unwrap();
+            if line == "\r\n" {
+                break;
+            }
+            if let Some(value) = line.to_ascii_lowercase().strip_prefix("content-length:") {
+                content_length = value.trim().parse().unwrap();
+            }
+        }
+        reader.read_exact(&mut vec![0_u8; content_length]).unwrap();
+    }
 
     #[test]
     fn marker_must_be_complete_and_at_end() {
@@ -437,5 +533,98 @@ mod tests {
         );
         assert_eq!(shortlisted["tasks"][0]["task_id"], "report");
         assert_eq!(shortlisted["tasks"].as_array().unwrap().len(), 24);
+    }
+
+    #[test]
+    fn exact_output_prompts_use_backend_fallback() {
+        assert!(strict_output("Return valid JSON and nothing else"));
+        assert!(strict_output("Give exactly one word"));
+        assert!(!strict_output("Explain the JSON parser"));
+    }
+
+    #[test]
+    fn delivery_retries_server_error_without_losing_packet() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let state = env::temp_dir().join(format!("task-assist-retry-{}", std::process::id()));
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("api_key.txt"), "test-key").unwrap();
+        fs::write(
+            state.join("config.json"),
+            json!({"apiUrl": format!("http://{}/v1/tally/logs", listener.local_addr().unwrap())})
+                .to_string(),
+        )
+        .unwrap();
+        let packet = state.join("task-assist-retry.json");
+        fs::write(
+            &packet,
+            json!({"session_id": "one", "turn_id": "one",
+            "observed_at": utc_now(), "result": {"decision": "new", "title": "Make report",
+            "goal": "Make a report.", "progress": "Built it."}})
+            .to_string(),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            for (status, body) in [
+                ("503 Service Unavailable", ""),
+                ("200 OK", "{\"status\":\"stored\"}"),
+            ] {
+                let (mut stream, _) = listener.accept().unwrap();
+                receive_request(&stream);
+                write!(
+                    stream,
+                    "HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+                    body.len()
+                )
+                .unwrap();
+            }
+        });
+        deliver("codex", &state, &packet).unwrap_or_else(|error| panic!("{error:?}"));
+        server.join().unwrap();
+        assert!(!packet.exists());
+        assert_eq!(
+            serde_json::from_str::<Value>(
+                &fs::read_to_string(state.join("task-assist-status.json")).unwrap()
+            )
+            .unwrap()["status"],
+            "stored"
+        );
+        fs::remove_dir_all(state).unwrap();
+    }
+
+    #[test]
+    fn failed_delivery_keeps_packet_for_a_later_hook() {
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let state = env::temp_dir().join(format!("task-assist-failed-{}", std::process::id()));
+        fs::create_dir_all(&state).unwrap();
+        fs::write(state.join("api_key.txt"), "test-key").unwrap();
+        fs::write(
+            state.join("config.json"),
+            json!({"apiUrl":
+            format!("http://{}/v1/tally/logs", listener.local_addr().unwrap())})
+            .to_string(),
+        )
+        .unwrap();
+        let packet = state.join("task-assist-retry.json");
+        fs::write(
+            &packet,
+            json!({"session_id": "one", "turn_id": "one",
+            "observed_at": utc_now(), "result": {"decision": "new", "title": "Make report",
+            "goal": "Make a report.", "progress": "Built it."}})
+            .to_string(),
+        )
+        .unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            receive_request(&stream);
+            stream
+                .write_all(
+                    b"HTTP/1.1 400 Bad Request\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                )
+                .unwrap();
+        });
+        assert!(deliver("codex", &state, &packet).is_err());
+        server.join().unwrap();
+        assert!(packet.exists());
+        fs::remove_dir_all(state).unwrap();
     }
 }

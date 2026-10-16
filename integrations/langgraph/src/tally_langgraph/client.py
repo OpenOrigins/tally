@@ -14,7 +14,6 @@ from typing import Any
 from . import records
 from .config import TallyConfig
 from .journal import Journal, OutboxItem
-from .privacy import capture_blocked, delivery_blocked
 from .transport import DeliveryResult, HttpTransport, Transport
 
 logger = logging.getLogger("tally_langgraph")
@@ -96,11 +95,7 @@ class TallyClient:
         activate_session_id: str | None = None,
         deactivate_session_id: str | None = None,
     ) -> int:
-        if capture_blocked():
-            return 0
         record = {**record, "workspace": str(Path.cwd())}
-        if delivery_blocked(record):
-            return 0
         with self._state_lock:
             if self._closed:
                 raise RuntimeError("TallyClient is closed")
@@ -116,8 +111,6 @@ class TallyClient:
         return sequence
 
     def start_session(self, session_id: str, *, source: str) -> None:
-        if capture_blocked():
-            return
         record, evidence = records.session_start(
             session_id=session_id,
             agent_id=self.agent_id,
@@ -275,9 +268,6 @@ class TallyClient:
         item = self.journal.claim(lease_seconds=self.config.claim_lease_seconds)
         if item is None:
             return False
-        if capture_blocked() or delivery_blocked(item.record):
-            self.journal.mark_dead_letter(item, detail="workspace excluded by local privacy policy")
-            return True
         try:
             result = self.transport.deliver(item.record_id, item.record)
         except Exception as error:
@@ -325,7 +315,7 @@ class TallyClient:
             self._wake.clear()
 
     def _maybe_emit_heartbeat(self, *, now: float | None = None) -> bool:
-        if not self.config.heartbeat_enabled or capture_blocked():
+        if not self.config.heartbeat_enabled:
             return False
 
         def heartbeat_record(sessions: list[str]) -> tuple[dict[str, Any], records.Evidence]:
