@@ -1,9 +1,9 @@
 cask "tally" do
   arch arm: "arm64", intel: "x86_64"
 
-  version "0.1.15"
-  sha256 arm:   "d4e2f34ae6d9c5f4032d7baf49220277e617e52043838d4b7c85cc9b4c41df40",
-         intel: "70fc4db9a7731d8a5189553564bdcb265ea3d485cf86850225137f4f2cc739b9"
+  version "0.1.16"
+  sha256 arm:   "ed2de166d14e31c6a8aa1f0a5d8e911c449a76a172ae5f6ba8566daf9c244e77",
+         intel: "3e1e63d6a143749550ed253cc8ae9e48bfaf36b281872cfb529aadcefca6fc5f"
 
   url "https://github.com/OpenOrigins/tally/releases/download/v#{version}/tally-macos-#{arch}.dmg"
   name "Tally"
