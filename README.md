@@ -128,8 +128,8 @@ hook output, validation, and fallback behavior.
 
 ## Compatibility
 
-Tally is tested with Codex CLI/Desktop 0.149.1 and Claude Code 2.1.223. It is
-expected to remain compatible with Codex versions that support lifecycle hooks
+Tally 0.1.16 is tested with Codex CLI/Desktop 0.149.1 and Claude Code 2.1.223.
+It is expected to remain compatible with Codex versions that support lifecycle hooks
 in `config.toml` and the `notify` callback, Claude Code versions that support
 command hooks, and Cursor versions that support the hooks documented at
 [cursor.com/docs/agent/hooks](https://cursor.com/docs/agent/hooks).
@@ -147,11 +147,11 @@ standard callback interface. Its guide includes installation instructions,
 copy-paste examples, explicit handoff events, failure behavior, and local data
 management.
 
-Download `tally_langgraph-0.1.1-py3-none-any.whl` from the
+Download `tally_langgraph-0.1.2-py3-none-any.whl` from the
 [latest release](https://github.com/OpenOrigins/tally/releases/latest), then run:
 
 ```sh
-python -m pip install ~/Downloads/tally_langgraph-0.1.1-py3-none-any.whl
+python -m pip install ~/Downloads/tally_langgraph-0.1.2-py3-none-any.whl
 ```
 
 The universal wheel supports Python 3.10 through 3.14. See the
