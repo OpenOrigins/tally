@@ -530,10 +530,14 @@ pub fn install_executable(source: &Path, destination: &Path) -> Result<()> {
     if destination.exists() && fs::canonicalize(source).ok() == fs::canonicalize(destination).ok() {
         return Ok(());
     }
+    let contents = fs::read(source)?;
+    if fs::read(destination).ok().as_deref() == Some(contents.as_slice()) {
+        return Ok(());
+    }
     if let Some(parent) = destination.parent() {
         create_private_dir(parent)?;
     }
-    atomic_write(destination, &fs::read(source)?, 0o755)?;
+    atomic_write(destination, &contents, 0o755)?;
     if verify_signature {
         verify_macos_code_signature(destination)?;
     }
@@ -1870,9 +1874,9 @@ mod tests {
     use super::spawn_background;
     use super::{
         atomic_write, claim_agent_heartbeat, commit_agent_heartbeat, executable_is_in_app_bundle,
-        forward_pending, heartbeat_interval_seconds, install_options, mark_tally_data_directory,
-        prune_local_storage, record_agent_activity, remove_tally_data, resolve_private_uri,
-        response_body_error, restore_snapshots, FileSnapshot, DEFAULT_API_URL,
+        forward_pending, heartbeat_interval_seconds, install_executable, install_options,
+        mark_tally_data_directory, prune_local_storage, record_agent_activity, remove_tally_data,
+        resolve_private_uri, response_body_error, restore_snapshots, FileSnapshot, DEFAULT_API_URL,
         DEFAULT_HEARTBEAT_INTERVAL_SECONDS, DEFAULT_PRIVATE_RETENTION_DAYS,
         DEFAULT_PRIVATE_STORAGE_LIMIT_MIB,
     };
@@ -1911,6 +1915,27 @@ mod tests {
                 0o600
             );
         }
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn reinstalling_identical_executable_preserves_existing_file() {
+        let directory = test_directory("executable-reinstall");
+        fs::create_dir_all(&directory).unwrap();
+        let source = directory.join("source.bin");
+        let destination = directory.join("installed.bin");
+        fs::write(&source, b"same executable").unwrap();
+        fs::write(&destination, b"same executable").unwrap();
+        let original_permissions = fs::metadata(&destination).unwrap().permissions();
+        let mut permissions = original_permissions.clone();
+        permissions.set_readonly(true);
+        fs::set_permissions(&destination, permissions).unwrap();
+
+        install_executable(&source, &destination).unwrap();
+
+        assert!(fs::metadata(&destination).unwrap().permissions().readonly());
+        assert_eq!(fs::read(&destination).unwrap(), b"same executable");
+        fs::set_permissions(&destination, original_permissions).unwrap();
         fs::remove_dir_all(directory).unwrap();
     }
 
